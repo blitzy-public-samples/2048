@@ -114,7 +114,7 @@ export const CONTINUE_CONTROL_SELECTOR = `.${CONTINUE_CONTROL_CLASS}`;
 /** The classes of style/_screens.scss this module renders with. */
 const SCREEN_CLASSES = Object.freeze({
   /**
-   * ADDED: the bounded reading surface, the class `@mixin screen-panel-surface`
+   * The bounded reading surface, the class `@mixin screen-panel-surface`
    * of style/_screens.scss dresses. It carries the opaque background and the
    * dark text colour, which is what every sibling screen appends its content
    * inside — ../screens/run-start.ts and ../screens/game-over.ts both render
@@ -803,8 +803,8 @@ interface FactNodes {
  * order the container lays them out, so `leave` and `unmount` take away
  * exactly what `mount` created and nothing the container held already.
  *
- * CHANGED: `all` is the panel alone, and the five content nodes are its
- * children rather than the container's. DL-STAGECLEAR-06.
+ * `all` is the panel alone, and the five content nodes are its children rather
+ * than the container's. DL-STAGECLEAR-06.
  */
 interface StageProgressNodes {
   /** The bounded reading surface every content node sits on. */
@@ -948,7 +948,7 @@ export function createStageProgressScreen(
    * @returns Every node this module owns.
    */
   const buildNodes = (doc: Document): StageProgressNodes => {
-    // ADDED: the surface, built first and appended last, so the five content
+    // The surface, built first and appended last, so the five content
     // nodes below are laid out on it rather than on the container's tint.
     // DL-STAGECLEAR-06.
     const panel = doc.createElement('div');

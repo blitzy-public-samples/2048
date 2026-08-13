@@ -414,6 +414,10 @@ describe('the engine is the authoritative spawn-attempt boundary', () => {
 
       subscribers: (): readonly HookSubscriber[] => inner.subscribers(),
       metrics: (): HookBusMetrics => inner.metrics(),
+
+      // The run-boundary partition, delegated like every other member.
+      // DL-HOOKBUS-12.
+      resetMetrics: (): boolean => inner.resetMetrics(),
     };
   }
 

@@ -84,6 +84,9 @@
 //   DL-SUMMARY-16  the copy control's busy mark released unconditionally
 //   DL-SUMMARY-17  the clipboard rejection carried on the failure channel, with
 //                  its class rather than its text in the field beside it
+//   DL-SUMMARY-18  a delayed copy outcome attributed to the scope the attempt
+//                  opened under, and its per-run counter withheld after a
+//                  rotation
 //   DL-A11Y-06     the seed value's monospace treatment
 //   DL-A11Y-07     the copy confirmation delivered as text
 
@@ -104,7 +107,11 @@ import type {
 import { fieldWidth, paragraphLineHeight, zIndex } from '../../theme/tokens';
 import { focusInitial } from '../a11y/focus-manager';
 import type { LiveRegionAnnouncer } from '../a11y/live-region';
-import type { PreferenceStore, UiReporter } from '../a11y/settings';
+import type {
+  PreferenceStore,
+  UiReportFields,
+  UiReporter,
+} from '../a11y/settings';
 import {
   NOOP_UI_REPORTER,
   createSafeUiReporter,
@@ -248,6 +255,23 @@ const SEED_MISSING_METRIC = 'ui.runSummary.seed_missing';
 
 /** Counter raised per copy attempt, carrying the outcome and the path. */
 const COPY_METRIC = 'ui.runSummary.seed_copy';
+
+/**
+ * The outcomes `COPY_METRIC` is raised under, named rather than spelt at
+ * each call site so the drift-aware counter below accepts nothing else.
+ * DL-SUMMARY-18.
+ */
+type CopyOutcome = 'unavailable' | 'refused' | 'stale' | 'copied' | 'failed';
+
+/** The paths a copy outcome is reached by. DL-SUMMARY-18. */
+type CopyPath = 'none' | 'in-flight' | 'clipboard' | 'selection';
+
+/**
+ * The record a delayed outcome is filed under where its own per-run
+ * counter is withheld, so the outcome is still readable. DL-SUMMARY-18.
+ */
+const COPY_AFTER_ROTATION_MESSAGE =
+  'a seed copy resolved after its run scope rotated';
 
 /** Counter raised per relic identifier the catalogue does not carry. */
 const RELIC_UNKNOWN_METRIC = 'ui.runSummary.relic_unknown';
@@ -1432,11 +1456,10 @@ export function createRunSummaryScreen(
   const setCopyState = (next: RunSummaryCopyState): void => {
     copyState = next;
 
-    // ADDED: the published snapshot carries this member, and it was frozen at
-    // `render()` and never revised — so `snapshot().copyState` read `'idle'`
-    // while the panel's own attribute and the status line both said `'copied'`
-    // or `'failed'`. Anything reading the snapshot rather than the DOM was told
-    // the copy had not happened. DL-SUMMARY-15.
+    // The published snapshot is revised here as well as at `render()`, so
+    // `snapshot().copyState` agrees with the panel's own attribute and with the
+    // status line rather than standing at `'idle'` for a reader that consults
+    // the snapshot instead of the DOM. DL-SUMMARY-15.
     if (snapshot !== null) {
       snapshot = Object.freeze({ ...snapshot, copyState: next });
     }
@@ -1598,6 +1621,92 @@ export function createRunSummaryScreen(
   };
 
   /**
+   * Reads the correlation scope this screen's reports are filed under.
+   *
+   * Read THROUGH the sink rather than from a construct of this screen's own: no
+   * module under src/ui/ can reach the observability layer, so the scope arrives
+   * the same way every other report does. An absent, raising or non-string
+   * reader answers with the empty string, which `rotated()` treats as "not
+   * knowable" and therefore never as a rotation. DL-SUMMARY-18.
+   *
+   * @returns The scope identifier, or the empty string.
+   */
+  const readScope = (): string => reporter.scope?.() ?? '';
+
+  /**
+   * Whether the sink has rotated away from the scope an operation opened
+   * under.
+   *
+   * An empty reading is "not knowable" and never a rotation, so a sink that
+   * carries no scope reader leaves every report exactly as it was.
+   * DL-SUMMARY-18.
+   *
+   * @param opened Scope the operation opened under.
+   * @returns Whether the sink is now filing under a different one.
+   */
+  const driftedFrom = (opened: string): boolean =>
+    opened !== '' && readScope() !== opened;
+
+  /**
+   * Names the scope a delayed report BELONGS to, where the sink is no
+   * longer filing under it.
+   *
+   * Two fields rather than one: the identifier alone would read as ordinary
+   * provenance, and the flag beside it says the report's own `correlationId` is
+   * not the run it describes — which is the reading a consumer has to make.
+   * Empty where nothing rotated, so an ordinary report carries no extra field.
+   * DL-SUMMARY-18.
+   *
+   * @param opened Scope the attempt opened under.
+   * @param drifted Whether the sink has since rotated away from it.
+   * @returns Fields to spread beside a report's own.
+   */
+  const originFields = (opened: string, drifted: boolean): UiReportFields =>
+    drifted
+      ? { originCorrelationId: opened, scopeRotated: true }
+      : ({} as UiReportFields);
+
+  /**
+   * Counts one copy outcome, unless the scope rotated since the attempt
+   * opened.
+   *
+   * A counter is raised in whatever scope the registry is keyed to NOW, so an
+   * outcome that resolved after a rotation would be counted against the run now
+   * in force — a run that never touched the clipboard. The count is therefore
+   * withheld and the outcome filed as a record instead, where the field naming
+   * its origin can travel with it. Nothing is discarded: what changes is which
+   * surface carries it. DL-SUMMARY-18.
+   *
+   * @param outcome Outcome reached.
+   * @param path Path it was reached by.
+   * @param opened Scope the attempt opened under.
+   * @param drifted Whether the sink has since rotated away from it.
+   */
+  const countCopyOutcome = (
+    outcome: CopyOutcome,
+    path: CopyPath,
+    opened: string,
+    drifted: boolean,
+  ): void => {
+    if (drifted) {
+      reporter.log('debug', COPY_AFTER_ROTATION_MESSAGE, {
+        context: REPORT_CONTEXT,
+        outcome,
+        path,
+        ...originFields(opened, true),
+      });
+
+      return;
+    }
+
+    reporter.count(COPY_METRIC, {
+      context: REPORT_CONTEXT,
+      outcome,
+      path,
+    });
+  };
+
+  /**
    * Copies the seed on screen. Never rejects, never throws, and never reads
    * the clipboard, rewrites the address bar or issues a request.
    *
@@ -1647,6 +1756,16 @@ export function createRunSummaryScreen(
     const generation = copyGeneration;
     const stale = (): boolean => destroyed || generation !== copyGeneration;
 
+    // THE SCOPE TOKEN, read at the same moment and for the same reason.
+    // The generation says whether this visit is still on screen; it says nothing
+    // about which run the reporting surfaces are keyed to, and beginning a run
+    // rotates that. A report filed after the rotation described THIS run while
+    // carrying the identifier of the one now in force, so the reports below
+    // compare against this reading and name the scope they opened under.
+    // DL-SUMMARY-18.
+    const openedUnder = readScope();
+    const rotated = (): boolean => driftedFrom(openedUnder);
+
     copyInFlight = true;
     setCopyState('copying');
     setCopyControlBusy(true);
@@ -1658,23 +1777,19 @@ export function createRunSummaryScreen(
         try {
           await clipboard.writeText(seed);
 
+          // Every outcome from here down is a DELAYED one — the
+          // clipboard has already answered — so each is counted through
+          // `countCopyOutcome`, which withholds a per-run counter that would
+          // land in a run this attempt never belonged to. DL-SUMMARY-18.
           if (stale()) {
-            reporter.count(COPY_METRIC, {
-              context: REPORT_CONTEXT,
-              outcome: 'stale',
-              path: 'clipboard',
-            });
+            countCopyOutcome('stale', 'clipboard', openedUnder, rotated());
 
             return false;
           }
 
           setCopyState('copied');
           announce(copy.copySucceeded);
-          reporter.count(COPY_METRIC, {
-            context: REPORT_CONTEXT,
-            outcome: 'copied',
-            path: 'clipboard',
-          });
+          countCopyOutcome('copied', 'clipboard', openedUnder, rotated());
 
           return true;
         } catch (error) {
@@ -1688,7 +1803,7 @@ export function createRunSummaryScreen(
           // feature had already survived. The tier-2 failure below is where the
           // error severity belongs. DL-SUMMARY-14.
           //
-          // CHANGED: the rejection travels through the FAILURE CHANNEL as the
+          // The rejection travels through the FAILURE CHANNEL as the
           // value it is, and the field beside it carries the rejection's CLASS
           // rather than its text. The field used to carry
           // `Error.name: Error.message`, or `String(value)` for a non-`Error`
@@ -1699,17 +1814,30 @@ export function createRunSummaryScreen(
           // value itself to the observability layer's failure path, where
           // redaction and the record budget apply to it, and the severity is
           // still this caller's own. DL-SUMMARY-15.
-          reporter.failure?.('warn', 'the clipboard refused the seed', error, {
-            context: REPORT_CONTEXT,
-            reason: nameThrown(error),
-          });
+          //
+          // The attempt's STANDING is decided before the refusal is
+          // reported, and the report carries the scope the attempt opened
+          // under. The refusal was filed first, so a rejection that arrived
+          // after the player had begun another run was written under the new
+          // run's correlation identifier while describing the previous run's
+          // clipboard — the one reading nobody can correct afterwards. The
+          // severity drops to `debug` for an attempt already abandoned, because
+          // no player is waiting on its outcome. DL-SUMMARY-18.
+          const abandoned = stale();
 
-          if (stale()) {
-            reporter.count(COPY_METRIC, {
+          reporter.failure?.(
+            abandoned ? 'debug' : 'warn',
+            'the clipboard refused the seed',
+            error,
+            {
               context: REPORT_CONTEXT,
-              outcome: 'stale',
-              path: 'clipboard',
-            });
+              reason: nameThrown(error),
+              ...originFields(openedUnder, rotated()),
+            },
+          );
+
+          if (abandoned) {
+            countCopyOutcome('stale', 'clipboard', openedUnder, rotated());
 
             return false;
           }
@@ -1721,11 +1849,7 @@ export function createRunSummaryScreen(
       if (selected && copySelection()) {
         setCopyState('copied');
         announce(copy.copySucceeded);
-        reporter.count(COPY_METRIC, {
-          context: REPORT_CONTEXT,
-          outcome: 'copied',
-          path: 'selection',
-        });
+        countCopyOutcome('copied', 'selection', openedUnder, rotated());
 
         return true;
       }
@@ -1735,46 +1859,57 @@ export function createRunSummaryScreen(
       setCopyState('failed');
       announce(copy.copyFailed);
 
-      // ADDED: the error severity, moved here from the clipboard refusal above.
-      // BOTH tiers have now failed, so the seed genuinely did not reach the
-      // player — which is the outcome that warrants it. DL-SUMMARY-14.
+      // The error severity belongs here rather than at the clipboard refusal
+      // above: BOTH tiers have failed, so the seed genuinely did not reach the
+      // player. DL-SUMMARY-14.
       reporter.log(
         'error',
         'the seed reached neither the clipboard nor a selection',
         {
           context: REPORT_CONTEXT,
           selected,
+
+          // The scope this attempt opened under, where the sink is no
+          // longer filing under it. DL-SUMMARY-18.
+          ...originFields(openedUnder, rotated()),
         },
       );
-      reporter.count(COPY_METRIC, {
-        context: REPORT_CONTEXT,
-        outcome: 'failed',
-        path: selected ? 'selection' : 'none',
-      });
+      countCopyOutcome(
+        'failed',
+        selected ? 'selection' : 'none',
+        openedUnder,
+        rotated(),
+      );
 
       return false;
     } finally {
       copyInFlight = false;
 
-      // CHANGED: the busy mark comes off ALWAYS. It came off only for the visit
-      // that made the attempt, so a seed updated — or the screen left or
-      // destroyed — while a write was in flight left `aria-disabled` on the
-      // control for the rest of the page's life: assistive technology read the
-      // one control on this screen as permanently unavailable, and no later
-      // press could clear it because `copyInFlight` was already false.
-      // Releasing unconditionally is safe precisely because `copyInFlight`
-      // serialises attempts: there is never a second in-flight write whose
-      // busy mark this could be taking off. DL-SUMMARY-16.
+      // The busy mark comes off ALWAYS, not only for the visit that made the
+      // attempt, so a seed updated — or the screen left or destroyed — while a
+      // write is in flight cannot leave `aria-disabled` on the control for the
+      // rest of the page's life. Releasing unconditionally is safe precisely
+      // because `copyInFlight` serialises attempts: there is never a second
+      // in-flight write whose busy mark this could be taking off.
+      // DL-SUMMARY-16.
       setCopyControlBusy(false);
     }
   };
 
   /** Activates the copy control. Reports every failure, and throws never. */
   const onCopyActivate = (): void => {
+    // The scope this activation opened under. The rejection handler below
+    // is the screen's OTHER delayed report — `copySeed` resolves rather than
+    // rejects, so it is reached only if the copy path itself breaks — and a
+    // delayed report is attributed to the scope in force when it is FILED unless
+    // it carries the one it belongs to. DL-SUMMARY-18.
+    const openedUnder = readScope();
+
     try {
       void copySeed().catch((error: unknown): void => {
         reporter.error('the seed copy path raised', error, {
           context: REPORT_CONTEXT,
+          ...originFields(openedUnder, driftedFrom(openedUnder)),
         });
       });
     } catch (error) {

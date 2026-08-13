@@ -703,7 +703,7 @@ describe('a run played through the production reward path', () => {
         record.cards.map((card): string => card.id).join(','),
       );
 
-    // CHANGED: this compared `renderProductionRun` of each run — the WHOLE
+    // This compared `renderProductionRun` of each run — the WHOLE
     // rendered run, including the board, the score and the spawn positions,
     // every one of which differs between two seeds for reasons that have
     // nothing to do with the draw. The assertion therefore held even where both

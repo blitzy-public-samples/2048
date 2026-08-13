@@ -76,10 +76,24 @@ interface Sink extends UiReporter {
 
   /** Every report filed through the level-preserving failure channel. */
   failures(): Report[];
+
+  /**
+   * Rotates the correlation scope this sink files under, which is what
+   * the composition does when a run begins. A screen that awaits can be
+   * answered on the far side of one. DL-SUMMARY-18.
+   */
+  rotateScope(next: string): void;
 }
+
+/** The scope a sink opens under, non-empty so a rotation away from it reads. */
+const SCOPE_RUN_ONE = 'scope-run-one';
+
+/** The scope a run begun mid-write rotates the sink to. */
+const SCOPE_RUN_TWO = 'scope-run-two';
 
 function sink(): Sink {
   const reports: Report[] = [];
+  let scope = SCOPE_RUN_ONE;
 
   return {
     reports,
@@ -113,6 +127,15 @@ function sink(): Sink {
     },
     failures(): Report[] {
       return reports.filter((entry) => entry.kind === 'failure');
+    },
+
+    // ADDED with `UiReporter.scope`: what the screen reads when a copy opens and
+    // again when it is answered. DL-SUMMARY-18.
+    scope(): string {
+      return scope;
+    },
+    rotateScope(next): void {
+      scope = next;
     },
   };
 }
@@ -425,8 +448,8 @@ describe('the rendered panel', () => {
     expect(control?.tagName).toBe('BUTTON');
     expect(control?.type).toBe('button');
 
-    // The bare `<a>` elements with no `href` of index.html L36-L40 are the
-    // defect this screen was written past: every control it renders is a button.
+    // Every control this screen renders is a button, not the hrefless `<a>` the
+    // retired markup declared.
     expect(harness.panel.querySelectorAll('a')).toHaveLength(0);
   });
 });
@@ -569,7 +592,7 @@ describe('copying the seed', () => {
 
     expect(written).toEqual(['  Player Seed  ']);
 
-    // CHANGED: the snapshot and the attribute AGREE. This asserted `'idle'`
+    // The snapshot and the attribute AGREE. This asserted `'idle'`
     // beside an attribute reading `'copied'`, which pinned the contradiction
     // rather than the contract: the published snapshot froze `copyState` at
     // render and was never revised. DL-SUMMARY-15.
@@ -668,10 +691,11 @@ describe('copying the seed', () => {
 
   it('releases the busy mark when the seed changes mid-write', async () => {
     // A write still in flight when the seed is replaced belongs to a visit that
-    // is over, and the busy mark used to come off only for the visit that made
-    // the attempt — so `aria-disabled` stayed on the one control on this screen
-    // for the rest of the page's life, and no later press could clear it
-    // because `copyInFlight` was already false. DL-SUMMARY-16.
+    // is over, and the busy mark comes off regardless of which visit made the
+    // attempt: released only for that visit, `aria-disabled` would stay on the
+    // one control on this screen for the rest of the page's life, with no later
+    // press able to clear it because `copyInFlight` is already false.
+    // DL-SUMMARY-16.
     const gate: { settle: (() => void) | null } = { settle: null };
     const harness = mounted({
       clipboard: {
@@ -792,10 +816,10 @@ describe('copying the seed', () => {
     // player. This test is the case that reaches both, so it is where the pair
     // is separated.
     //
-    // CHANGED: the refusal is filed through the FAILURE channel, and its field
-    // carries the rejection's class rather than its message. The field used to
-    // carry `permission denied` — arbitrary text from the rejection, in an
-    // ordinary field nothing redacts. DL-SUMMARY-15.
+    // The refusal is filed through the FAILURE channel, and its field carries
+    // the rejection's class rather than its message: a message such as
+    // `permission denied` is arbitrary text from the rejection, and an ordinary
+    // field is not redacted. DL-SUMMARY-15.
     const refusals = harness.reporter.failures().filter(
       (report) => report.name === 'warn:the clipboard refused the seed',
     );
@@ -882,6 +906,101 @@ describe('copying the seed', () => {
     } finally {
       delete (document as unknown as Record<string, unknown>).execCommand;
     }
+  });
+
+  it('attributes a copy answered after a new run to the run that made it', async () => {
+    // DL-SUMMARY-18. The lifecycle token guarded every DOM write and every
+    // announcement, and NO report: the refusal was filed before the token was
+    // read, so a rejection that arrived after the player had begun another run
+    // was written under the new run's correlation identifier while describing
+    // the previous run's clipboard. Nothing downstream can correct that reading.
+    const gate: { reject: ((error: Error) => void) | null } = { reject: null };
+    const harness = mounted({
+      clipboard: {
+        writeText: (): Promise<void> =>
+          new Promise<void>((_resolve, reject) => {
+            gate.reject = reject;
+          }),
+      },
+    });
+
+    const pending = harness.screen.copySeed();
+
+    // The player presses New Run while the write is outstanding: this screen is
+    // left, and the one scope every report is keyed to rotates with the run.
+    harness.screen.leave();
+    harness.reporter.rotateScope(SCOPE_RUN_TWO);
+
+    gate.reject?.(new Error('permission denied'));
+
+    await expect(pending).resolves.toBe(false);
+
+    // THE REFUSAL NAMES THE RUN THAT MADE IT, and says so as a fact about the
+    // report rather than leaving a reader to infer it from the timing.
+    const refusal = harness.reporter
+      .failures()
+      .find((report) => report.name.endsWith('the clipboard refused the seed'));
+
+    expect(refusal).toBeDefined();
+    expect(refusal?.fields?.originCorrelationId).toBe(SCOPE_RUN_ONE);
+    expect(refusal?.fields?.scopeRotated).toBe(true);
+
+    // Filed at `debug`, not `warn`: no player is waiting on the outcome of an
+    // attempt whose screen is gone.
+    expect(refusal?.name).toBe('debug:the clipboard refused the seed');
+
+    // AND NO PER-RUN COUNTER LANDS IN RUN TWO. The outcome is not lost — it is
+    // filed as a record carrying the scope it belongs to.
+    expect(harness.reporter.counts('ui.runSummary.seed_copy')).toEqual([]);
+
+    const filed = harness.reporter.reports.find(
+      (report) =>
+        report.name === 'debug:a seed copy resolved after its run scope rotated',
+    );
+
+    expect(filed?.fields?.outcome).toBe('stale');
+    expect(filed?.fields?.path).toBe('clipboard');
+    expect(filed?.fields?.originCorrelationId).toBe(SCOPE_RUN_ONE);
+    expect(filed?.fields?.scopeRotated).toBe(true);
+
+    // The panel is untouched by an answer for a visit already left, exactly as
+    // before: this changes which SURFACE carries the outcome, not the guard.
+    expect(harness.reporter.errors()).toEqual([]);
+  });
+
+  it('counts a stale copy normally where the scope did not rotate', async () => {
+    // THE CONTROL CASE for the suppression above. A visit left mid-write inside
+    // ONE run is still that run's attempt, so its outcome is counted where it
+    // always was and no origin field is attached. DL-SUMMARY-18.
+    const gate: { reject: ((error: Error) => void) | null } = { reject: null };
+    const harness = mounted({
+      clipboard: {
+        writeText: (): Promise<void> =>
+          new Promise<void>((_resolve, reject) => {
+            gate.reject = reject;
+          }),
+      },
+    });
+
+    const pending = harness.screen.copySeed();
+
+    harness.screen.leave();
+    gate.reject?.(new Error('permission denied'));
+
+    await expect(pending).resolves.toBe(false);
+
+    const counted = harness.reporter.counts('ui.runSummary.seed_copy');
+
+    expect(counted).toHaveLength(1);
+    expect(counted[0]?.fields?.outcome).toBe('stale');
+    expect(counted[0]?.fields?.path).toBe('clipboard');
+
+    const refusal = harness.reporter
+      .failures()
+      .find((report) => report.name.endsWith('the clipboard refused the seed'));
+
+    expect(refusal?.fields?.originCorrelationId).toBeUndefined();
+    expect(refusal?.fields?.scopeRotated).toBeUndefined();
   });
 
   it('says there is nothing to copy where no seed resolved', async () => {

@@ -171,12 +171,10 @@ export function createEngineAnnouncer(
       /**
        * Records one release AS IT IS TAKEN.
        *
-       * ADDED: the six were taken in one array literal, so a refusal from a
-       * later `on()` discarded the half-built array and left every listener
-       * before it attached to the emitter with no reference to it anywhere —
-       * the announcer went on announcing for a subscription it had reported it
-       * did not hold, unreachable by `destroy()` or the returned release.
-       * DL-ANNOUNCE-03.
+       * Each of the six is held as the emitter returns it rather than collected
+       * into one literal, so a refusal from a later `on()` leaves no listener
+       * attached without a reference to it and none unreachable by `destroy()`
+       * or the returned release. DL-ANNOUNCE-03.
        *
        * @param release The release the emitter returned.
        */
@@ -351,10 +349,9 @@ export function createEngineAnnouncer(
 
         released = true;
 
-        // CHANGED: every listener is released and every entry removed from
-        // the shared list whichever release refuses. The loop stopped at the
-        // first refusal, stranding the rest attached AND listed — so
-        // `destroy()` then called them a second time. DL-ANNOUNCE-03.
+        // Every listener is released and every entry removed from the shared
+        // list whichever release refuses, so no listener is left attached and
+        // listed for `destroy()` to call a second time. DL-ANNOUNCE-03.
         releaseBound();
       };
     },

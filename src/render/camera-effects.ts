@@ -44,8 +44,8 @@ import { Vector3 } from 'three';
 
 import { rampExponent, tileRampConstants } from '../theme/tile-ramp';
 
-// CHANGED: a type import beside the value imports, for the board geometry the
-// punch's zoom share is measured against. DL-CAMERA-05.
+// A type import beside the value imports, for the board geometry the punch's
+// zoom share is measured against. DL-CAMERA-05.
 import type { GeometryScale } from '../theme/tokens';
 import { depthScale, fieldWidth, motion } from '../theme/tokens';
 import type { Tween, TweenInterpolator, TweenStop } from './animations';
@@ -515,7 +515,7 @@ export function createCameraEffects(
   );
 
   /**
-   * CHANGED: `let`, seeded from the geometry the caller supplied. An explicit
+   * Mutable, seeded from the geometry the caller supplied. An explicit
    * `punchZoom` PINS the share, so a caller that stated a magnitude is never
    * overridden by a reframe. DL-CAMERA-05.
    */

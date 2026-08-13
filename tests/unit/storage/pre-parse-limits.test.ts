@@ -1,21 +1,17 @@
 // Contract suite for the pre-parse size boundary, AAP I5 and I13.
 //
-// WHAT WAS WRONG
-//   `readJson()` handed any non-empty owned value straight to `JSON.parse`. Web
-//   Storage is synchronous and shared by the whole origin, so a near-quota value
-//   written by anything on this host — or a value corrupted in place — was parsed
-//   on the startup path, blocking the main thread and materialising the whole
-//   graph BEFORE any schema guard could look at it. A bound applied to the RESULT
-//   cannot prevent that: by then the parse has already run.
+// THE BOUND APPLIES BEFORE THE PARSE Web Storage is synchronous and shared by
+// the whole origin, so a near-quota or corrupted value written by anything on
+// this host reaches `readJson()` on the startup path. The bound is therefore
+// applied to the STORED TEXT: a bound on the RESULT cannot prevent a parse that
+// has already run and already materialised the whole graph on the main thread.
 //
-//   The keymap layer had already declared its own bound,
-//   `MAX_KEYMAP_PAYLOAD_BYTES`, and documented that persistence applies it before
-//   parsing. `isKeymapPayloadWithinLimit()` had no caller anywhere, so the
-//   documented boundary was not active.
+//   `MAX_KEYMAP_PAYLOAD_BYTES` is the keymap layer's own bound, and
+//   `isKeymapPayloadWithinLimit()` is what applies it before parsing.
 //
-//   And the run-state blob was parsed three separate times on one boot: the
-//   identity resolution, the relic pre-read that breaks the board-size cycle, and
-//   the authoritative load each read and parsed it for themselves.
+// The run-state blob is parsed ONCE per boot, and its three consumers — the
+// identity resolution, the relic pre-read that breaks the board-size cycle, and
+// the authoritative load — share that single parse.
 //
 // WHAT THIS SUITE PINS
 //   Under-limit, exact-limit and over-limit text for each owned key; that an
@@ -123,7 +119,7 @@ describe('the declared ceilings', () => {
   it('leaves room for the real payloads by two orders of magnitude', () => {
     // The measured payloads: a couple of hundred bytes for a fresh board, under
     // a thousand for a full one, a few thousand for a fully remapped keymap. A
-    // ceiling that a legitimate value could reach would be a bug, not a bound.
+    // ceiling a legitimate value could reach would be a fault, not a bound.
     expect(maxStoredJsonBytes(RUN_STATE_KEY)).toBeGreaterThan(100 * 1024);
     expect(MAX_KEYMAP_PAYLOAD_BYTES).toBeLessThan(
       maxStoredJsonBytes(KEYMAP_KEY),
@@ -451,9 +447,9 @@ describe('the run-state ceiling in the run layer', () => {
   });
 
   it('leaves a port that raises to its caller, so the throw is reported', () => {
-    // The read must not swallow: the caught value is what reaches the corruption
-    // channel, and the pre-migration loader discarding it is the defect that
-    // channel exists to close.
+    // The read must not swallow: the caught value is what reaches the
+    // corruption channel, which is the channel js/local_storage_manager.js had
+    // none of when it discarded the same value.
     expect(() =>
       readRunStateSnapshot({
         readRaw: (): string | null => {

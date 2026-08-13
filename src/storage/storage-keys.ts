@@ -130,8 +130,8 @@ export const RUN_STATE_KEY = namespacedKey('runState');
 export const KEYMAP_KEY = namespacedKey('keymap');
 
 /**
- * ADDED: key the versioned accessibility and presentation preference envelope
- * is persisted under — palette, motion setting, number-only choice, mute and
+ * Key the versioned accessibility and presentation preference envelope is
+ * persisted under — palette, motion setting, number-only choice, mute and
  * volume.
  *
  * Namespaced like every key minted after the two frozen literals, so the

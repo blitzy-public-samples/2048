@@ -3043,8 +3043,8 @@ describe(
     it('rejects a stage start that renumbers the stage, and the next handler ' +
       'reads the index the engine opened', () => {
       // `stageIndex` is invariant on `onStageStart`: `goal` alone is
-      // transformable. A renumbered index used to be adopted, so the stage the
-      // engine reported starting was not the stage it was on.
+      // transformable, so a renumbered index is refused and the stage the
+      // engine reports starting is the stage it is on.
       const bus = createHookBus({ correlationId: CORRELATION_ID });
       const seen: number[] = [];
 

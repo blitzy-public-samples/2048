@@ -206,7 +206,7 @@ describe('the rendered interstitial', () => {
     expect(harness.screen.hasHost()).toBe(true);
     expect(harness.screen.isPresented()).toBe(true);
 
-    // CHANGED: the container takes ONE node, the `.screen-panel` surface every
+    // The container takes ONE node, the `.screen-panel` surface every
     // sibling screen renders, and the five content nodes are its children.
     // DL-STAGECLEAR-06.
     const panel = harness.container.firstElementChild;

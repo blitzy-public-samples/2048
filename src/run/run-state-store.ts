@@ -279,14 +279,12 @@ export type RunStateSnapshotPort = Pick<RunStatePersistencePort, 'readJson'> &
 /**
  * Reads the stored envelope, bounding the text before anything parses it.
  *
- * THE ONE READ every startup consumer shares. Three of them exist — the run
- * identity, the relic pre-read that breaks the board-size cycle, and the
- * authoritative load — and each used to read and parse the value for itself, so
- * one untrusted blob was parsed three times on the startup path before any
- * schema, version or array bound applied to it. Routing all three through here
- * means the size gate is applied once per read and, behind the real storage
- * adapter, which memoises a parse per key on the exact stored text, the blob is
- * parsed exactly once per boot. Decision DL-RUNSTORE-06.
+ * THE ONE READ every startup consumer shares: the run identity, the relic
+ * pre-read that breaks the board-size cycle, and the authoritative load.
+ * Routing all three through here applies the size gate once per read, and
+ * behind the real storage adapter — which memoises a parse per key on the exact
+ * stored text — the untrusted blob is parsed exactly once per boot. Decision
+ * DL-RUNSTORE-06.
  *
  * DOES NOT CATCH. A port that raises must reach its caller's own handler, which
  * is what carries the caught value to the corruption channel — the
@@ -1003,9 +1001,8 @@ export interface RunStateStoreOptions {
 
   /**
    * Correlation identifier every report from this store carries. Injected,
-   * never derived here: the one authority is `deriveCorrelationId` in
-   * src/observability/logger.ts, and no seed — neither the caller's nor a
-   * stored payload's — is read for it.
+   * never derived here: no seed — neither the caller's nor a stored payload's —
+   * is read for it, and this store calls neither of the two derivers.
    */
   readonly correlationId?: CorrelationSource;
 

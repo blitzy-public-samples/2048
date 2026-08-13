@@ -110,11 +110,11 @@ describe('cloneRunState copies a relic state slot without aliasing it', () => {
 
   it('drops a subtree past the depth bound rather than aliasing it', () => {
     // Nine levels below `state`, so `i` sits one past MAX_RELIC_STATE_DEPTH of
-    // 8 and the copy must not carry it AT ALL. The previous form of this case
-    // asserted only that the flattened copy did not contain `'99'` BEFORE the
-    // mutation — true whether the subtree was dropped or aliased — and then
-    // compared a re-clone against a `String.replace` that was a no-op once the
-    // subtree really was dropped. Both halves passed for an ALIASED subtree.
+    // 8 and the copy must not carry it AT ALL. Asserting only that a flattened
+    // copy lacks `'99'` before the mutation would hold whether the subtree was
+    // dropped or aliased, and comparing a re-clone against a `String.replace`
+    // that is a no-op once the subtree really is dropped would hold for an
+    // ALIASED subtree too, so the drop is pinned key by key below.
     const leaf: Record<string, unknown> = { counter: 1 };
     const original = createState({
       a: { b: { c: { d: { e: { f: { g: { h: { i: leaf } } } } } } } },

@@ -109,17 +109,24 @@ export interface SerializedGameState {
  * carries.
  *
  * Declared here, with the reporter ports, so the engine, src/run/ and
- * src/observability/ name one type. Exactly one function derives a value of it,
- * `deriveCorrelationId` of src/observability/logger.ts, from the run seed and —
- * as the composition root supplies it — the run identifier: the seed-derived
- * prefix groups replays of one seed, and the run-instance component makes full
- * values differ when `runId` differs. No module in src/engine/, src/run/,
- * src/input/, src/render/ or src/audio/ derives one; each receives it by
- * injection, which is why none of them imports src/observability/.
+ * src/observability/ name one type.
  *
- * The value is pseudonymous rather than anonymous — the derivation is unsalted
- * and deterministic, so a candidate seed can be hashed and matched — and it is
- * neither a secret nor a safe carrier for a sensitive seed.
+ * TWO DERIVERS, ONE ALGORITHM. `deriveCorrelationId` of
+ * src/observability/logger.ts and `runCorrelationId` of src/run/run-state.ts
+ * are separate implementations of the same derivation, held byte-equal by
+ * tests/unit/run/run-state.test.ts. src/run/ reaches no observability module,
+ * so neither can import the other; src/main.ts calls the logger's. No module in
+ * src/engine/, src/input/, src/render/ or src/audio/ derives one: each receives
+ * it by injection, which is why none of them imports src/observability/.
+ *
+ * TWO FORMS. The RUN-INSTANCE form, which the composition root uses, is KEYED
+ * by the run identifier: every segment is derived from that identifier and the
+ * seed together, and the identifier is carried in no report, so an exported
+ * value cannot be matched against candidate seeds. The SEED-ONLY form, derived
+ * when no run identifier is supplied, is unsalted and deterministic and is
+ * therefore recoverable by dictionary search; it groups every run of one seed
+ * under one value. Neither form carries the seed text and neither is a secret.
+ * Decision DL-LOG-09.
  *
  * The empty string is the value carried by a module that was constructed
  * without one.
@@ -134,9 +141,8 @@ export type CorrelationId = string;
  * consulted on every report and reads a shared scope, so a reporter constructed
  * once follows the run in force. Decision DL-TYPES-04.
  *
- * The one deriver of a value is `deriveCorrelationId` in
- * src/observability/logger.ts; this type only says where a value it produced is
- * read from.
+ * This type only says where an already-derived value is read from; the two
+ * derivers are named on `CorrelationId` above.
  */
 export type CorrelationSource = CorrelationId | (() => CorrelationId);
 

@@ -20,25 +20,23 @@
  *
  * One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of
  * this module's area enumerated:
- *   TR-RAMP-01  style/main.scss L334-L402  the `@while` generation loop, ported
- *                                          as `computeTileTheme`
- *   TR-RAMP-02  style/main.scss L336-L337  the `$gold-percent` interpolation,
- *                                          ported as `goldPercent` and
- *                                          `sassMix`
- *   TR-RAMP-03  style/main.scss L339-L349  the `$special-colors` accent list,
- *                                          ported as `tileSpecialColors`
- *   TR-RAMP-04  style/main.scss L351-L356  the bright-text threshold, ported as
- *                                          `TileTheme.brightText`
- *   TR-RAMP-05  style/main.scss L358-L370  the `$glow-opacity` term and its
- *                                          two-part shadow, ported as
- *                                          `haloAlpha`, `insetAlpha` and
- *                                          `glowSuppressed`
- *   TR-RAMP-06  style/main.scss L372-L380  the `tile-super` band above the
- *                                          ramp's last value
- *   TR-RAMP-07  target-only row            `parseHexColor`, `quantiseColor` and
- *                                          `formatHexColor`
- *   TR-RAMP-08  target-only row            `rampValue`, `rampExponent` and
- *                                          `tileRampConstants`
+ *   TR-RAMP-01  style/main.scss  the `@while` generation loop, ported as
+ *               ramp loop        `computeTileTheme`
+ *   TR-RAMP-02  style/main.scss  the `$gold-percent` interpolation, ported as
+ *               $gold-percent    `goldPercent` and `sassMix`
+ *   TR-RAMP-03  style/main.scss  the `$special-colors` accent list, ported as
+ *               $special-colors  `tileSpecialColors`
+ *   TR-RAMP-04  style/main.scss  the bright-text threshold, ported as
+ *               bright text      `TileTheme.brightText`
+ *   TR-RAMP-05  style/main.scss  the `$glow-opacity` term and its two-part
+ *               $glow-opacity    shadow, ported as `haloAlpha`, `insetAlpha`
+ *                                and `glowSuppressed`
+ *   TR-RAMP-06  style/main.scss  the `tile-super` band above the ramp's last
+ *               .tile-super      value
+ *   TR-RAMP-07  target-only row  `parseHexColor`, `quantiseColor` and
+ *                                `formatHexColor`
+ *   TR-RAMP-08  target-only row  `rampValue`, `rampExponent` and
+ *                                `tileRampConstants`
  *
  * Decisions: DL-RAMP-01, DL-RAMP-02, DL-RAMP-03, DL-RAMP-04
  * (docs/DECISION_LOG.md).

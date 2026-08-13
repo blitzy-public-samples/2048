@@ -7,17 +7,18 @@
 // One traceability row of docs/TRACEABILITY_MATRIX.md apiece. THEME is one area
 // across the stylesheet and TypeScript halves, so these ordinals continue the
 // ones src/theme/themes.ts carries:
-//   TR-THEME-07  style/main.scss L4-L22     the established palette, restated as
-//                                           the default theme's entries
-//   TR-THEME-08  style/main.scss L334-L402  the tile-ramp loop, ported here once
-//                                           per palette with no compiled row
-//                                           restated as a table
-//   TR-THEME-09  target-only row            the `data-theme` activation contract
-//                                           and its three values
-//   TR-THEME-10  target-only row            the `diagnostics-*` and `focus-*`
-//                                           entries derived from the text tokens
+//   TR-THEME-07  style/main.scss  the established palette, restated as the
+//                token block      default theme's entries
+//   TR-THEME-08  style/main.scss  the tile-ramp loop, ported here once per
+//                ramp loop        palette with no compiled row restated as a
+//                                 table
+//   TR-THEME-09  target-only row  the `data-theme` activation contract and its
+//                                 three values
+//   TR-THEME-10  target-only row  the `diagnostics-*` and `focus-*` entries
+//                                 derived from the text tokens
 //
-// Decisions: DL-THEME-05, DL-THEME-06, DL-THEME-07 (docs/DECISION_LOG.md).
+// Decisions: DL-THEME-05, DL-THEME-06, DL-THEME-07, DL-THEME-10, DL-THEME-11
+// (docs/DECISION_LOG.md).
 
 @use "sass:color";
 @use "sass:list";
@@ -296,15 +297,14 @@ $themes: (
   );
 }
 
-// ADDED: the same tier accent, composited over the palette's dark tile surface.
+// The same tier accent, composited over the palette's dark tile surface.
 //
-// The pure accent sits on the reward card, whose surface IS that dark colour, so
-// it reads there at 6.7:1 or better. The relic tray sits on the page instead,
-// where the identical colour reads at 1.18:1 — visible only as an absence. This
-// variant is the accent seen against the surface it was designed against, so one
-// rarity vocabulary serves both surfaces: the hue order is preserved and every
-// tier clears the 3:1 asked of information-bearing non-text (WCAG 1.4.11).
-// DL-THEME-10.
+// The pure accent sits on the reward card, whose surface IS that dark colour,
+// so it reads there at 6.7:1 or better. The relic tray sits on the page, where
+// the identical colour reads at 1.18:1. This variant is the accent seen against
+// the surface it was designed against, so one rarity vocabulary serves both
+// surfaces: the hue order is preserved and every tier clears the 3:1 asked of
+// information-bearing non-text (WCAG 1.4.11). DL-THEME-10.
 $rarity-plate-weight: 55% !default;
 
 @function ramp-rarity-plate($palette, $ordinal) {
@@ -313,6 +313,129 @@ $rarity-plate-weight: 55% !default;
     ramp-rarity($palette, $ordinal),
     $rarity-plate-weight
   );
+}
+
+// The tier accent as the reward CARD carries it, lifted until its label
+// clears the ratio WCAG 2.1 asks of text.
+//
+// The card's surface is the palette's `tile-super`, and the rarity chip renders
+// its tier name in the tier's accent ON that surface at the 13px label step. In
+// the default palette that reads 6.70:1 to 9.08:1 and needs nothing. In both
+// additive palettes the ramp anchors are dark BY DESIGN — a monotonic luminance
+// ladder ending near black — so the same accent on a near-black card measured
+// 1.29:1 at the top tier: the tier name was unreadable in exactly the two
+// palettes a player chooses for legibility.
+//
+// The lift is the SMALLEST multiple of $rarity-card-step at which EVERY tier of
+// that palette clears $rarity-card-target, mixed toward the palette's own
+// bright-text. Derived rather than declared, so the ratio is the authored intent
+// and the colour is its consequence; and uniform across the tiers of one palette,
+// so the ladder keeps its spacing instead of collapsing the passing tiers onto
+// the failing one. DL-THEME-11.
+
+// The ratio the chip label must clear: WCAG 2.1 AA for normal-size text.
+$rarity-card-target: 4.5 !default;
+
+// The search grid, and the point past which no lift is accepted.
+$rarity-card-step: 5% !default;
+$rarity-card-limit: 100% !default;
+
+// sRGB channel maximum, and the constants of WCAG 2.1's relative-luminance and
+// contrast formulae.
+$wcag-channel-max: 255;
+$wcag-transfer-threshold: 0.03928;
+$wcag-transfer-divisor: 12.92;
+$wcag-transfer-offset: 0.055;
+$wcag-transfer-scale: 1.055;
+$wcag-transfer-exponent: 2.4;
+$wcag-red-coefficient: 0.2126;
+$wcag-green-coefficient: 0.7152;
+$wcag-blue-coefficient: 0.0722;
+$wcag-contrast-offset: 0.05;
+
+// One sRGB channel linearised, WCAG 2.1 relative-luminance step 1. The channel
+// arrives on the 0-255 scale `color.channel` reports in the rgb space.
+@function wcag-linearise($channel) {
+  $scaled: math.div($channel, $wcag-channel-max);
+
+  @if $scaled <= $wcag-transfer-threshold {
+    @return math.div($scaled, $wcag-transfer-divisor);
+  }
+
+  @return math.pow(
+    math.div($scaled + $wcag-transfer-offset, $wcag-transfer-scale),
+    $wcag-transfer-exponent
+  );
+}
+
+// Relative luminance of an opaque colour, WCAG 2.1.
+@function wcag-luminance($value) {
+  @return $wcag-red-coefficient *
+    wcag-linearise(color.channel($value, "red", $space: rgb)) +
+    $wcag-green-coefficient *
+    wcag-linearise(color.channel($value, "green", $space: rgb)) +
+    $wcag-blue-coefficient *
+    wcag-linearise(color.channel($value, "blue", $space: rgb));
+}
+
+// Contrast ratio between two opaque colours, WCAG 2.1. Symmetric in its
+// arguments, as the formula is.
+@function wcag-contrast($front, $back) {
+  $first: wcag-luminance($front) + $wcag-contrast-offset;
+  $second: wcag-luminance($back) + $wcag-contrast-offset;
+
+  @if $first > $second {
+    @return math.div($first, $second);
+  }
+
+  @return math.div($second, $first);
+}
+
+// One tier's accent lifted by a stated amount toward the palette's bright-text.
+@function rarity-card-at($palette, $ordinal, $lift) {
+  @return color.mix(
+    palette-value($palette, bright-text),
+    ramp-rarity($palette, $ordinal),
+    $lift
+  );
+}
+
+// The lift one palette's card vocabulary takes.
+//
+// Fails the build rather than publishing a colour below the floor: a palette
+// whose anchors and bright-text cannot produce a readable chip at any lift is a
+// palette that cannot carry the reward screen, and that is a fact about the
+// palette to be fixed where it is declared.
+@function rarity-card-lift($palette) {
+  $surface: palette-value($palette, tile-super);
+  $steps: math.floor(math.div($rarity-card-limit, $rarity-card-step));
+  $tiers: list.length($rarity-tiers);
+
+  @for $step from 0 through $steps {
+    $lift: $step * $rarity-card-step;
+    $clears: true;
+
+    @for $ordinal from 1 through $tiers {
+      @if wcag-contrast(rarity-card-at($palette, $ordinal, $lift), $surface) <
+        $rarity-card-target
+      {
+        $clears: false;
+      }
+    }
+
+    @if $clears {
+      @return $lift;
+    }
+  }
+
+  @error "themes: palette `#{palette-value($palette, name)}` cannot carry a "
+    + "rarity chip at #{$rarity-card-target}:1 on its own card surface at any "
+    + "lift up to #{$rarity-card-limit}.";
+}
+
+// A rarity tier's accent as the reward card carries it.
+@function ramp-rarity-card($palette, $ordinal) {
+  @return rarity-card-at($palette, $ordinal, rarity-card-lift($palette));
 }
 
 // The accent for one exponent, or `false` where the palette declares none.
@@ -450,6 +573,13 @@ $rarity-plate-weight: 55% !default;
 
   // One accent per rarity tier, from `ramp-rarity`, plus the plated variant a
   // light surface reads. DL-THEME-10.
+  //
+  // The card variant, which is what the reward card's chip and edge read.
+  // The three vocabularies are one accent seen against the three surfaces it is
+  // painted on — the card, the page, and the accent itself unqualified — so a
+  // tier keeps one identity across them. DL-THEME-11.
+  $card-lift: rarity-card-lift($palette);
+
   @each $tier in $rarity-tiers {
     --theme-rarity-#{"" + $tier}: #{ramp-rarity(
         $palette,
@@ -458,6 +588,11 @@ $rarity-plate-weight: 55% !default;
     --theme-rarity-#{"" + $tier}-plate: #{ramp-rarity-plate(
         $palette,
         list.index($rarity-tiers, $tier)
+      )};
+    --theme-rarity-#{"" + $tier}-card: #{rarity-card-at(
+        $palette,
+        list.index($rarity-tiers, $tier),
+        $card-lift
       )};
   }
 }

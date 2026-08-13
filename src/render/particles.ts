@@ -38,8 +38,8 @@ import {
 import type { Theme, ThemeId } from '../theme/themes';
 import { getActiveTheme, getTheme } from '../theme/themes';
 
-// CHANGED: a type import beside the value imports, for the board geometry the
-// spray is measured against. DL-PARTICLE-07.
+// A type import beside the value imports, for the board geometry the spray is
+// measured against. DL-PARTICLE-07.
 import type { GeometryScale } from '../theme/tokens';
 import {
   depthScale,
@@ -833,10 +833,9 @@ export function createParticleSystem(
   );
 
   /**
-   * CHANGED: `let`, and seeded from the geometry the caller supplied. An
-   * explicit `spread` PINS the value — `useGeometry` reports and keeps it — so a
-   * caller that stated a magnitude is never overridden by a rebuild.
-   * DL-PARTICLE-07.
+   * Mutable, and seeded from the geometry the caller supplied. An explicit
+   * `spread` PINS the value — `useGeometry` reports and keeps it — so a caller
+   * that stated a magnitude is never overridden by a rebuild. DL-PARTICLE-07.
    */
   const spreadPinned = options.spread !== undefined;
   let spread = resolveMagnitude(

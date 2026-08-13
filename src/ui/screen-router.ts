@@ -29,10 +29,10 @@
 //                                  append-only `on` and synchronous in-order
 //                                  `emit`; every subscription here relies on
 //                                  the append
-//   style/main.scss L234-L235      the overlay cadence, read from
-//                                  `motion.fadeIn` of ../theme/tokens
-//   style/main.scss L103, L205     the z-index ceiling of 100, extended
-//                                  through `zIndex` of ../theme/tokens
+//   style/main.scss fade-in       the overlay cadence, read from
+//   cadence                        `motion.fadeIn` of ../theme/tokens
+//   style/main.scss z-index        the ceiling of 100, extended through
+//   ceiling                        `zIndex` of ../theme/tokens
 //   style/_screens.scss            the `hidden` attribute as the whole
 //                                  active-and-inactive mechanism
 //
@@ -62,10 +62,10 @@
 //                                                synchronous in-order `emit`,
 //                                                relied on by every
 //                                                subscription here
-//   TR-ROUTER-09  style/main.scss L234-L235      the overlay cadence, read
-//                                                from `OVERLAY_CADENCE`
-//   TR-ROUTER-10  style/main.scss L103, L205     the z-index ceiling of 100,
-//                                                extended by `SCREEN_LAYERS`
+//   TR-ROUTER-09  style/main.scss fade-in        the overlay cadence, read
+//                 cadence                        from `OVERLAY_CADENCE`
+//   TR-ROUTER-10  style/main.scss z-index        the ceiling of 100,
+//                 ceiling                        extended by `SCREEN_LAYERS`
 //   TR-ROUTER-11  target-only row                the seven-state machine:
 //                                                `SCREEN_NAMES`,
 //                                                `TRANSITIONS` and the
@@ -149,8 +149,8 @@ const REWARD_SELECT_METRIC = 'ui.router.reward.select';
  * Counter raised for each `stage:end` whose goal was NOT met.
  *
  * Its own series rather than a detail on the transition counter, because the
- * event takes no transition: an uncleared stage end used to reach the reward
- * screen anyway, and the series is what makes the corrected refusal visible.
+ * event takes no transition: an uncleared stage end reaches no reward screen,
+ * and this series is what makes that refusal visible.
  */
 const STAGE_UNCLEARED_METRIC = 'ui.router.stage.uncleared';
 
@@ -401,8 +401,8 @@ export const SCREEN_SUSPENDS_INPUT = Object.freeze({
  *
  * Every state index.html declares `role="dialog" aria-modal="true"` on is
  * trapped here, and every state trapped here is inerted by
- * `SCREEN_INERTS_BACKGROUND` — the two tables carry the same five states, so
- * a state cannot announce itself modal and leave the background reachable.
+ * `SCREEN_INERTS_BACKGROUND` — the two tables carry the same six states, so a
+ * state cannot announce itself modal and leave the background reachable.
  * `stage` is the one in-flow state and traps nothing. Decision DL-ROUTER-25.
  *
  * The retained `.game-message` of js/html_actuator.js L127-L139 lies inside the
@@ -458,7 +458,7 @@ export const SCREEN_SHOWS_HUD = Object.freeze({
  * whole page shell rather than the game region alone, so a screen reader's
  * virtual cursor cannot reach the heading, the board or the footer behind a
  * modal state. Only a trapping state reads this, and the two tables carry the
- * same five states. Decision DL-ROUTER-25.
+ * same six states. Decision DL-ROUTER-25.
  */
 export const SCREEN_INERTS_BACKGROUND = Object.freeze({
   runStart: true,
@@ -606,8 +606,9 @@ export const TERMINAL_OVERLAY_TEXT_SELECTOR = 'p';
 /**
  * The two classes js/html_actuator.js L128 computed, verbatim.
  *
- * style/main.scss L237 and L246 select on both, and the recorded-gameplay gate
- * asserts on the rendered overlay.
+ * The `&.game-won` and `&.game-won, &.game-over` rules of style/main.scss
+ * select on both, and the recorded-gameplay gate asserts on the rendered
+ * overlay.
  */
 export const TERMINAL_OVERLAY_CLASSES = Object.freeze({
   won: 'game-won',
@@ -628,7 +629,8 @@ export type TerminalScreenName = keyof typeof TERMINAL_OVERLAY_CLASSES;
  * restated as a literal here.
  *
  * `motion.fadeIn.delay` is `transitionSpeed * 12`, the `$transition-speed *
- * 12` of style/main.scss L234, and `duration` is that rule's 800. `total` is
+ * 12` of the `fade-in` cadence of style/main.scss, and `duration` is that
+ * rule's 800. `total` is
  * the interval an assertion on the overlay has to clear.
  */
 export const OVERLAY_CADENCE = Object.freeze({
@@ -1064,6 +1066,11 @@ export interface RouterAnnouncerPort {
    * Blanks the assertive region. Called on entering a state that is not
    * terminal, so a run verdict does not stay readable on a screen that has
    * nothing to do with it. Optional, like the other two. DL-LIVE-06.
+   *
+   * DECLARED WITHOUT THE SCOPE the announcer now accepts, deliberately: this
+   * sweep is the one withdrawal that means every assertive line, whoever raised
+   * it, because none of them belongs to the screen being entered. A producer
+   * withdrawing its OWN line names its source instead. DL-LIVE-08.
    */
   clearAssertive?(): void;
 }
@@ -1201,11 +1208,10 @@ export interface ScreenRouterOptions {
 /**
  * The reward screen's own prose: the two strings that name the offer.
  *
- * THE PANEL'S CHROME, AND NOTHING ON A CARD. A rarity renderer and a charge
- * renderer used to sit here too, for the cards this router built itself; the
- * cards are drawn by ../ui/components/relic-card.ts now and `defaultRelicCardCopy`
- * of that module declares both, so keeping a second pair here left two
- * declarations of one string with only one of them reachable. DL-ROUTER-13.
+ * THE PANEL'S CHROME, AND NOTHING ON A CARD. The cards are drawn by
+ * ../ui/components/relic-card.ts, whose `defaultRelicCardCopy` declares the
+ * rarity and charge renderers, so neither is declared here and no string is
+ * declared twice. DL-ROUTER-13.
  */
 export interface RewardCopy {
   /** The offer's heading, which also names the reward dialog. */
@@ -1749,15 +1755,15 @@ export function createScreenRouter(
   /**
    * One registration this router owns on ONE external source.
    *
-   * `attach()` and `subscribe()` each own exactly one of these. Before, both
-   * merely pushed their releases onto `subscriptions`, which is drained only by
-   * `destroy()`: a second `attach()` with the same manager registered a second
-   * copy of all four dialog listeners, so one Escape closed the dialog twice and
-   * one digit press chose twice; a second `subscribe()` over a replaced engine
-   * left the released engine's handlers registered for the rest of the session;
-   * and the releaser `subscribe()` returned did not remove its entries from
-   * `subscriptions`, so a released engine's closures were retained until
-   * teardown. DL-ROUTER-10.
+   * `attach()` and `subscribe()` each own exactly one of these, rather than
+   * pushing their releases onto `subscriptions`, which only `destroy()` drains.
+   * Were they pooled there, a second `attach()` with the same manager would
+   * register a second copy of all four dialog listeners — one Escape closing
+   * the dialog twice, one digit press choosing twice — a second `subscribe()`
+   * over a replaced engine would leave the released engine's handlers
+   * registered for the rest of the session, and the releaser `subscribe()`
+   * returns would strand its entries in `subscriptions` until teardown.
+   * DL-ROUTER-10.
    */
   interface Attachment {
     /** The source the registrations were made on, compared by identity. */
@@ -1774,14 +1780,10 @@ export function createScreenRouter(
    * them, AND the returned handle removes them from that list as it releases,
    * so nothing released is held to teardown. Releasing twice is a no-op.
    *
-   * ALL OR NOTHING. CHANGED: the group is taken through `register`, which hands
-   * each release to `hold` as the source returns it, so a registration that
-   * refuses part-way through the group is rolled back and rethrown. The groups
-   * were built as array literals, so a refusal from a later `on()` discarded the
-   * half-built array and left every registration before it attached to the
-   * source with no reference to it anywhere — the router went on acting on an
-   * input surface or an engine it had reported it was not attached to, and
-   * neither `destroy()` nor the handle could reach them. DL-ROUTER-44.
+   * ALL OR NOTHING. The group is taken through `register`, which hands each
+   * release to `hold` as the source returns it, so a registration that refuses
+   * part-way through the group is rolled back and rethrown and no registration
+   * is left attached to a source with no reference to it. DL-ROUTER-44.
    *
    * @param source Object the registrations were made on.
    * @param register Makes the registrations, handing each release to `hold`.
@@ -1798,9 +1800,9 @@ export function createScreenRouter(
      * Releases every entry and removes it from `subscriptions`, whichever
      * release refuses.
      *
-     * CHANGED: the loop stopped at the first refusal, so one refusing release
-     * stranded every registration behind it both attached AND listed — and
-     * `destroy()` then called them a second time. DL-ROUTER-44.
+     * The loop does not stop at the first refusal, so a refusing release
+     * strands no registration behind it either attached or listed, and
+     * `destroy()` cannot call one a second time. DL-ROUTER-44.
      */
     const releaseAll = (): void => {
       let raised: unknown = null;
@@ -2355,13 +2357,11 @@ export function createScreenRouter(
    *
    * The sibling of `invokeScreen` for the three callbacks a composition hands
    * this router — `onSettingsOpen`, `onSettingsClose` and `onRewardSelect`.
-   * Each was previously called bare, so a raising composition escaped through
-   * whichever listener happened to be on the stack: a pointer press unwound the
-   * DOM event dispatch and a keyboard press unwound the input manager's
-   * listener walk, so the same failure behaved differently by modality and
-   * nothing was reported. Returning the outcome is what lets each caller apply
-   * a deterministic rollback rather than leaving the router's state ahead of
-   * the composition's. DL-ROUTER-11.
+   * Containing each is what keeps a raising composition from escaping through
+   * whichever listener happens to be on the stack, where the same failure would
+   * behave differently by modality and go unreported. Returning the outcome is
+   * what lets each caller apply a deterministic rollback rather than leaving
+   * the router's state ahead of the composition's. DL-ROUTER-11.
    *
    * @param member Callback name carried into the report.
    * @param apply Invocation.
@@ -2677,11 +2677,16 @@ export function createScreenRouter(
       return;
     }
 
-    // A terminal verdict is the only line written to the assertive region, and
-    // an `alert` region holds its text until something replaces it — so the
-    // verdict outlived its own state and was still readable on run start.
-    // Blanked on entering any NON-terminal state, before this state's own line
-    // is read. DL-LIVE-06.
+    // An `alert` region holds its text until something replaces it, so a
+    // terminal verdict outlived its own state and was still readable on run
+    // start. Blanked on entering any NON-terminal state, before this state's own
+    // line is read. DL-LIVE-06.
+    //
+    // CHANGED, in the comment only: this said the verdict was the ONLY line
+    // written to the assertive region. It is not — src/ui/screens/hud.ts raises
+    // a persistence alert there and src/main.ts raises three more — and the
+    // sweep here is unscoped BECAUSE of that, not in ignorance of it: none of
+    // those lines belongs to the screen being entered either. DL-LIVE-08.
     //
     // The operation called here WITHDRAWS the verdict rather than blanking a
     // node: ./a11y/live-region drains the queued announcement and the pending
@@ -3592,16 +3597,14 @@ export function createScreenRouter(
 
 
   /**
-   * ADDED: the mechanics of a settings close, with no authorization and no
-   * settle.
+   * The mechanics of a settings close, with no authorization and no settle.
    *
    * `closeSettings()` is the authorized entry point and `destroy()` is the
-   * unauthorized one. `destroy()` raises `tearingDown` before it closes, and
-   * `authorizes()` refuses every action while that flag is up — so the close it
-   * asked for did nothing at all: the dialog stayed visible, the focus trap was
-   * never released, the background it had made inert stayed inert, and
-   * `onSettingsClose` never fired. A destroyed router left the page trapped in a
-   * dialog belonging to a router that no longer existed. DL-ROUTER-43.
+   * unauthorized one. `destroy()` raises `tearingDown` before it closes and
+   * `authorizes()` refuses every action while that flag is up, so teardown
+   * reaches the close through here: the dialog is hidden, the focus trap
+   * released, the background it made inert restored, and `onSettingsClose`
+   * fired. DL-ROUTER-43.
    *
    * @param refresh Whether the control layer is refreshed as the trap lifts
    *   inertness. False during teardown, where there is no shell left to
@@ -3612,12 +3615,17 @@ export function createScreenRouter(
   const performSettingsClose = (refresh: boolean): boolean => {
     settingsOpen = false;
 
-    // Released BEFORE the panel is hidden: a trap restores focus to the
-    // element it recorded, and restoring into a subtree that has just become
-    // `hidden` places focus on the body instead.
     const engaged = trap;
 
     trap = null;
+
+    // The panel is hidden BEFORE the trap is released, where it used to
+    // be hidden after it, so the one refresh this close performs — taken inside
+    // the release below — reads the settled document rather than a still-shown
+    // dialog. The target this trap restores to is `#settings-button`, outside the
+    // panel, so nothing is restored into the subtree being hidden.
+    // DL-ROUTER-46, DL-ROUTER-41, DL-MAIN-43.
+    setHidden(panelElement ?? panel, true);
 
     // The control layer withholds `#settings-button` for two reasons while this
     // dialog is up — the action `openSettings` is not authorized in
@@ -3630,11 +3638,11 @@ export function createScreenRouter(
     // authorization was the only term. DL-ROUTER-41 supersedes DL-ROUTER-40; the
     // window itself is DL-FOCUS-08.
     //
-    // CHANGED: `settle()` used to refresh a second time, which walked every
-    // managed control twice per close. Whichever branch below performs the
-    // refresh says so, and `settle()` reports the screen change without
-    // repeating it. The teardown close passes `refresh` false, so neither branch
-    // runs and `settle()` is the only refresh there. DL-ROUTER-45.
+    // `settle()` does not refresh a second time: whichever branch below
+    // performs the refresh says so, and `settle()` reports the screen change
+    // without repeating it, so no close walks every managed control twice. The
+    // teardown close passes `refresh` false and does not settle, so it refreshes
+    // nothing at all: there is no shell left to re-present. DL-ROUTER-45.
     let refreshed = false;
 
     engaged?.release(
@@ -3655,7 +3663,6 @@ export function createScreenRouter(
       refreshed = true;
     }
 
-    setHidden(panelElement ?? panel, true);
     reflectTriggerExpansion(false);
     reporter.count(SETTINGS_CLOSE_METRIC);
 
@@ -3691,7 +3698,7 @@ export function createScreenRouter(
   };
 
   /**
-   * ADDED: closes the settings dialog during teardown, past authorization.
+   * Closes the settings dialog during teardown, past authorization.
    *
    * @returns Whether a dialog was standing and was closed.
    */
@@ -3794,6 +3801,16 @@ export function createScreenRouter(
 
     if (engaged === null) {
       setHidden(panelElement ?? panel, true);
+
+      // This refusal is a close-equivalent — the panel was shown, the open
+      // hook ran against it, and it is hidden again — so the control layer is
+      // re-presented here the way a close re-presents it. The hook is where a
+      // composition re-applies availability with the dialog still shown, and no
+      // trap was engaged to lift anything on the way back out, so without this
+      // the layer would keep withholding every board-only control with no dialog
+      // up. Hidden first, for the reason above. DL-ROUTER-46.
+      refreshControls();
+
       invokeCallback('onSettingsClose', (): void => {
         options.onSettingsClose?.(panel);
       });
@@ -4474,8 +4491,8 @@ export function createScreenRouter(
 
       tearingDown = true;
 
-      // CHANGED: the teardown close, which does not consult `authorizes()` —
-      // the flag raised on the line above made every authorized close a no-op.
+      // The teardown close, which does not consult `authorizes()`: the flag
+      // raised on the line above makes every authorized close a no-op.
       // DL-ROUTER-43.
       closeSettingsForTeardown();
       hideReward();

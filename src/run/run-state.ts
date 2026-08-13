@@ -17,15 +17,14 @@
  *   no report. Because it is persisted, a resumed run re-derives the identifier
  *   it was already reporting under. Decision DL-LOG-09.
  *
- *   `runCorrelationId()` below is this module's derivation of it, and is what
- *   the run layer calls when no identifier was injected. It is byte-identical
- *   to `deriveCorrelationId(seed, runId)` in src/observability/logger.ts, which
- *   remains the single authority src/main.ts calls: this module reaches no
- *   observability module, so the two derivations are separate implementations
- *   of one algorithm, pinned equal by
- *   tests/unit/run/run-state.test.ts rather than by a shared import. Every
- *   store, controller and reporter in this folder still takes the identifier by
- *   injection; nothing here calls this function on its own behalf.
+ * `runCorrelationId()` below is this module's derivation of it, and is what the
+ * run layer calls when no identifier was injected. It is byte-identical to
+ * `deriveCorrelationId(seed, runId)` in src/observability/logger.ts, which is
+ * the one src/main.ts calls: this module reaches no observability module, so
+ * the two are separate implementations of one algorithm, pinned equal by
+ * tests/unit/run/run-state.test.ts rather than by a shared import. Every store,
+ * controller and reporter in this folder takes the identifier by injection;
+ * nothing here calls this function on its own behalf.
  *
  * WRAPPED BOARD SNAPSHOT
  *   `RunState.board` carries the pre-migration board snapshot unchanged, in
@@ -442,13 +441,11 @@ export const MAX_REWARD_OFFER_IDS = MAX_PERSISTED_RELICS;
  * curve cannot disagree about the indices they accept — the arrangement
  * `MAX_SUPPORTED_BOARD_SIZE` above already follows for the board edge length.
  *
- * CHANGED: the value was a fixed `1024` declared here. The stage curve derives a
- * goal for every index up to `MAX_STAGE_INDEX` and `RunController.advanceStage()`
- * advances through the same domain, so a run that passed 1024 wrote an envelope
- * this module refused: the reward transaction that produced it rolled back, the
- * offer stayed standing and progression stopped. Widening to the curve's own
- * domain needs no schema change — every envelope the fixed bound accepted is
- * still accepted, so no stored run is re-read differently. DL-RUN-07, DL-STAGE-05.
+ * The bound is the stage curve's own domain rather than a number of this
+ * module's: the curve derives a goal for every index up to `MAX_STAGE_INDEX`
+ * and `RunController.advanceStage()` advances through the same domain, so no
+ * reachable run can write an envelope this module refuses. DL-RUN-07,
+ * DL-STAGE-05.
  */
 export const MAX_PERSISTED_STAGE_INDEX = MAX_STAGE_INDEX;
 
@@ -1385,16 +1382,15 @@ function isSerializedTileShape(value: unknown): value is SerializedTile {
 }
 
 /**
- * ADDED: reports whether a tile's position is the CELL IT SITS IN — a pair of
- * whole numbers inside the lattice, equal to the indices it was found at.
+ * Reports whether a tile's position is the CELL IT SITS IN — a pair of whole
+ * numbers inside the lattice, equal to the indices it was found at.
  *
  * The shape test above measures the position as two finite numbers alone, so a
- * fractional coordinate, one off the lattice, and one naming a different cell
- * altogether were all admitted. Every consumer treats `tile.position` as
- * authoritative — the renderer places a block at it, the parallel board labels
- * a cell from it, and `Grid` rehydrates the lattice from it — so a mismatch put
- * a tile on screen in a cell the board does not believe is occupied.
- * DL-RUN-08.
+ * fractional coordinate, one off the lattice and one naming a different cell
+ * all pass it. Every consumer treats `tile.position` as authoritative — the
+ * renderer places a block at it, the parallel board labels a cell from it, and
+ * `Grid` rehydrates the lattice from it — so this is where a mismatch is
+ * refused. DL-RUN-08.
  *
  * @param tile Tile to measure.
  * @param x Column index the tile was found at.
@@ -1447,11 +1443,10 @@ function checkCellMatrix(
     return;
   }
 
-  // ADDED: the matrix must be the SQUARE the declared size names. A jagged or
-  // undersized matrix used to validate, and `Grid` rehydrates by reading
-  // `cells[x][y]` across `size` — so a short column read `undefined` where the
-  // lattice expected a cell or `null`, and a long one silently dropped the
-  // tiles past the edge. DL-RUN-08.
+  // The matrix must be the SQUARE the declared size names. `Grid` rehydrates by
+  // reading `cells[x][y]` across `size`, so a short column would read
+  // `undefined` where the lattice expects a cell or `null` and a long one would
+  // drop the tiles past the edge. DL-RUN-08.
   if (size !== null && value.length !== size) {
     addProblem(
       problems,
@@ -1482,8 +1477,8 @@ function checkCellMatrix(
       continue;
     }
 
-    // ADDED: every column is the same declared length, so the matrix is square
-    // rather than merely bounded. DL-RUN-08.
+    // Every column is the same declared length, so the matrix is square rather
+    // than merely bounded. DL-RUN-08.
     if (size !== null && column.length !== size) {
       addProblem(
         problems,
@@ -1509,8 +1504,7 @@ function checkCellMatrix(
         continue;
       }
 
-      // ADDED: a tile's own position must be the cell it was found in.
-      // DL-RUN-08.
+      // A tile's own position must be the cell it was found in. DL-RUN-08.
       if (cell !== null && !tilePositionMatchesCell(cell, x, y, size)) {
         addProblem(
           problems,
@@ -1559,10 +1553,10 @@ function checkGrid(value: unknown, problems: string[]): void {
   );
 
   if (cells.readable) {
-    // ADDED: the declared size is handed to the matrix check, which had no way
-    // to measure the matrix against it. An unreadable or invalid size is passed
-    // as `null` — it is already reported above — and the matrix is then measured
-    // against the bounds alone. DL-RUN-08.
+    // The declared size is handed to the matrix check, so the matrix is
+    // measured against it. An unreadable or invalid size is passed as `null` —
+    // it is already reported above — and the matrix is then measured against
+    // the bounds alone. DL-RUN-08.
     checkCellMatrix(
       cells.value,
       problems,
@@ -2161,6 +2155,26 @@ export interface RunStateWriteFailureReport {
   readonly error: unknown;
 }
 
+/**
+ * The engine refused to resolve the stage a finishing run was standing
+ * on.
+ *
+ * Its own channel rather than `onWriteFailed`: nothing was written and no
+ * storage key was involved, so a report carrying a key and a byte length said
+ * the run could not be persisted when what actually happened is that
+ * `endStage()` raised. DL-RUNCTL-31.
+ */
+export interface StageResolutionFailureReport {
+  readonly correlationId: CorrelationId;
+
+  /** Zero-based index of the stage that could not be resolved. */
+  readonly stageIndex: number;
+
+  /** The verdict the resolution carried: whether the stage's goal was met. */
+  readonly cleared: boolean;
+  readonly error: unknown;
+}
+
 /** A run that began, fresh or resumed. */
 export interface RunStartedReport {
   readonly correlationId: CorrelationId;
@@ -2285,6 +2299,19 @@ export interface RunEndedReport {
 export type RunPersistence = 'persistent' | 'ephemeral';
 
 /**
+ * Why the run's persistence status is what it is.
+ *
+ * `write-refused` is a store that declined or raised. `store-not-durable` is a
+ * store that ACCEPTED the write and will not survive the page — the in-memory
+ * fallback, which returns success and discards on reload. `durable-write` is
+ * the ordinary state. DL-RUN-10.
+ */
+export type RunPersistenceReason =
+  | 'durable-write'
+  | 'write-refused'
+  | 'store-not-durable';
+
+/**
  * One TRANSITION of the run's persistence status.
  *
  * Reported on the change alone, not per write: a store that has run out of
@@ -2306,14 +2333,125 @@ export interface RunPersistenceStatusReport {
 
   /**
    * Writes refused since the run last persisted, counting the one that caused
-   * this transition. `0` on a transition back to `persistent`.
+   * this transition. `0` on a transition back to `persistent`, and `0` on a
+   * transition into `ephemeral` that no refused write caused.
    */
   readonly refusedWrites: number;
+
+  /**
+   * Which of the two causes put the status in force. A store that
+   * accepted the write and does not survive a reload is `store-not-durable`
+   * and refuses nothing, so `refusedWrites` alone could not tell the two
+   * ephemeral causes apart. DL-RUN-10.
+   */
+  readonly reason: RunPersistenceReason;
+}
+
+/**
+ * Every run operation that can fail WITHOUT a storage write having been
+ * attempted, as the `operation` member of `RunFaultReport`.
+ *
+ * Each name is one collaborator call the run controller contains: a reward
+ * draw, a registry member, a stage open, a cursor read, a relic projection or a
+ * stage resolution. None of them touches the store. DL-RUN-10.
+ */
+export const RUN_FAULT_OPERATIONS = Object.freeze({
+  /** `RewardDrawPort.draw` raised, so no offer was made. */
+  rewardDraw: 'reward-draw',
+
+  /** A registry member raised while a reward was being taken on. */
+  relicPickup: 'relic-pickup',
+
+  /** The registry publishes no activation step, so nothing could be seated. */
+  relicPickupUnsupported: 'relic-pickup-unsupported',
+
+  /** `ownedRelicIds` raised, so the draw exclusion set fell back. */
+  relicOwnership: 'relic-ownership',
+
+  /** `serialize`/`snapshotRelics` raised, so the projection fell back. */
+  relicProjection: 'relic-projection',
+
+  /** `restoreRelics`/`restore` raised, so a resumed run seated nothing. */
+  relicHydration: 'relic-hydration',
+
+  /** `relicBoardSize` raised, so no relic-implied edge length was read. */
+  relicBoardSize: 'relic-board-size',
+
+  /** `EnginePort.startStage` raised, so the stage stands owed an open. */
+  stageOpen: 'stage-open',
+
+  /** `EnginePort.endStage` raised, so the stage resolved as nothing. */
+  stageResolution: 'stage-resolution',
+
+  /** The injected cursor reader raised, so the carried cursors were kept. */
+  cursorRead: 'cursor-read',
+} as const);
+
+/** One of the operations `RUN_FAULT_OPERATIONS` declares. */
+export type RunFaultOperation =
+  (typeof RUN_FAULT_OPERATIONS)[keyof typeof RUN_FAULT_OPERATIONS];
+
+/**
+ * The operations whose failure CHANGED WHAT THE PLAYER GETS rather than only
+ * degrading a fallback, so a sink can tell the two apart without knowing the
+ * operation vocabulary.
+ *
+ * A skipped reward, a stage that did not open and a stage that did not resolve
+ * are each visible in play; a projection or ownership read that fell back to
+ * the envelope is not. DL-RUN-10.
+ */
+const RUN_FLOW_OPERATIONS: ReadonlySet<RunFaultOperation> = new Set([
+  RUN_FAULT_OPERATIONS.rewardDraw,
+  RUN_FAULT_OPERATIONS.relicPickup,
+  RUN_FAULT_OPERATIONS.relicPickupUnsupported,
+  RUN_FAULT_OPERATIONS.stageOpen,
+  RUN_FAULT_OPERATIONS.stageResolution,
+]);
+
+/**
+ * Whether a fault on `operation` altered the run the player is being shown.
+ *
+ * @param operation Operation that failed.
+ * @returns `true` where the failure is visible in play.
+ */
+export function runFaultAltersFlow(operation: RunFaultOperation): boolean {
+  return RUN_FLOW_OPERATIONS.has(operation);
+}
+
+/**
+ * One run operation that failed, named by the operation rather than by a
+ * key it never wrote.
+ *
+ * THE FAULT CHANNEL THAT IS NOT A WRITE FAILURE. Ten collaborator failures the
+ * run controller contains — a reward draw, a registry member, a stage open, a
+ * cursor read, a relic projection, a stage resolution — were reported through
+ * `onWriteFailed` carrying the run-state key and `byteLength: 0`, so a sink had
+ * no way to tell them from an exhausted quota and said the run could not be
+ * persisted where no storage operation had occurred. `onWriteFailed` now
+ * describes writes and removals of src/run/run-state-store.ts alone.
+ * DL-RUN-10.
+ */
+export interface RunFaultReport {
+  readonly correlationId: CorrelationId;
+
+  /** Which operation failed. */
+  readonly operation: RunFaultOperation;
+
+  /**
+   * Whether the failure altered the run in force rather than falling back
+   * invisibly, as `runFaultAltersFlow(operation)` decides it. Carried on the
+   * report so a sink projects consequence without restating the vocabulary.
+   */
+  readonly affectsRunFlow: boolean;
+
+  /** The value that was thrown, exactly as it was caught and unconverted. */
+  readonly error: unknown;
 }
 
 /**
  * Sink for everything this folder reports: refused payloads, migrations,
- * board-size reconciliations, failed writes and the run lifecycle.
+ * board-size reconciliations, failed writes, contained run faults and the run
+ * lifecycle.
  *
  * Every member is optional, so a consumer built without a sink, or with a
  * partial one, reports only what its sink accepts, and is constructible with
@@ -2326,7 +2464,18 @@ export interface RunReporter {
     report: BoardSizeReconciliationReport
   ) => void;
 
+  /**
+   * A write or a removal of src/run/run-state-store.ts did not reach the
+   * store. RESERVED FOR THAT: a failure with no storage operation behind it
+   * goes to `onRunFaulted`. DL-RUN-10.
+   */
   readonly onWriteFailed?: (report: RunStateWriteFailureReport) => void;
+
+  /**
+   * One contained run-operation failure, named by the operation.
+   * DL-RUN-10.
+   */
+  readonly onRunFaulted?: (report: RunFaultReport) => void;
 
   /**
    * The run's persistence status CHANGED. Reported by the run controller
@@ -2362,6 +2511,12 @@ export const NOOP_RUN_REPORTER: RunReporter = Object.freeze({
   onWriteFailed(): void {
     return;
   },
+
+  // The twelfth channel, beside `onWriteFailed` rather than instead of
+  // it. DL-RUN-10.
+  onRunFaulted(): void {
+    return;
+  },
   onPersistenceStatusChanged(): void {
     return;
   },
@@ -2378,11 +2533,9 @@ export const NOOP_RUN_REPORTER: RunReporter = Object.freeze({
     return;
   },
 
-  // ADDED: the eleventh channel. This constant is documented as implementing
-  // every member, and `onRelicsNormalized` was the one it omitted — so a module
-  // constructed without a reporter was not, in fact, reporting through a fully
-  // implemented one. Every member is optional, so the omission compiled.
-  // DL-RUN-09.
+  // The eleventh channel. Every member of the port is optional, so this
+  // constant states all eleven explicitly to remain a fully implemented
+  // reporter. DL-RUN-09.
   onRelicsNormalized(): void {
     return;
   },
@@ -2394,7 +2547,7 @@ export const NOOP_RUN_REPORTER: RunReporter = Object.freeze({
 /** Prefix every derived correlation identifier carries. */
 const CORRELATION_ID_PREFIX = 'run-';
 
-/** Separates the seed-grouping prefix from the run-instance segment. */
+/** Separates the keyed hash pair from the third, XOR-derived segment. */
 const CORRELATION_ID_INSTANCE_SEPARATOR = '-';
 
 const FNV_OFFSET_BASIS = 0x811c9dc5;
@@ -2440,7 +2593,7 @@ function renderHash(hash: number): string {
  *
  * THE RUN IDENTIFIER KEYS THE RUN-INSTANCE FORM: every segment is derived from
  * it and the seed together, so no segment is a function of the seed alone. The
- * seed-grouping form, derived when `runId` is absent or empty, is unsalted and
+ * SEED-ONLY form, derived when `runId` is absent or empty, is unsalted and
  * therefore recoverable by dictionary search, and exists for a caller that
  * deliberately wants one identifier per seed. Byte-identical to
  * `deriveCorrelationId` in src/observability/logger.ts in both forms, pinned by
@@ -2450,11 +2603,11 @@ function renderHash(hash: number): string {
  * so distinct inputs can collide, and a consumer needing exact identity
  * compares `seed` and `runId` themselves.
  *
- * @param seed Seed of the run. Coerced with `String`, so any value is
- *   accepted and none throws.
+ * @param seed Seed of the run. Re-coerced with `String` before it is hashed, so
+ *   no input throws.
  * @param runId Run instance identifier, and the key of the instance form. Omit
- *   it, or pass an empty value, for the seed-grouping form.
- * @returns An 18-character identifier for the seed-grouping form and a
+ *   it, or pass the empty string, for the seed-only form.
+ * @returns An 18-character identifier for the seed-only form and a
  *   26-character one for the run-instance form, non-empty for every input, the
  *   empty string included.
  */

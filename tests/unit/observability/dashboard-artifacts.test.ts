@@ -1,12 +1,11 @@
 // Contract suite for the Rule 3 dashboard template, both forms.
 //
-// The defect it closes: docs/dashboards/dashboard.json and
-// docs/dashboards/dashboard.html were the only Rule 3 deliverables entirely
-// outside automated validation. No module graph reaches either file, so every
+// What it binds: docs/dashboards/dashboard.json and
+// docs/dashboards/dashboard.html are reached by no module graph, so every
 // metric name, label and enumeration in them is a RESTATED copy of a production
 // declaration — dashboard.html says so itself, and asks to be checked against
-// its declaration sites. Nothing checked. A family renamed in
-// src/observability/metrics.ts left panels keyed to a name nothing emits, and
+// its declaration sites. Unchecked, a family renamed in
+// src/observability/metrics.ts leaves panels keyed to a name nothing emits, and
 // the failure mode is a dashboard that renders perfectly with every series
 // empty.
 //
@@ -493,9 +492,9 @@ describe('the static dashboard renders a real export', () => {
     expect(status.message).toContain('Prometheus text exposition');
 
     // The count the page reports is what proves it read samples rather than
-    // only headers. CHANGED: the exposition form counts SAMPLE LINES, which is
-    // the exposition's own unit — one histogram is one series in the JSON form
-    // but seventeen lines here — so the two forms are reported under different
+    // only headers. The exposition form counts SAMPLE LINES, which is the
+    // exposition's own unit — one histogram is one series in the JSON form but
+    // seventeen lines here — so the two forms are reported under different
     // nouns and this reads the noun the page actually renders.
     const counted = /(\d+) sample lines/.exec(status.message);
 

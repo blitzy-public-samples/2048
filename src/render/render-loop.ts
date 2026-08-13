@@ -187,15 +187,15 @@ export interface RenderLoopOptions {
   readonly onFrameEnd?: (context: FrameContext, durationMs: number) => void;
 
   /**
-   * ADDED: called for each failure the frame contains, before `onFrameEnd`.
+   * Called for each failure the frame contains, before `onFrameEnd`.
    *
    * The loop contains a throw from `onFrameBegin`, from a registered callback
    * and from `onFrameEnd`, so the frame completes and the loop keeps
-   * scheduling. Without this channel a lifecycle observer — the tracer's frame
-   * span — was told the frame began and ended and never that anything inside it
-   * failed, so a contained failure closed a SUCCESSFUL span. A throw from this
-   * hook is itself contained, counted on `FrameStats.hookErrors` and never
-   * re-reported through this channel. DL-LOOP-05.
+   * scheduling. This channel is how a lifecycle observer — the tracer's frame
+   * span — learns that something inside the frame failed, so a contained
+   * failure closes the span as a failure rather than as a clean frame. A throw
+   * from this hook is itself contained, counted on `FrameStats.hookErrors` and
+   * never re-reported through this channel. DL-LOOP-05.
    */
   readonly onFrameError?: (
     context: FrameContext,
@@ -209,7 +209,7 @@ export interface RenderLoopOptions {
    */
   readonly scheduler?: FrameScheduler;
 
-  /** Monotonic clock used to measure frame duration, in milliseconds. */
+  /** Monotonic clock frame duration is measured on, in milliseconds. */
   readonly now?: () => number;
 
   /** How frame durations are reported. Defaults to `'aggregate'`. */
@@ -399,7 +399,7 @@ const CALLBACK_ERROR_METRIC = 'render.frame.callback.error';
 const HOOK_ERROR_METRIC = 'render.frame.hook.error';
 
 /**
- * ADDED: the name `onFrameError` is reported under where it throws, so a faulty
+ * The name `onFrameError` is reported under where it throws, so a faulty
  * failure observer is distinguishable from a faulty begin or end hook.
  * DL-LOOP-05.
  */
@@ -682,12 +682,12 @@ interface MutableFrameContext {
 type FrameHookName = 'frame-begin' | 'frame-end';
 
 /**
- * ADDED: where inside one frame a contained throw came from — the two hooks
- * above, or a registered callback. DL-LOOP-05.
+ * Where inside one frame a contained throw came from: the two hooks above, or a
+ * registered callback. DL-LOOP-05.
  */
 export type FrameFailureSource = FrameHookName | 'frame-callback';
 
-/** ADDED: one failure a frame contained, as `onFrameError` receives it. */
+/** One failure a frame contained, as `onFrameError` receives it. */
 export interface FrameFailure {
   /** Which part of the frame threw. */
   readonly source: FrameFailureSource;
@@ -728,7 +728,7 @@ export function createRenderLoop(
   const hookBegin = options.onFrameBegin;
   const hookEnd = options.onFrameEnd;
 
-  // ADDED: the failure channel of the same lifecycle contract. DL-LOOP-05.
+  // The failure channel of the same lifecycle contract. DL-LOOP-05.
   const hookFailure = options.onFrameError;
   const timingMode: FrameTimingMode = options.timingMode ?? 'aggregate';
   const autoStopWhenIdle = options.autoStopWhenIdle === true;
@@ -819,8 +819,8 @@ export function createRenderLoop(
       thrown: error,
     });
 
-    // ADDED: the lifecycle observer is told too, so a span open over this frame
-    // closes as the failure it was rather than as a clean frame. DL-LOOP-05.
+    // The lifecycle observer is told too, so a span open over this frame closes
+    // as the failure it was rather than as a clean frame. DL-LOOP-05.
     announceFrameFailure({
       source: 'frame-callback',
       thrown: error,
@@ -857,7 +857,7 @@ export function createRenderLoop(
   };
 
   /**
-   * ADDED: hands one contained failure to `onFrameError`.
+   * Hands one contained failure to `onFrameError`.
    *
    * A throw from that hook is contained here and counted as a hook error, and is
    * NOT announced through this channel again: re-entering would turn one failing

@@ -21,17 +21,16 @@
 // overrides any of them. Decisions: DL-PW-04 (docs/DECISION_LOG.md).
 //
 // Provenance of the constants below:
-//   index.html L89-L92, L96          the board mounts and the controls root
-//   style/_tokens.scss L40-L41, L110 $mobile-field-width, $mobile-grid-spacing
+//   index.html                       the board mounts and the controls root
+//   style/_tokens.scss               $mobile-field-width, $mobile-grid-spacing
 //                                    and the 520px $mobile-threshold
-//   style/main.scss L181, L818-L819  $field-width and its mobile redefinition
-//   src/ui/a11y/settings.ts L735     `data-reduced-motion`
-//   src/input/on-screen-controls.ts L347
-//                                    `on-screen-controls-animated`
-//   src/render/number-only-renderer.ts L190, L203
+//   style/main.scss                  $field-width and its mobile redefinition
+//   src/ui/a11y/settings.ts          `data-reduced-motion`
+//   src/input/on-screen-controls.ts  `on-screen-controls-animated`
+//   src/render/number-only-renderer.ts
 //                                    `data-tile-value`, `data-board-size`
-//   src/ui/screens/run-start.ts L272 the `Begin run` control's label
-//   src/main.ts L2266-L2267          a refused probe forces number-only mode
+//   src/ui/screens/run-start.ts      the `Begin run` control's label
+//   src/main.ts                      a refused probe forces number-only mode
 
 import { expect, test } from '@playwright/test';
 
@@ -52,13 +51,13 @@ const SELECTORS = Object.freeze({
   numeral: '#board-number-only .tile-inner',
 });
 
-/** `data-reduced-motion` of src/ui/a11y/settings.ts L735. */
+/** `data-reduced-motion` of src/ui/a11y/settings.ts. */
 const REDUCED_MOTION_ATTRIBUTE = 'data-reduced-motion';
 
-/** The class src/input/on-screen-controls.ts L347 adds only when motion runs. */
+/** The class src/input/on-screen-controls.ts adds only when motion runs. */
 const MOTION_CLASS = 'on-screen-controls-animated';
 
-/** `data-board-size` of src/render/number-only-renderer.ts L203. */
+/** `data-board-size` of src/render/number-only-renderer.ts. */
 const BOARD_SIZE_ATTRIBUTE = 'data-board-size';
 
 /** The configured board size, which the default rules config fixes at 4. */
@@ -67,13 +66,13 @@ const BOARD_SIZE = 4;
 /** Starting tiles the default rules config spawns, so the floor on values. */
 const START_TILES = 2;
 
-/** `$field-width` of style/main.scss L181, in CSS pixels. */
+/** `$field-width` as style/main.scss binds it, in CSS pixels. */
 const DESKTOP_FIELD_WIDTH = 500;
 
-/** `$mobile-field-width` of style/_tokens.scss L40, in CSS pixels. */
+/** `$mobile-field-width` of style/_tokens.scss, in CSS pixels. */
 const MOBILE_FIELD_WIDTH = 280;
 
-/** `$mobile-threshold` of style/_tokens.scss L110, in CSS pixels. */
+/** `$mobile-threshold` of style/_tokens.scss, in CSS pixels. */
 const MOBILE_THRESHOLD = 520;
 
 /**

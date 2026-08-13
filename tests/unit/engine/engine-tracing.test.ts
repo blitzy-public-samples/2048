@@ -288,10 +288,10 @@ describe('a wrapper that breaks the exactly-once contract', () => {
     expect(traced.engine.move(DIRECTION_LEFT)).toBe(true);
     expect(plain.engine.move(DIRECTION_LEFT)).toBe(true);
 
-    // The defect this pins. The second call re-walked an already-resolved
-    // board, which reports `moved: false` with no score delta, and the turn
-    // adopted that: the two tiles merged on the board while the score stayed 0
-    // and no tile spawned — a half-resolved turn, silently.
+    // The invariant this pins: a traced turn resolves exactly once. A second
+    // walk of an already-resolved board would report `moved: false` with no
+    // score delta, which a turn adopting it would settle as a half-resolved
+    // turn — two tiles merged on the board, the score at 0 and no tile spawned.
     expect(traced.engine.score).toBe(4);
     expect(traced.engine.score).toBe(plain.engine.score);
     expect(traced.engine.serialize()).toEqual(plain.engine.serialize());

@@ -20,23 +20,23 @@
 //   TR-DIAG-03  js/keyboard_input_manager.js  the subscriber registry, whose
 //               L18-L32                       pull successors are the only
 //                                             sources this module reads
-//   TR-DIAG-04  style/main.scss L4-L22        the token block every style value
-//                                             below resolves to
-//   TR-DIAG-05  style/main.scss L211-L245,    `.diagnostics-overlay:not([hidden])`,
-//               as updated
-//                                             restated by the inline
-//                                             declarations from the same tokens
-//   TR-DIAG-06  style/_themes.scss L126-L128, the three `diagnostics-*` palette
+//   TR-DIAG-04  style/main.scss               the token block every style value
+//               token block                   below resolves to
+//   TR-DIAG-05  style/main.scss, as updated   `.diagnostics-overlay` in its
+//               .diagnostics-overlay          shown state, restated by the
+//                                             inline declarations from the same
+//                                             tokens
+//   TR-DIAG-06  style/_themes.scss,           the three `diagnostics-*` palette
 //               as updated                    entries, each consumed with a
-//                                             token fallback
-//   TR-DIAG-07  index.html L127, as updated   `#diagnostics-overlay`, adopted
-//                                             where the markup declares it
-//   TR-DIAG-08  target-only row               the four panels, the Prometheus
+//               diagnostics palette           token fallback
+//   TR-DIAG-07  index.html, as updated        `#diagnostics-overlay`, adopted
+//               #diagnostics-overlay          where the markup declares it
+//   TR-DIAG-08  target-only row               the six panels, the Prometheus
 //                                             text export and the combined JSON
 //                                             snapshot
 //
 // Decisions: DL-DIAG-01, DL-DIAG-02, DL-DIAG-03, DL-DIAG-04, DL-DIAG-05,
-// DL-DIAG-06 (docs/DECISION_LOG.md).
+// DL-DIAG-06, DL-DIAG-26 (docs/DECISION_LOG.md).
 
 import type { HookBusMetrics, HookCounters } from '../engine/hook-bus';
 import {
@@ -75,7 +75,11 @@ import type {
 } from './metrics';
 import { METRIC_LABELS, METRIC_NAMES } from './metrics';
 import type { FrameTraceStats, SpanRecord, TraceSnapshot } from './tracer';
-import { DEFAULT_FRAME_BUDGET_MS, SPAN_NAMES } from './tracer';
+import {
+  DEFAULT_FRAME_BUDGET_MS,
+  SPAN_ATTRIBUTES,
+  SPAN_NAMES,
+} from './tracer';
 
 /** Selector a host is adopted from where the caller supplies none. */
 export const DIAGNOSTICS_OVERLAY_SELECTOR = '#diagnostics-overlay';
@@ -104,13 +108,22 @@ const PAIR_SEPARATOR = /[&;]/;
 /** `+` as a space, the form encoding a query string may carry. */
 const ENCODED_SPACE = /\+/g;
 
-/** Class the overlay's own root carries, styled by style/main.scss L226. */
+/**
+ * Class the overlay's own root carries, styled by
+ * `.diagnostics-overlay:not([hidden])` of style/main.scss.
+ */
 const OVERLAY_CLASS = 'diagnostics-overlay';
 
-/** Class every panel heading carries, styled by style/_screens.scss L535. */
+/**
+ * Class every panel heading carries, styled by `.diagnostics-heading` of
+ * style/_screens.scss.
+ */
 const HEADING_CLASS = 'diagnostics-heading';
 
-/** Class every panel table carries, styled by style/_screens.scss L541. */
+/**
+ * Class every panel table carries, styled by `.diagnostics-table` of
+ * style/_screens.scss.
+ */
 const TABLE_CLASS = 'diagnostics-table';
 
 const CONTROLS_CLASS = 'diagnostics-controls';
@@ -118,18 +131,25 @@ const CONTROLS_CLASS = 'diagnostics-controls';
 /** Class one control carries, shared with the screen-button vocabulary. */
 const CONTROL_CLASS = 'screen-button';
 
-// REMOVED: `CONTROL_SELECTOR`, the selector the control row's buttons were read
-// back by after a render. Nothing reads them back now — the row and its five
-// buttons are held from the one build. DL-DIAG-16.
+// No selector reads the control row's buttons back after a render: the row and
+// its five buttons are held from the one build. DL-DIAG-16.
 
 /** Class a status cell carries, suffixed with the status it reports. */
 const STATUS_CLASS = 'diagnostics-status';
+
+/**
+ * Class the export status line carries, beneath the control row.
+ *
+ * Its own class rather than `STATUS_CLASS`, which is the per-cell health
+ * vocabulary and is suffixed with a health status. DL-DIAG-26.
+ */
+const EXPORT_STATUS_CLASS = 'diagnostics-export-status';
 
 /** Class the inline error line of a panel that failed to render carries. */
 const PANEL_ERROR_CLASS = 'diagnostics-panel-error';
 
 /**
- * ADDED: class a cell holding a sentence rather than a figure carries, styled
+ * Class a cell holding a sentence rather than a figure carries, styled
  * by style/_screens.scss.
  *
  * The sheet aligns every column but the first to the end, which is right for a
@@ -143,7 +163,7 @@ const LOGGER_SUBSYSTEM = 'diagnostics';
 const DEFAULT_HIDE_EMPTY = true;
 
 /**
- * ADDED: families whose series are shown whatever they read.
+ * Families whose series are shown whatever they read.
  *
  * `hideEmpty` exists so the handful of series that moved are not buried by the
  * many a registry declares up front, and for an incidental family that is
@@ -206,6 +226,14 @@ const JSON_MEDIA_TYPE = 'application/json;charset=utf-8';
 /** Rendered in a cell that has no value. */
 const MISSING_VALUE = '—';
 
+/**
+ * Longest text a bounded cell renders before it is elided — the run
+ * context's goal kind and persistence word, and a span's relic or hook
+ * attribution. Wider than every value the product itself produces, so the bound
+ * only ever acts on a value from outside it. DL-DIAG-26.
+ */
+const MAX_ATTRIBUTION_CHARS = 48;
+
 /** Cadence the scheduled refresh runs at while the overlay is shown, in ms. */
 const DEFAULT_REFRESH_INTERVAL_MS = transitionSpeed * 10;
 
@@ -213,30 +241,37 @@ const DEFAULT_REFRESH_INTERVAL_MS = transitionSpeed * 10;
 export const DEFAULT_DIAGNOSTICS_SNAPSHOT_FILENAME =
   'game2048-diagnostics.json';
 
-/** Version the combined snapshot envelope carries. */
-export const DIAGNOSTICS_SNAPSHOT_SCHEMA_VERSION = 1;
+/**
+ * Version the combined snapshot envelope carries.
+ *
+ * CHANGED from 1 to 2: version 2 is version 1 plus the `run` section, so a
+ * reader written against version 1 still finds every member it knew and a reader
+ * that needs the run context can require version 2 rather than probing for the
+ * member. DL-DIAG-26.
+ */
+export const DIAGNOSTICS_SNAPSHOT_SCHEMA_VERSION = 2;
 
 // Every style value below is a token of src/theme/tokens.ts or a custom
 // property style/_themes.scss publishes; none is a literal.
 
-/** Custom property style/_themes.scss L560 publishes for the surface. */
+/** Custom property style/_themes.scss publishes for the surface. */
 const SURFACE_PROPERTY = '--theme-diagnostics-surface';
 
-/** Custom property style/_themes.scss L561 publishes for the text. */
+/** Custom property style/_themes.scss publishes for the text. */
 const TEXT_PROPERTY = '--theme-diagnostics-text';
 
-/** Custom property style/_themes.scss L556 publishes for the accent. */
+/** Custom property style/_themes.scss publishes for the accent. */
 const ACCENT_PROPERTY = '--theme-diagnostics-accent';
 
 /**
- * ADDED: the two custom properties style/_themes.scss L421-L422 publishes for
- * the accessible control pair, which `@mixin screen-control` of
- * style/_screens.scss L191 and L195 already resolves for every other
- * `.screen-button`.
+ * The two custom properties style/_themes.scss publishes for the accessible
+ * control pair, which `@mixin screen-control` of style/_screens.scss resolves
+ * for every other `.screen-button`.
  *
- * The controls below carry that same class and were nevertheless painted from
- * two literals, because an inline declaration outranks the sheet — so the two
- * additive palettes were dead on this surface alone. DL-DIAG-09.
+ * The controls below carry that same class and are painted from these two
+ * properties rather than from literals, because an inline declaration outranks
+ * the sheet and a literal would leave the additive palettes dead on this
+ * surface alone. DL-DIAG-09.
  */
 const CONTROL_SURFACE_PROPERTY = '--theme-control-surface';
 
@@ -306,12 +341,12 @@ const HOST_SHOWN_DISPLAY = 'flex';
 const HOST_HIDDEN_DISPLAY = 'none';
 
 /**
- * ADDED: the declaration `applyVisibility` writes, as a removal key.
+ * The declaration `applyVisibility` writes, as a removal key.
  *
- * It is deliberately NOT a member of `HOST_STYLE`: that table is applied whole,
- * and `display` alternates with the hidden state. Naming it here is what lets
- * the release remove it, which is the property a released host used to keep.
- * Only the key is read; the value stands for the shown state. DL-DIAG-14.
+ * NOT a member of `HOST_STYLE`: that table is applied whole, and `display`
+ * alternates with the hidden state. Naming it here is what lets the release
+ * remove it. Only the key is read; the value stands for the shown state.
+ * DL-DIAG-14.
  */
 const HOST_VISIBILITY_STYLE: Readonly<Record<string, string>> = Object.freeze({
   display: HOST_SHOWN_DISPLAY,
@@ -319,7 +354,7 @@ const HOST_VISIBILITY_STYLE: Readonly<Record<string, string>> = Object.freeze({
 
 /**
  * Width of the control's edge: `math.div($tile-border-radius, 3)`, the
- * derivation `$a11y-hairline` of style/_a11y.scss L36 is written from.
+ * derivation `$a11y-hairline` of style/_a11y.scss is written from.
  */
 const CONTROL_BORDER_DIVISOR = 3;
 
@@ -337,21 +372,20 @@ const CONTROL_MIN_BLOCK_UNITS = 3;
 /**
  * Inline declarations a control carries, from `@mixin screen-control`.
  *
- * CHANGED: the surface and the label resolve the two custom properties every
- * other `.screen-button` resolves, so an additive palette reaches this surface
- * too, and the token literals are the FALLBACKS rather than the values. The two
- * that were declared here — the retained `buttonBackground` and
- * `brightTextColor` — measure 3.79:1 against one another, which is the frozen
- * ratio of AAP 0.5.2 and below WCAG 2.1 AA for 13px bold text; the control pair
- * they are replaced by measures 4.73:1 in the default palette and above 11:1 in
- * both additive ones.
+ * The surface and the label resolve the two custom properties every other
+ * `.screen-button` resolves, so an additive palette reaches this surface too,
+ * and the token literals are the FALLBACKS rather than the values. The control
+ * pair measures 4.73:1 in the default palette and above 11:1 in both additive
+ * ones; the retained `buttonBackground` and `brightTextColor` the fallbacks are
+ * written from measure 3.79:1 against one another, which is the frozen ratio of
+ * AAP 0.5.2 and below WCAG 2.1 AA for 13px bold text.
  *
- * CHANGED from `border: none`: the control pair is a fill that sits between
- * 1.40:1 and 2.35:1 against the diagnostics surface, so a borderless control
- * would have no discernible boundary on the panel. The edge resolves the
- * surface's own text colour, which measures at least 11:1 against the panel and
- * at least 4.73:1 against the fill, so the control's shape is identifiable in
- * every palette as WCAG 1.4.11 requires. DL-DIAG-09.
+ * The edge is declared rather than `border: none`: the control pair is a fill
+ * that sits between 1.40:1 and 2.35:1 against the diagnostics surface, so a
+ * borderless control would have no discernible boundary on the panel. It
+ * resolves the surface's own text colour, which measures at least 11:1 against
+ * the panel and at least 4.73:1 against the fill, so the control's shape is
+ * identifiable in every palette as WCAG 1.4.11 requires. DL-DIAG-09.
  */
 const CONTROL_STYLE: Readonly<Record<string, string>> = Object.freeze({
   background: themed(
@@ -376,6 +410,22 @@ const CONTROLS_STYLE: Readonly<Record<string, string>> = Object.freeze({
   display: 'flex',
   'flex-wrap': 'wrap',
   gap: `${HALF_GRID_SPACING}px`,
+});
+
+/**
+ * Inline declarations the export status line carries.
+ *
+ * It is a FLEX ITEM of the control row, taking a whole line of its own beneath
+ * the buttons: `.diagnostics-controls` is `position: sticky` with
+ * `inset-block-end: 0`, so a status appended after the row scrolled away with
+ * the panels while the buttons that produce it stayed pinned — the feedback has
+ * to be where the control is. It reads as prose, so it takes prose wrapping
+ * rather than the table's fixed layout. DL-DIAG-26.
+ */
+const EXPORT_STATUS_STYLE: Readonly<Record<string, string>> = Object.freeze({
+  margin: '0',
+  'flex-basis': '100%',
+  'overflow-wrap': 'break-word',
 });
 
 /** Inline declarations a panel heading carries. */
@@ -408,7 +458,7 @@ const CELL_STYLE: Readonly<Record<string, string>> = Object.freeze({
 });
 
 /**
- * ADDED: inline size of each stated column, narrowest first.
+ * Inline size of each stated column, narrowest first.
  *
  * Under `table-layout: fixed` the columns divide the table evenly unless a
  * width is stated, which gave the column holding one short status word the same
@@ -420,7 +470,7 @@ const CELL_STYLE: Readonly<Record<string, string>> = Object.freeze({
 const COLUMN_INLINE_SIZES: readonly string[] = Object.freeze(['34%', '20%']);
 
 /**
- * ADDED: inline declarations a prose cell carries, mirroring the sheet rule
+ * Inline declarations a prose cell carries, mirroring the sheet rule
  * `PROSE_CLASS` resolves.
  *
  * Written inline as well as in the sheet for the same reason every other style
@@ -575,6 +625,44 @@ export interface DiagnosticsHookRow {
   readonly failed: number;
 }
 
+/**
+ * The bounded, read-only run context the Run panel renders and the
+ * combined snapshot carries.
+ *
+ * CARRIES NO RUN IDENTIFIER AND NO SEED. `DL-LOG-09` states that the run
+ * identifier is carried in no record, no metric label and NO EXPORT — it is the
+ * key the correlation identifier is derived under — and `DL-LOG-07` states that
+ * a seed is data a player may publish but that no caller may carry into a record
+ * or an export. This snapshot is downloadable, so both are excluded and the
+ * run's identity on this surface remains the correlation identifier that every
+ * other section is keyed to. DL-DIAG-26.
+ */
+export interface DiagnosticsRunView {
+  /** Zero-based stage index of the run in force. */
+  readonly stageIndex: number;
+
+  /** The stage goal's kind, one of `STAGE_GOAL_KINDS`. */
+  readonly goalKind: string;
+
+  /** The goal's target, in tile-value or score units. */
+  readonly goalTarget: number;
+
+  /** `achieved / target`, clamped to [0, 1]. */
+  readonly goalProgress: number;
+
+  /** How many relics the run holds. */
+  readonly relics: number;
+
+  /** Whether the run's writes are reaching durable storage. */
+  readonly persistence: string;
+}
+
+/**
+ * Supplies the run context. Pull only, and read once per render and once
+ * per snapshot, so the surface holds no run state of its own. DL-DIAG-26.
+ */
+export type RunViewReader = () => DiagnosticsRunView | null;
+
 /** The health section of the combined snapshot. */
 export interface DiagnosticsHealthSection {
   /** Roll-up over `checks`, `null` where no health source is attached. */
@@ -602,6 +690,13 @@ export interface DiagnosticsSnapshot {
 
   /** Wall-clock time of the metrics snapshot it was built from, ISO 8601. */
   readonly generatedAt: string;
+
+  /**
+   * The run context, or `null` where no run source is attached or it
+   * threw. Version 2 of this envelope is version 1 plus this member.
+   * DL-DIAG-26.
+   */
+  readonly run: DiagnosticsRunView | null;
   readonly health: DiagnosticsHealthSection;
 
   /** The tracer's snapshot, `null` where no tracer is attached. */
@@ -653,6 +748,25 @@ export interface DiagnosticsOverlayOptions {
    * asked to push.
    */
   readonly hookCounts?: HookCountsReader;
+
+  /**
+   * Supplies the run's stage, goal progress, relic count and persistence
+   * verdict, rendered by the Run panel and carried by the combined snapshot.
+   * Pull only, and never asked for a run identifier or a seed. DL-DIAG-26.
+   */
+  readonly run?: RunViewReader;
+
+  /**
+   * Speaks one sentence through the PAGE's live-region service.
+   *
+   * This surface owns no live region of its own — `src/ui/a11y/live-region.ts`
+   * is the product's only announcement path and this surface sits outside it —
+   * and its panels rewrite every second, which is not something an assistive
+   * technology can be asked to follow. So the one thing that IS announced is an
+   * outcome the player asked for by pressing a control. Absent, an export
+   * outcome is still written to the status line and still logged. DL-DIAG-26.
+   */
+  readonly announce?: (text: string) => void;
 
   /**
    * Supplies the RNG substreams' draw cursors, folded into the registry before
@@ -804,7 +918,7 @@ function readFlag(text: string, flag: string): string | null {
     const separator = pair.indexOf('=');
     const name = separator === -1 ? pair : pair.slice(0, separator);
 
-    // ADDED: the NAME is matched case-insensitively and untrimmed whitespace
+    // The NAME is matched case-insensitively and untrimmed whitespace
     // is ignored, which is how the VALUE has always been read below. The two
     // halves of one flag disagreeing was a trap: `?DIAGNOSTICS` read as absent
     // while `?diagnostics=OFF` read as off. DL-DIAG-13.
@@ -898,14 +1012,14 @@ interface Cell {
 type Row = readonly (string | Cell)[];
 
 /**
- * ADDED: which of a panel's three bodies is on screen, or none.
+ * Which of a panel's three bodies is on screen, or none.
  *
  * DL-DIAG-24.
  */
 type PanelBodyKind = 'table' | 'empty' | 'failure' | 'none';
 
 /**
- * ADDED: one cell of a retained panel row, beside the dynamic declaration block
+ * One cell of a retained panel row, beside the dynamic declaration block
  * last applied to it.
  *
  * The text and the class are compared against the node itself, so a render
@@ -919,14 +1033,14 @@ interface CellView {
   style: Readonly<Record<string, string>> | null;
 }
 
-/** ADDED: one retained row of a panel's table. DL-DIAG-24. */
+/** One retained row of a panel's table. DL-DIAG-24. */
 interface RowView {
   readonly line: Element;
   readonly cells: CellView[];
 }
 
 /**
- * ADDED: one retained panel: its heading, whichever body is on screen, and the
+ * One retained panel: its heading, whichever body is on screen, and the
  * rows of its table.
  *
  * The three bodies are built at most once each and swapped by attachment, so an
@@ -1068,7 +1182,7 @@ function clear(element: Element): void {
 }
 
 /**
- * ADDED: removes an attribute that has been emptied.
+ * Removes an attribute that has been emptied.
  *
  * `classList.remove` of the last class leaves `class=""` behind, and clearing
  * every declaration leaves `style=""`, so a released host carried two empty
@@ -1154,7 +1268,7 @@ function hasValue(series: MetricSeriesSnapshot): boolean {
 }
 
 /**
- * ADDED: whether a series is shown whatever it reads.
+ * Whether a series is shown whatever it reads.
  *
  * @param series Series to test.
  * @returns Whether the series belongs to the panel's skeleton. DL-DIAG-12.
@@ -1304,6 +1418,29 @@ function countOf(value: unknown): number {
 }
 
 /**
+ * Renders an unvalidated string member as a BOUNDED cell text.
+ *
+ * Every string this surface renders from a source it does not own passes through
+ * one bound, so a relic identifier, a goal kind or a persistence word of any
+ * length occupies a fixed-layout cell without pushing the table wider than the
+ * host. An absent or empty value renders as the missing marker rather than as an
+ * empty cell, which is indistinguishable from a cell that failed to render.
+ * DL-DIAG-26.
+ *
+ * @param value Member to render.
+ * @returns The bounded text, or the missing-value marker.
+ */
+function boundedText(value: unknown): string {
+  if (typeof value !== 'string' || value.length === 0) {
+    return MISSING_VALUE;
+  }
+
+  return value.length <= MAX_ATTRIBUTION_CHARS
+    ? value
+    : `${value.slice(0, MAX_ATTRIBUTION_CHARS)}${ELISION}`;
+}
+
+/**
  * Reads one hook's counters out of a dispatch-count view, which may be
  * fabricated or partial.
  *
@@ -1368,12 +1505,10 @@ const METRICS_PANEL_TITLE = 'Metrics';
 const LOG_PANEL_TITLE = 'Recent records';
 
 /**
- * ADDED: titles the metrics panel, stating what it is not showing.
+ * Titles the metrics panel, stating what it is not showing.
  *
- * A count alone — "60 of 120 series" — left a reader to guess what the other
- * 60 were and whether they had been lost. The heading now names the reason
- * they are absent and says where they are, so the panel can be read without
- * the export beside it. DL-DIAG-12.
+ * The title names the reason absent series are absent and says where they are,
+ * so the panel reads without the export beside it. DL-DIAG-12.
  *
  * @param shown Series the panel renders.
  * @param total Series the reading holds.
@@ -1391,6 +1526,20 @@ function metricsPanelTitle(shown: number, total: number): string {
     `${hidden} at zero hidden here and exported)`
   );
 }
+
+/**
+ * What an export control says once it has been activated.
+ *
+ * Whole sentences, because the line is read by a screen reader through the
+ * page's announcer as well as seen: `Export metrics: the download started.` is a
+ * statement, where `started` beside a button is a fragment. The failure sentence
+ * names where the cause is, because the surface deliberately does not put a
+ * caught value on screen. DL-DIAG-26.
+ */
+const EXPORT_STARTED_TEXT = 'the download started.';
+
+const EXPORT_REFUSED_TEXT =
+  'the download did not start. The console record names the cause.';
 
 const OVERLAY_TITLE = 'Diagnostics';
 
@@ -1425,7 +1574,7 @@ const SNAPSHOT_EXPORT_CONTROL_LABEL = 'Export snapshot';
 const CLOSE_CONTROL_LABEL = 'Close diagnostics';
 
 /**
- * ADDED: the two labels of the compact-mode control, which renders the surface
+ * The two labels of the compact-mode control, which renders the surface
  * as its heading and its control row alone.
  *
  * The surface is a fixed panel at the top of the layering ladder AAP 0.6.4
@@ -1442,7 +1591,7 @@ const COLLAPSE_CONTROL_LABEL = 'Collapse diagnostics';
 const EXPAND_CONTROL_LABEL = 'Expand diagnostics';
 
 /**
- * ADDED: position of the collapse control in the row, counting from the first.
+ * Position of the collapse control in the row, counting from the first.
  *
  * The row is built once, so the control is held from that build; the position is
  * read there and nowhere else. DL-DIAG-16.
@@ -1453,7 +1602,7 @@ const COLLAPSE_CONTROL_POSITION = 3;
 const COLLAPSED_ATTRIBUTE = 'data-collapsed';
 
 /**
- * ADDED: attribute the host publishes its refresh state under, `live` while the
+ * Attribute the host publishes its refresh state under, `live` while the
  * scheduled render is running and `paused` while the surface holds the keyboard
  * focus and the schedule is standing off.
  *
@@ -1520,6 +1669,11 @@ const INERT_DIAGNOSTICS_SNAPSHOT: DiagnosticsSnapshot = Object.freeze({
   schemaVersion: 0,
   correlationId: '',
   generatedAt: '',
+
+  // A destroyed overlay has released its run source, so it reports no run
+  // context — the same `null` a surface that was never given one reports.
+  // DL-DIAG-26.
+  run: null,
   health: Object.freeze({
     status: null,
     checks: EMPTY_HEALTH_ROWS,
@@ -1654,6 +1808,14 @@ export function createDiagnosticsOverlay(
   let tracer: TracerView | null = options.tracer ?? null;
   let hookCounts: HookCountsReader | null = options.hookCounts ?? null;
   let rngCursors: RngCursorsReader | null = options.rngCursors ?? null;
+
+  // ADDED, and releasable for the same reason as the four above: a destroyed
+  // overlay must not keep the run controller reachable through it. DL-DIAG-26.
+  let runView: RunViewReader | null = options.run ?? null;
+
+  // The page's announcer, released with the rest. DL-DIAG-26.
+  let announceText: ((text: string) => void) | null =
+    typeof options.announce === 'function' ? options.announce : null;
   const hideEmpty = options.hideEmpty ?? DEFAULT_HIDE_EMPTY;
   const logLimit = limitOf(options.logLimit, DEFAULT_LOG_LIMIT);
   const spanLimit = limitOf(options.spanLimit, DEFAULT_SPAN_LIMIT);
@@ -1681,9 +1843,9 @@ export function createDiagnosticsOverlay(
    * Listeners this module added, with the node and the event type they were
    * added for.
    *
-   * ADDED: the type travels with the entry. Every listener was a `click` until
-   * the focus tracking of DL-DIAG-17 needed two more types, and a release that
-   * assumed `click` would have left them attached. DL-DIAG-17.
+   * The type travels with the entry, so the release removes each listener under
+   * the type it was added for rather than under an assumed one. The focus
+   * tracking adds two types beside `click`. DL-DIAG-17.
    */
   const listeners: {
     readonly node: EventTarget;
@@ -1699,40 +1861,54 @@ export function createDiagnosticsOverlay(
   let timer: number | null = null;
 
   /**
-   * ADDED: whether the surface is rendering as its heading and control row
+   * Whether the surface is rendering as its heading and control row
    * alone. Starts expanded, so a session that never touches the control sees
    * the surface it saw before. DL-DIAG-11.
    */
   let collapsed = false;
 
   /**
-   * ADDED: the surface's own heading, built once and never replaced, so the
+   * The surface's own heading, built once and never replaced, so the
    * refresh state can be written to it without a render. DL-DIAG-15,
    * DL-DIAG-16.
    */
   let headingNode: Element | null = null;
 
   /**
-   * ADDED: the control row, built once and never detached, so a control keeps
+   * The control row, built once and never detached, so a control keeps
    * its identity, its listener and its focus across a render. DL-DIAG-16.
    */
   let controlRow: Element | null = null;
 
-  /** ADDED: the collapse control, relabelled in place. DL-DIAG-16. */
+  /** The collapse control, relabelled in place. DL-DIAG-16. */
   let collapseControl: HTMLElement | null = null;
 
   /**
-   * ADDED: the element OUTSIDE the host that last held the keyboard focus, and
+   * The export status line, built with the control row and rewritten in
+   * place, and the text it currently carries.
+   *
+   * FURNITURE, not a reading: a render neither writes it nor clears it, so an
+   * outcome stays on screen until the next activation replaces it — a status
+   * that vanished on the next scheduled tick would be unreadable at one-second
+   * cadence, and the failure it reports is exactly the one a player needs time
+   * to read. DL-DIAG-16, DL-DIAG-26.
+   */
+  let exportStatusNode: Element | null = null;
+
+  let exportStatusText = '';
+
+  /**
+   * The element OUTSIDE the host that last held the keyboard focus, and
    * the one focus returns to when the surface closes.
    *
-   * Tracked continuously rather than captured at open, because the case that
-   * matters is a keyboard user who tabbed in from the game while the surface
-   * was already open: their position is where focus was a moment ago, not where
-   * it was when the flag mounted the surface. DL-DIAG-17.
+   * TRACKED CONTINUOUSLY through document-level `focusin`, so the value is the
+   * focus position from a moment ago rather than from the moment the flag
+   * mounted the surface — which is the position a keyboard user who tabbed in
+   * from the game while the surface stood open returns to. DL-DIAG-17.
    */
   let focusOrigin: Element | null = null;
 
-  /** ADDED: whether the document-level focus listeners are installed. */
+  /** Whether the document-level focus listeners are installed. */
   let focusTracked = false;
 
   /**
@@ -1856,20 +2032,19 @@ export function createDiagnosticsOverlay(
       element.removeAttribute('role');
       element.removeAttribute('aria-label');
 
-      // ADDED: the state attribute a collapsed surface published. DL-DIAG-11.
+      // The state attribute a collapsed surface published. DL-DIAG-11.
       element.removeAttribute(COLLAPSED_ATTRIBUTE);
 
-      // ADDED: and the one the refresh state publishes. DL-DIAG-15.
+      // And the one the refresh state publishes. DL-DIAG-15.
       element.removeAttribute(REFRESH_ATTRIBUTE);
       removeStyle(element, HOST_STYLE);
 
-      // ADDED: `display` is written by `applyVisibility` and is NOT a member of
-      // HOST_STYLE, so the removal above left it behind — a released host kept
-      // `display: none`, which is inert only because `mount` writes it again.
-      // DL-DIAG-14.
+      // `display` is written by `applyVisibility` and is NOT a member of
+      // HOST_STYLE, so the removal above does not reach it and this second
+      // removal is what takes it off a released host. DL-DIAG-14.
       removeStyle(element, HOST_VISIBILITY_STYLE);
 
-      // ADDED: and neither emptied attribute is left on a host that carried
+      // And neither emptied attribute is left on a host that carried
       // neither before. DL-DIAG-14.
       dropEmptyAttribute(element, 'style');
       dropEmptyAttribute(element, 'class');
@@ -1916,10 +2091,10 @@ export function createDiagnosticsOverlay(
   /**
    * Writes text to a node only where it differs.
    *
-   * ADDED: the comparison is the point. An unconditional write replaces the
-   * text node and records a character-data mutation for a value that has not
-   * changed, which is a change notification to an assistive technology and
-   * activity to anything watching the DOM. DL-DIAG-16, DL-DIAG-24.
+   * Compared before writing: an unconditional write replaces the text node and
+   * records a character-data mutation for a value that has not changed, which
+   * an assistive technology receives as a change notification and anything
+   * watching the DOM as activity. DL-DIAG-16, DL-DIAG-24.
    *
    * @param node Node to write to.
    * @param text Text it should carry.
@@ -1931,14 +2106,14 @@ export function createDiagnosticsOverlay(
   };
 
   /**
-   * ADDED: the panels now on screen, by key, retained across every render.
+   * The panels now on screen, by key, retained across every render.
    *
    * DL-DIAG-24.
    */
   const panelViews = new Map<string, PanelView>();
 
   /**
-   * ADDED: builds one table cell, carrying the declarations that never change.
+   * Builds one table cell, carrying the declarations that never change.
    *
    * @param column Zero-based position of the cell in its row, which selects the
    *   stated inline size. DL-DIAG-08.
@@ -1967,7 +2142,7 @@ export function createDiagnosticsOverlay(
   };
 
   /**
-   * ADDED: brings one retained cell into line with the value it now holds.
+   * Brings one retained cell into line with the value it now holds.
    *
    * Text, class and dynamic declarations are each written only where they
    * differ, and a dynamic declaration block that has been replaced is removed
@@ -2016,7 +2191,7 @@ export function createDiagnosticsOverlay(
   };
 
   /**
-   * ADDED: brings one retained row into line with the cells it now holds.
+   * Brings one retained row into line with the cells it now holds.
    *
    * @param view Row to patch.
    * @param row Cells the row should carry.
@@ -2060,7 +2235,7 @@ export function createDiagnosticsOverlay(
   };
 
   /**
-   * ADDED: removes whichever body a panel currently shows.
+   * Removes whichever body a panel currently shows.
    *
    * @param view Panel to take the body off.
    */
@@ -2089,7 +2264,7 @@ export function createDiagnosticsOverlay(
   };
 
   /**
-   * ADDED: puts one body on screen, immediately after its panel's heading.
+   * Puts one body on screen, immediately after its panel's heading.
    *
    * A body that is already the shown one is left attached, which is what makes
    * a repeated render of an unchanged panel record no child-list mutation.
@@ -2125,7 +2300,7 @@ export function createDiagnosticsOverlay(
   };
 
   /**
-   * ADDED: shows the empty line of a panel whose reading holds no row.
+   * Shows the empty line of a panel whose reading holds no row.
    *
    * The table is REPLACED by the paragraph rather than emptied, which is the
    * shape docs/OBSERVABILITY.md states. DL-DIAG-24.
@@ -2147,7 +2322,7 @@ export function createDiagnosticsOverlay(
   };
 
   /**
-   * ADDED: shows the inline error line of a panel whose row builder threw.
+   * Shows the inline error line of a panel whose row builder threw.
    *
    * @param view Panel that failed.
    */
@@ -2171,7 +2346,7 @@ export function createDiagnosticsOverlay(
   };
 
   /**
-   * ADDED: shows a panel's rows, building its table at most once.
+   * Shows a panel's rows, building its table at most once.
    *
    * @param view Panel to fill.
    * @param rows Rows the reading holds.
@@ -2250,7 +2425,7 @@ export function createDiagnosticsOverlay(
   };
 
   /**
-   * ADDED: resolves one panel, building its heading at most once and attaching
+   * Resolves one panel, building its heading at most once and attaching
    * it ahead of the control row.
    *
    * The heading is re-attached rather than rebuilt, so a panel that was taken
@@ -2316,7 +2491,7 @@ export function createDiagnosticsOverlay(
    * row builder that throws degrades to an error line inside the panel and
    * stops no other panel.
    *
-   * CHANGED: the panel's nodes are RETAINED and patched rather than rebuilt and
+   * The panel's nodes are RETAINED and patched rather than rebuilt and
    * replaced. DL-DIAG-24.
    *
    * @param key Stable identity of the panel.
@@ -2349,7 +2524,7 @@ export function createDiagnosticsOverlay(
   };
 
   /**
-   * ADDED: takes every panel off screen, keeping its nodes for the next expand.
+   * Takes every panel off screen, keeping its nodes for the next expand.
    *
    * DL-DIAG-24.
    */
@@ -2441,7 +2616,7 @@ export function createDiagnosticsOverlay(
   };
 
   /**
-   * ADDED: whether an element is outside the host.
+   * Whether an element is outside the host.
    *
    * @param candidate Element to test.
    * @returns Whether the host neither is it nor contains it. DL-DIAG-17.
@@ -2450,7 +2625,7 @@ export function createDiagnosticsOverlay(
     host === null || (candidate !== host && !host.contains(candidate));
 
   /**
-   * ADDED: remembers an element outside the host as the place focus returns to.
+   * Remembers an element outside the host as the place focus returns to.
    *
    * @param candidate The element that took the focus. DL-DIAG-17.
    */
@@ -2469,7 +2644,7 @@ export function createDiagnosticsOverlay(
   };
 
   /**
-   * ADDED: returns the focus to the element it came from, and reports whether
+   * Returns the focus to the element it came from, and reports whether
    * it went.
    *
    * @returns Whether focus was moved. DL-DIAG-17.
@@ -2507,7 +2682,7 @@ export function createDiagnosticsOverlay(
   };
 
   /**
-   * ADDED: installs the document-level focus tracking, once.
+   * Installs the document-level focus tracking, once.
    *
    * `focusin` and `focusout` bubble, where `focus` and `blur` do not, so one
    * listener pair on the document sees every move. They are installed on the
@@ -2573,12 +2748,9 @@ export function createDiagnosticsOverlay(
     }
   };
 
-  // REMOVED: `focusedControlIndex` and `restoreControlFocus`, which recorded
-  // the focused control's POSITION before a render and moved focus back to
-  // whatever node occupied that position afterwards. Both existed only because
-  // a render replaced the control nodes; the control row of DL-DIAG-16 is never
-  // detached, so the node that holds the focus still holds it after a render
-  // and there is nothing to chase.
+  // No focus position is recorded across a render and none is restored: the
+  // control row of DL-DIAG-16 is never detached, so the node that holds the
+  // focus still holds it after a render.
 
   /** Removes every listener this module added. */
   const releaseListeners = (): void => {
@@ -2829,6 +3001,46 @@ export function createDiagnosticsOverlay(
     }
   };
 
+  /**
+   * Reads the run context, once per render and once per snapshot.
+   *
+   * Guarded and bounded in one place: a reader that throws, that answers with
+   * something other than an object, or that answers with members of the wrong
+   * shape yields `null` rather than a half-rendered panel, and every number is
+   * normalised so a non-finite reading renders as the missing marker instead of
+   * `NaN`. DL-DIAG-26.
+   *
+   * @returns The view, or `null` where no run source is attached or it threw.
+   */
+  const readRunView = (): DiagnosticsRunView | null => {
+    if (runView === null) {
+      return null;
+    }
+
+    let read: DiagnosticsRunView | null = null;
+
+    try {
+      read = runView();
+    } catch (thrown) {
+      reportFailure(RUN_PANEL_TITLE, thrown);
+
+      return null;
+    }
+
+    if (typeof read !== 'object' || read === null) {
+      return null;
+    }
+
+    return {
+      stageIndex: countOf(read.stageIndex),
+      goalKind: boundedText(read.goalKind),
+      goalTarget: countOf(read.goalTarget),
+      goalProgress: countOf(read.goalProgress),
+      relics: countOf(read.relics),
+      persistence: boundedText(read.persistence),
+    };
+  };
+
   const foldHookView = (view: HookDispatchCountsView): void => {
     try {
       metrics.foldHookDispatchCounts(view);
@@ -2964,7 +3176,7 @@ export function createDiagnosticsOverlay(
   };
 
   /**
-   * ADDED: builds a cell holding a sentence rather than a figure.
+   * Builds a cell holding a sentence rather than a figure.
    *
    * @param text Sentence to render.
    * @returns The cell, aligned to its start rather than to its end.
@@ -2976,7 +3188,7 @@ export function createDiagnosticsOverlay(
   });
 
   /**
-   * ADDED: this panel's word for a three-state status, inside a sentence.
+   * This panel's word for a three-state status, inside a sentence.
    *
    * Read from `STATUS_PRESENTATION` so the status COLUMN and any readiness
    * detail that quotes a status carry ONE vocabulary, lowercased because a
@@ -2994,14 +3206,44 @@ export function createDiagnosticsOverlay(
    * @param taken Snapshot the render describes.
    * @returns The rows.
    */
-  const runRows = (taken: MetricsSnapshot): readonly Row[] => [
-    ['correlation id', taken.correlationId],
-    ['generated at', taken.generatedAt],
-    ['elapsed ms', renderNumber(taken.elapsedMs)],
-    ['rejected reports', renderNumber(taken.rejected)],
-    ['reporter faults', renderNumber(taken.reporterFaults)],
-    ['schema version', renderNumber(taken.schemaVersion)],
-  ];
+  const runRows = (
+    taken: MetricsSnapshot,
+    run: DiagnosticsRunView | null,
+  ): readonly Row[] => {
+    const rows: Row[] = [['correlation id', taken.correlationId]];
+
+    // The run's own context, ABOVE the reading metadata, because the
+    // panel is named for the run and not for the snapshot. Present only where a
+    // run source is attached, so a surface built without one renders exactly the
+    // six rows it always did. The stage index is rendered one-based beside its
+    // zero-based value, because the HUD counts stages from one and an operator
+    // reading both should not have to reconcile them. DL-DIAG-26.
+    if (run !== null) {
+      rows.push(
+        ['stage', `${renderNumber(run.stageIndex + 1)} (index ${renderNumber(run.stageIndex)})`],
+        [
+          'stage goal',
+          `${run.goalKind} ${renderNumber(run.goalTarget)}`,
+        ],
+        [
+          'goal progress',
+          `${renderNumber(Math.round(run.goalProgress * PERCENT_SCALE))}%`,
+        ],
+        ['relics held', renderNumber(run.relics)],
+        ['run persistence', run.persistence],
+      );
+    }
+
+    rows.push(
+      ['generated at', taken.generatedAt],
+      ['elapsed ms', renderNumber(taken.elapsedMs)],
+      ['rejected reports', renderNumber(taken.rejected)],
+      ['reporter faults', renderNumber(taken.reporterFaults)],
+      ['schema version', renderNumber(taken.schemaVersion)],
+    );
+
+    return rows;
+  };
 
   /**
    * Builds the health rows: one per check, the roll-up, and the readiness
@@ -3076,18 +3318,68 @@ export function createDiagnosticsOverlay(
   };
 
   /**
-   * Builds one span row: the name, the duration, the identifier and the parent
-   * it was opened under.
+   * Names what a span was recorded FOR, where its attributes say so.
+   *
+   * The relic first and the hook second: a relic-handler span carries both, and
+   * the relic is the identity an operator is looking for — a per-hook count is
+   * already a whole panel on this surface, while a relic identifier appears
+   * nowhere else on it. `docs/dashboards/dashboard.json` panel 14 states that
+   * per-relic attribution is available from this surface, because the
+   * `game2048_relic_handler_errors_total` family is labelled by hook and carries
+   * no relic identity; that statement was not true of the rendered rows.
+   * Bounded, and absent where a span carries neither attribute. DL-DIAG-26.
+   *
+   * @param record Span to describe.
+   * @returns The attribution cell, or `null` where the span carries none.
+   */
+  const spanAttribution = (record: SpanRecord): string | null => {
+    const attributes: unknown = record.attributes;
+
+    if (typeof attributes !== 'object' || attributes === null) {
+      return null;
+    }
+
+    const read = attributes as Record<string, unknown>;
+    const relic: unknown = read[SPAN_ATTRIBUTES.relic];
+
+    if (typeof relic === 'string' && relic.length > 0) {
+      return `relic ${boundedText(relic)}`;
+    }
+
+    const hook: unknown = read[SPAN_ATTRIBUTES.hook];
+
+    return typeof hook === 'string' && hook.length > 0
+      ? `hook ${boundedText(hook)}`
+      : null;
+  };
+
+  /**
+   * Builds one span row: the name, the duration, the identifier, the parent it
+   * was opened under, and what it was recorded for where its attributes say.
    *
    * @param record Span to render.
    * @returns The row.
    */
-  const spanRow = (record: SpanRecord): Row => [
-    record.name,
-    `${renderNumber(record.durationMs)} ms`,
-    `id ${shortId(record.id)}`,
-    `parent ${shortId(record.parentId)}`,
-  ];
+  const spanRow = (record: SpanRecord): Row => {
+    const cells: (string | Cell)[] = [
+      record.name,
+      `${renderNumber(record.durationMs)} ms`,
+      `id ${shortId(record.id)}`,
+      `parent ${shortId(record.parentId)}`,
+    ];
+
+    // A FIFTH CELL, and only where there is something to put in it: the tables
+    // are `tbody`-only with no header row, so a row carrying one more cell than
+    // its neighbours is well-formed, and `patchRow` grows and shrinks a retained
+    // row's cells to match. DL-DIAG-18, DL-DIAG-26.
+    const attribution = spanAttribution(record);
+
+    if (attribution !== null) {
+      cells.push(attribution);
+    }
+
+    return cells;
+  };
 
   /**
    * Builds the trace rows: the two duration families summarised off the
@@ -3213,7 +3505,7 @@ export function createDiagnosticsOverlay(
         !hideEmpty ||
         hasValue(candidate) ||
 
-        // ADDED: the skeleton is shown at zero, so a reader inspecting only
+        // The skeleton is shown at zero, so a reader inspecting only
         // this panel sees the counters and the enumerated dimensions a reading
         // is checked against. DL-DIAG-12.
         isCoreSeries(candidate),
@@ -3237,7 +3529,7 @@ export function createDiagnosticsOverlay(
     ]);
 
   /**
-   * ADDED: builds the heading and the control row, once, and keeps them.
+   * Builds the heading and the control row, once, and keeps them.
    *
    * They are the surface's FURNITURE: the heading names it and the five
    * controls operate it, and neither is a function of a reading. A render used
@@ -3279,11 +3571,19 @@ export function createDiagnosticsOverlay(
 
         const built = [
           control(REFRESH_CONTROL_LABEL, render),
+          // Each handler CONSUMES its export's answer, so a refused
+          // download is seen and heard rather than only logged. DL-DIAG-26.
           control(METRICS_EXPORT_CONTROL_LABEL, () => {
-            exportPrometheusText();
+            reportExportOutcome(
+              METRICS_EXPORT_CONTROL_LABEL,
+              exportPrometheusText(),
+            );
           }),
           control(SNAPSHOT_EXPORT_CONTROL_LABEL, () => {
-            exportSnapshotJson();
+            reportExportOutcome(
+              SNAPSHOT_EXPORT_CONTROL_LABEL,
+              exportSnapshotJson(),
+            );
           }),
 
           // Before the control that closes the surface: collapsing is the
@@ -3316,10 +3616,40 @@ export function createDiagnosticsOverlay(
         reportFailure(CONTROLS_LABEL, thrown);
       }
     }
+
+    // The export status line, built with the row it reports for and kept
+    // INSIDE it. Built even before an export has been attempted, so the line a
+    // player will read appears where they will look for it rather than shifting
+    // the controls the first time one is pressed; and placed within the row
+    // because the row is pinned to the foot of the scrolling surface, so a line
+    // appended after it scrolled away with the panels while the buttons that
+    // produce it stayed on screen. It carries no `aria-live`: the page's
+    // announcer speaks the outcome once, and a live region here would speak it
+    // twice. DL-DIAG-16, DL-DIAG-26.
+    if (exportStatusNode === null) {
+      const line = make('p', EXPORT_STATUS_CLASS, exportStatusText);
+
+      if (line !== null) {
+        applyStyle(line, EXPORT_STATUS_STYLE);
+        exportStatusNode = line;
+      }
+    }
+
+    if (
+      controlRow !== null &&
+      exportStatusNode !== null &&
+      exportStatusNode.parentNode !== controlRow
+    ) {
+      try {
+        controlRow.appendChild(exportStatusNode);
+      } catch (thrown) {
+        reportFailure(CONTROLS_LABEL, thrown);
+      }
+    }
   };
 
   /**
-   * ADDED: writes the collapse control's label and disclosure state.
+   * Writes the collapse control's label and disclosure state.
    *
    * The node is reused, so the state it publishes is UPDATED in place rather
    * than carried by a replacement node. DL-DIAG-16.
@@ -3354,7 +3684,81 @@ export function createDiagnosticsOverlay(
   };
 
   /**
-   * ADDED: writes the refresh state to the host and to the heading.
+   * Writes one sentence to the export status line, creating it on first
+   * use and rewriting it in place afterwards.
+   *
+   * @param text Sentence to show. DL-DIAG-26.
+   */
+  const setExportStatus = (text: string): void => {
+    exportStatusText = text;
+
+    const node = exportStatusNode;
+
+    if (node === null) {
+      return;
+    }
+
+    try {
+      if (node.textContent !== text) {
+        node.textContent = text;
+      }
+    } catch (thrown) {
+      reportFailure(CONTROLS_LABEL, thrown);
+    }
+  };
+
+  /**
+   * Speaks one sentence through the page's announcer.
+   *
+   * Contained: an announcer that throws is a page service this surface does not
+   * own, and a diagnostics control must not fail because the announcement did.
+   * DL-DIAG-26.
+   *
+   * @param text Sentence to speak.
+   * @returns Whether an announcer took it.
+   */
+  const announce = (text: string): boolean => {
+    const speak = announceText;
+
+    if (speak === null) {
+      return false;
+    }
+
+    try {
+      speak(text);
+
+      return true;
+    } catch (thrown) {
+      reportFailure(CONTROLS_LABEL, thrown);
+
+      return false;
+    }
+  };
+
+  /**
+   * Consumes an export control's own answer.
+   *
+   * Both handlers discarded it, so a refused download — no `Blob`, no
+   * `createObjectURL`, a host that would not take the anchor — produced a log
+   * record and NOTHING a player could see or hear: they had pressed a button and
+   * been told nothing at all. The outcome now reaches the status line, which
+   * persists, and the page's announcer, which speaks it once.
+   *
+   * @param label Control that was activated.
+   * @param started Whether it reported the download as started.
+   * @returns What `started` was, so a caller can act on it.
+   */
+  const reportExportOutcome = (label: string, started: boolean): boolean => {
+    const text = `${label}: ${started ? EXPORT_STARTED_TEXT : EXPORT_REFUSED_TEXT}`;
+
+    setExportStatus(text);
+    announce(text);
+
+    return started;
+  };
+
+  /**
+   * Writes the refresh state to the host and to the heading.
    *
    * @param paused Whether the scheduled render is standing off. DL-DIAG-15.
    */
@@ -3412,21 +3816,26 @@ export function createDiagnosticsOverlay(
     const traces = readTraces();
     const records = readLogs();
 
-    // ADDED: the panels are the collapsible half. Every reading above is still
+    // The run context, read ONCE per render alongside every other pulled
+    // source, so the Run panel and a snapshot taken from the same render agree.
+    // DL-DIAG-26.
+    const run = readRunView();
+
+    // The panels are the collapsible half. Every reading above is still
     // TAKEN on a render of a collapsed surface — the fold, the metrics snapshot
     // `lastSnapshot()` answers from and the health check all run exactly as
     // they do expanded — so an expand, the refresh control and `refresh()`
     // change what is DRAWN and nothing about what is recorded or exported.
-    // CHANGED: the SCHEDULED tick of a collapsed surface no longer reaches this
-    // function at all, so a collapsed surface left on screen takes no reading
-    // per second. DL-DIAG-11, DL-DIAG-24.
+    // The SCHEDULED tick of a collapsed surface does not reach this function at
+    // all, so a collapsed surface left on screen takes no reading per second.
+    // DL-DIAG-11, DL-DIAG-24.
     if (collapsed) {
       detachPanels();
     } else {
-      // CHANGED: each panel is PATCHED in place — its heading, its rows and its
+      // Each panel is PATCHED in place — its heading, its rows and its
       // cells are written only where the reading differs — rather than rebuilt
       // into a fragment that replaced every panel node. DL-DIAG-24.
-      panel(RUN_PANEL_TITLE, RUN_PANEL_TITLE, () => runRows(taken));
+      panel(RUN_PANEL_TITLE, RUN_PANEL_TITLE, () => runRows(taken, run));
       panel(HEALTH_PANEL_TITLE, HEALTH_PANEL_TITLE, () => healthRows(health));
       panel(TRACE_PANEL_TITLE, TRACE_PANEL_TITLE, () =>
         traceRows(traces, taken),
@@ -3449,11 +3858,11 @@ export function createDiagnosticsOverlay(
       panel(LOG_PANEL_TITLE, LOG_PANEL_TITLE, () => logRows(records));
     }
 
-    // ADDED: the collapsed state is published on the host as well as on the
+    // The collapsed state is published on the host as well as on the
     // control, so a stylesheet and a reader of the DOM can both see it.
     // DL-DIAG-11.
     try {
-      // ADDED: set only where it differs, so a collapsed surface does not record
+      // Set only where it differs, so a collapsed surface does not record
       // one attribute mutation per tick for a value that has not changed.
       // `removeAttribute` of an absent attribute already records nothing.
       // DL-DIAG-16.
@@ -3473,7 +3882,7 @@ export function createDiagnosticsOverlay(
   };
 
   /**
-   * ADDED: switches between the full surface and its heading-and-controls
+   * Switches between the full surface and its heading-and-controls
    * form, and redraws.
    *
    * The keyboard focus is on the control that was activated and that control is
@@ -3537,16 +3946,16 @@ export function createDiagnosticsOverlay(
 
         // The SCHEDULED render is skipped while the surface holds the keyboard
         // focus, so the panels a reader is working through do not change under
-        // them. ADDED: the skip publishes itself, and `focusout` renders
-        // immediately, so the stand-off is both visible while it lasts and over
-        // the moment the reader leaves. DL-DIAG-15.
+        // them. The skip publishes itself, and `focusout` renders immediately,
+        // so the stand-off is both visible while it lasts and over the moment
+        // the reader leaves. DL-DIAG-15.
         if (holdsFocus()) {
           publishRefreshState(true);
 
           return;
         }
 
-        // ADDED: and the SCHEDULED render is skipped while the surface is
+        // And the SCHEDULED render is skipped while the surface is
         // collapsed, so a tick that would draw nothing reads nothing either.
         // The state is still published, because the surface is live rather than
         // standing off. Every other path into `render` — the expand, the
@@ -3569,14 +3978,14 @@ export function createDiagnosticsOverlay(
   /**
    * Hides the host and stops the scheduled refresh.
    *
-   * ADDED: where the surface itself held the keyboard focus, the focus goes back
-   * to the element outside it that had it last. Hiding an element that contains
+   * Where the surface itself held the keyboard focus, the focus goes back to
+   * the element outside it that had it last. Hiding an element that contains
    * the focus drops the focus to the body, so a keyboard user who closed the
    * surface from its own control lost their position in the page and had to
    * traverse back to it. The check is made BEFORE the host is hidden, because
-   * afterwards the active element is already the body. Focus is never taken from
-   * somewhere else: a close called while focus sits in the game leaves it there.
-   * DL-DIAG-17.
+   * afterwards the active element is already the body. Focus is never taken
+   * from somewhere else: a close called while focus sits in the game leaves it
+   * there. DL-DIAG-17.
    */
   const hide = (): void => {
     const returning = shown && holdsFocus();
@@ -3590,7 +3999,7 @@ export function createDiagnosticsOverlay(
 
     setHidden(host, true);
 
-    // ADDED: a closed surface is neither live nor paused, so it publishes
+    // A closed surface is neither live nor paused, so it publishes
     // neither. The attribute returns on the render the next `show` performs.
     // Leaving the value the close froze would have reported a stand-off that no
     // longer has a schedule to stand off from. DL-DIAG-15.
@@ -3619,7 +4028,7 @@ export function createDiagnosticsOverlay(
       return;
     }
 
-    // ADDED: the element focused as the surface opens is the first candidate
+    // The element focused as the surface opens is the first candidate
     // for the return, and the tracking keeps it current from there. DL-DIAG-17.
     if (!shown) {
       rememberFocusOrigin(owner?.activeElement);
@@ -3722,6 +4131,10 @@ export function createDiagnosticsOverlay(
       schemaVersion: DIAGNOSTICS_SNAPSHOT_SCHEMA_VERSION,
       correlationId: taken.correlationId,
       generatedAt: taken.generatedAt,
+
+      // ADDED with the Run panel, so an exported snapshot carries the same run
+      // context the surface shows. DL-DIAG-26.
+      run: readRunView(),
       health,
       traces: readTraces(),
       hooks: hookRowsOf(hookView ?? {}),
@@ -3978,15 +4391,15 @@ export function createDiagnosticsOverlay(
       createdHost = null;
       lastMetrics = null;
 
-      // ADDED: the furniture and the focus origin are released with the host,
+      // The furniture and the focus origin are released with the host,
       // so a destroyed overlay retains neither the nodes it built nor a handle
       // to an element of the page it was shown over. DL-DIAG-16, DL-DIAG-17.
       headingNode = null;
       controlRow = null;
       collapseControl = null;
 
-      // CHANGED: the retained panels go with them, so a destroyed overlay holds
-      // no heading, table, row or cell of the reading it last drew. DL-DIAG-24.
+      // The retained panels go with them, so a destroyed overlay holds no
+      // heading, table, row or cell of the reading it last drew. DL-DIAG-24.
       panelViews.clear();
       focusOrigin = null;
       focusTracked = false;
@@ -3999,6 +4412,8 @@ export function createDiagnosticsOverlay(
       tracer = null;
       hookCounts = null;
       rngCursors = null;
+      runView = null;
+      announceText = null;
     },
   });
 }

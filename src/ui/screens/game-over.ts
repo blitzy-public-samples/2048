@@ -46,15 +46,15 @@
 //                                  persisted property stay `keepPlaying`, and
 //                                  the engine's in-class flag is
 //                                  `continuedPlay`
-//   index.html L53-L59             `.game-message`, its `<p>` and the `.lower`
-//                                  control row, retained
-//   index.html L100               `#screen-game-over`, its `role="dialog"`,
+//   index.html `.game-message`     the retained overlay, its `<p>` and the
+//                                  `.lower` control row
+//   index.html `#screen-game-over` the screen container, its `role="dialog"`,
 //                                  `aria-modal` and `aria-label`
-//   style/main.scss L229, L241     `.keep-playing-button` hidden in the base
-//                                  overlay and restored inside `&.game-won`, so
+//   style/main.scss                `.keep-playing-button` hidden in the base
+//   .keep-playing-button           overlay and restored inside `&.game-won`, so
 //                                  the state class is what reveals it
-//   style/main.scss L234-L235      the overlay cadence, read from
-//                                  `OVERLAY_CADENCE` of ../screen-router, which
+//   style/main.scss fade-in        the overlay cadence, read from
+//   cadence                        `OVERLAY_CADENCE` of ../screen-router, which
 //                                  reads `motion.fadeIn` of ../../theme/tokens
 //   style/_screens.scss            `.screen-panel`, `.screen-verdict`,
 //                                  `.screen-text`, `.screen-actions` and
@@ -211,7 +211,8 @@ export const TERMINAL_STATE_CLASSES: PinnedOverlayClasses =
 export const TERMINAL_STATE_MESSAGES: PinnedOverlayCopy = TERMINAL_OVERLAY_COPY;
 
 /**
- * Selector the retained overlay is found at, as index.html L53 declares it.
+ * Selector the retained overlay is found at, as `.game-message` of index.html
+ * declares it.
  */
 export const GAME_OVER_OVERLAY_SELECTOR = TERMINAL_OVERLAY_SELECTOR;
 
@@ -225,7 +226,7 @@ export const GAME_OVER_OVERLAY_SELECTOR = TERMINAL_OVERLAY_SELECTOR;
 export const GAME_OVER_VERDICT_SELECTOR = TERMINAL_OVERLAY_TEXT_SELECTOR;
 
 /**
- * The frozen overlay cadence of style/main.scss L234-L235: a `fade-in` whose
+ * The frozen overlay cadence of style/main.scss: a `fade-in` whose
  * duration and delay both come from `motion.fadeIn` of ../../theme/tokens,
  * where the delay is `transitionSpeed * 12`.
  */
@@ -846,7 +847,7 @@ export function createGameOverScreen(
    * is ever attached. Decision DL-GAMEOVER-08. js/html_actuator.js L131 only
    * added: the vanilla actuator reached one terminal state from the other only
    * with `clearMessage()` L135-L139 in between, and the in-state refresh path
-   * here reaches it without. `&.game-won` at style/main.scss L241 is the one
+   * here reaches it without. `&.game-won` of style/main.scss is the one
    * rule that reveals `.keep-playing-button`.
    *
    * @param state The terminal state whose class and copy are written.
@@ -907,7 +908,7 @@ export function createGameOverScreen(
   /**
    * Tracks the host's accessible name to the verdict on screen.
    *
-   * index.html L100 declares `#screen-game-over` with `role="dialog"`,
+   * index.html declares `#screen-game-over` with `role="dialog"`,
    * `aria-modal="true"` and a fixed `aria-label`; that one container serves
    * both verdicts, so the name is written per state and the declared value is
    * restored by `destroy`. No role and no other ARIA attribute is added.
@@ -982,7 +983,7 @@ export function createGameOverScreen(
    * detaches every other one.
    *
    * `.keep-playing-button` inside the retained overlay is NOT touched here:
-   * its visibility belongs to `&.game-won` at style/main.scss L241, which the
+   * its visibility belongs to `&.game-won` of style/main.scss, which the
    * state class has already applied. This module writes nothing on that
    * element.
    *
@@ -1319,7 +1320,7 @@ export function createGameOverScreen(
    *
    * `.keep-playing-button` and `.retry-button` are NOT reached: those two are
    * bound by src/input/on-screen-controls.ts and revealed by `&.game-won` at
-   * style/main.scss L241, so clearing the state class is the whole of what
+   * style/main.scss, so clearing the state class is the whole of what
    * puts them down.
    */
   const retractControls = (): void => {
@@ -1374,8 +1375,8 @@ export function createGameOverScreen(
     listeners.length = 0;
     controls.clear();
 
-    // Only what this module appended is removed; the retained markup of
-    // index.html L53-L59 and L100 is left as it was found.
+    // Only what this module appended is removed; the retained `.game-message`
+    // and `#screen-game-over` markup of index.html is left as it was found.
     panel?.remove();
 
     panel = null;

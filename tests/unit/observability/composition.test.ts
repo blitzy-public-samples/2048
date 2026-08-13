@@ -169,6 +169,20 @@ const counterValue = (name: string): number => {
   return series !== undefined && series.kind === 'counter' ? series.value : -1;
 };
 
+/**
+ * One counter family summed across every label set it carries, which is what
+ * a per-hook family has to be read as: `counterValue` above matches the first
+ * series only, and the hook-dispatch family carries one series per hook name.
+ */
+const counterFamilyTotal = (name: string): number =>
+  (application?.metrics.snapshot().series ?? []).reduce(
+    (total, candidate) =>
+      candidate.name === name && candidate.kind === 'counter'
+        ? total + candidate.value
+        : total,
+    0,
+  );
+
 /** One histogram series, matched by name and optionally by one label. */
 const histogramSeries = (
   name: string,
@@ -588,8 +602,8 @@ describe('readiness is resolved before the renderer is selected', () => {
     expect(selected).toBeGreaterThanOrEqual(0);
 
     // AND IN THIS ORDER. `HealthSurface.readiness()` owns the verdict that
-    // decides whether a WebGL board may be mounted at all, and it was resolved
-    // after the renderer had been selected and mounted. DL-MAIN-27.
+    // decides whether a WebGL board may be mounted at all, so it resolves
+    // BEFORE the renderer is selected and mounted. DL-MAIN-27.
     expect(checked).toBeLessThan(selected);
     expect(resolved).toBeLessThan(selected);
     expect(checked).toBeLessThan(resolved);
@@ -1266,10 +1280,10 @@ describe('the correlation identifier', () => {
     expect(second.run.identity.resumed).toBe(true);
   });
 
-  it('is the run-instance form, longer than the seed-grouping form', () => {
+  it('is the run-instance form, longer than the seed-only form', () => {
     application = startPlaying();
 
-    // 18 characters is the seed-grouping form; 26 is the form that appends the
+    // 18 characters is the seed-only form; 26 is the form that appends the
     // run-instance segment.
     expect(application.logger.correlationId).toHaveLength(26);
   });
@@ -1306,6 +1320,93 @@ describe('the correlation identifier', () => {
     expect(application.relics.correlationId).toBe(after);
     expect(application.run.correlationId()).toBe(after);
     expect(application.diagnostics.snapshot().correlationId).toBe(after);
+  });
+
+  it('partitions the hook counts, so run two s series carries run two', () => {
+    // THE VALUE ASSERTION, not the identifier one. The case above proves every
+    // surface reports the NEW identifier; it does not prove the values under it
+    // are the new run's. `HookBus.metrics()` reported lifetime totals and the
+    // registry folds an absolute by its increase since the previous fold of the
+    // same key — a key namespaced by the correlation identifier — so the first
+    // fold after a rotation folded the whole lifetime total as run two's opening
+    // delta. A correct label over run one's numbers is worse than no label.
+    // DL-MAIN-28, DL-HOOKBUS-12.
+    application = startPlaying();
+    playEveryDirection();
+
+    const live = application as Application;
+
+    // Folded through the surface that folds it in production.
+    live.diagnostics.snapshot();
+
+    const runOne = live.engine.hooks.metrics();
+    const runOneDispatched = counterFamilyTotal(
+      METRIC_NAMES.hookDispatchesTotal,
+    );
+
+    expect(runOne.totals.dispatched).toBeGreaterThan(0);
+    expect(runOneDispatched).toBe(runOne.totals.dispatched);
+
+    live.startNewRun();
+
+    // THE BUS IS PARTITIONED AT THE ROTATION, so what it holds now is the new
+    // run's own opening dispatches — the stage start and the tiles the board
+    // opened with — and not one dispatch of the run before it.
+    const opened = live.engine.hooks.metrics();
+
+    expect(opened.totals.dispatched).toBeGreaterThan(0);
+    expect(opened.totals.dispatched).toBeLessThan(runOne.totals.dispatched);
+    expect(opened.totals.failed).toBe(0);
+    expect(opened.totals.skippedDegraded).toBe(0);
+    expect(opened.chargesConsumed).toBe(0);
+
+    // The per-hook and per-subscriber ROWS are rebuilt with the totals, so a
+    // row the previous run counted cannot reappear carrying its counts. A
+    // leaked row would put the row sum ABOVE the total it belongs to.
+    const perHookDispatched = Object.values(opened.hooks).reduce(
+      (total, row) => total + row.dispatched,
+      0,
+    );
+    const perSubscriberInvoked = opened.subscribers.reduce(
+      (total, row) => total + row.invoked,
+      0,
+    );
+
+    expect(perHookDispatched).toBe(opened.totals.dispatched);
+    expect(perSubscriberInvoked).toBeLessThanOrEqual(opened.totals.invoked);
+
+    for (const hook of Object.values(opened.hooks)) {
+      expect(hook.skippedDegraded).toBe(0);
+    }
+
+    for (const subscriber of opened.subscribers) {
+      expect(subscriber.failed).toBe(0);
+      expect(subscriber.chargesConsumed).toBe(0);
+    }
+
+    // AND THE FOLD AGREES WITH THE BUS EXACTLY. This is the property the leak
+    // broke: the registry's counter opened at run one's whole lifetime total,
+    // so the series exceeded the bus's own reading of the run it was labelled
+    // with. Equality is what says the series carries this run and only this one.
+    live.diagnostics.snapshot();
+
+    expect(counterFamilyTotal(METRIC_NAMES.hookDispatchesTotal)).toBe(
+      opened.totals.dispatched,
+    );
+    expect(runOneDispatched).toBeGreaterThan(opened.totals.dispatched);
+
+    // Then run two's OWN dispatches, and only those, accumulate into it.
+    playEveryDirection();
+    live.diagnostics.snapshot();
+
+    const runTwoBus = live.engine.hooks.metrics();
+
+    expect(runTwoBus.totals.dispatched).toBeGreaterThan(
+      opened.totals.dispatched,
+    );
+    expect(counterFamilyTotal(METRIC_NAMES.hookDispatchesTotal)).toBe(
+      runTwoBus.totals.dispatched,
+    );
   });
 
   it('rotates BEFORE the new run s first emission', () => {
@@ -1417,13 +1518,14 @@ describe('the stage span of a run that ended without clearing its stage', () => 
       (span) => span.name === SPAN_NAMES.engineStage,
     );
 
-    // The stage the run was playing files its record. CHANGED: it closes as a
-    // RESOLVED stage carrying `cleared: false`, because `RunController.finish()`
-    // now ends that stage through the engine before it summarises — so the span
-    // records the transition that actually happened rather than the absence of
-    // one. It used to close as `unwound` from the run reporter, and before that
-    // it stayed open until a LATER stage superseded it, dating the stage span to
-    // the whole gap between runs. DL-MAIN-29, DL-RUNCTL-30.
+    // The stage the run was playing files its record, closing as a RESOLVED
+    // stage carrying `cleared: false`, because `RunController.finish()` ends
+    // that stage through the engine before it summarises — so the span records
+    // the transition that actually happened rather than the absence of one: it
+    // closes as a resolved stage rather than as `unwound` from the run
+    // reporter, and never stays open until a LATER stage supplants it, which
+    // would date the stage span to the whole gap between runs. DL-MAIN-29,
+    // DL-RUNCTL-30.
     expect(stages.length).toBeGreaterThan(0);
     expect(stages.at(-1)?.attributes[SPAN_ATTRIBUTES.outcome]).toBe(
       SPAN_OUTCOMES.committed,
@@ -2590,16 +2692,16 @@ describe('the storage sink separates a refusal from a failure', () => {
     expect(unreadable[0]?.fields?.refused).toBe(false);
     expect(unreadable[0]?.fields?.unreadable).toBe(true);
 
-    // The cause survives in the bounded description, where it used to be
-    // flattened onto "Unknown storage error."
+    // The cause survives in the bounded description rather than being flattened
+    // onto "Unknown storage error."
     expect(unreadable[0]?.error?.name).toBe('SyntaxError');
     expect(unreadable[0]?.error?.message).toContain('not valid JSON');
   });
 
   it('reports one record for one unreadable value, however often it is read', () => {
     // Two consumers read the run-state key at boot — the identity resolver and
-    // the loader — and the failed parse used to drop its memo, so one corrupt
-    // value produced one record per read. DL-STORE-09.
+    // the loader — and a failed parse keeps its memo, so one corrupt value
+    // produces one record rather than one per read. DL-STORE-09.
     window.localStorage.setItem(namespacedKey('runState'), '{"schemaVersion":');
 
     application = start(document);
@@ -2795,6 +2897,92 @@ describe('an export carries neither the seed nor the run identifier', () => {
  * the level to look for it. Decisions DL-STORE-08, DL-RUNCTL-20.
  * ========================================================================== */
 
+/* ==========================================================================
+ * THE STORE THAT ACCEPTS EVERY WRITE AND SURVIVES NOTHING
+ *
+ * `MemoryStorage` stands in where Web Storage is unavailable, and it ACCEPTS
+ * every write. The run controller derived persistence from write success alone,
+ * so a page with no Web Storage played on as `persistent` and the HUD said the
+ * run was saved — while the readiness surface, deriving the same verdict from
+ * the storage strategy, called the identical store `ephemeral`. One rule now,
+ * and it is durability. DL-RUNCTL-33, DL-HEALTH-10, DL-MAIN-47.
+ * ========================================================================== */
+
+describe('a composition whose Web Storage is unavailable', () => {
+  /**
+   * Makes the construction-time writability probe FAIL for the duration of
+   * `body`, so the storage manager falls back to memory.
+   *
+   * `Storage.prototype` is patched rather than the instance, for the reason
+   * `withRefusedRunWrites` below states: jsdom's `Storage` exposes named
+   * properties, so assigning to the instance stores an item.
+   *
+   * @param body Runs with the fallback in force.
+   */
+  const withoutWebStorage = (body: () => void): void => {
+    const prototype = window.Storage.prototype;
+    const native = prototype.setItem;
+
+    prototype.setItem = function refusing(): void {
+      throw new DOMException('Access is denied.', 'SecurityError');
+    };
+
+    try {
+      body();
+    } finally {
+      prototype.setItem = native;
+    }
+  };
+
+  it('reports the run as ephemeral through the controller, health and HUD', () => {
+    withoutWebStorage(() => {
+      application = start(document);
+
+      const live = application as Application;
+
+      // THE STORE IS THE FALLBACK, and it accepts writes.
+      const storage = live.health
+        .report()
+        .checks.find((check) => check.id === 'storage');
+
+      expect(storage?.data.strategy).toBe('memory');
+
+      // ALL THREE SURFACES AGREE. The controller no longer claims a saved run,
+      // the readiness verdict says the same thing, and the HUD's not-saved
+      // notice is on screen rather than hidden.
+      expect(live.run.persistenceStatus()).toBe('ephemeral');
+      expect(live.health.readiness().storage).toBe('ephemeral');
+
+      // Read AFTER the refresh: the notice element is built on first use, so
+      // querying before it would find nothing whatever the status is.
+      expect(live.hud.refreshPersistence()).toBe('ephemeral');
+
+      const notice = document.querySelector('.hud-ephemeral');
+
+      expect(notice).not.toBeNull();
+      expect((notice as HTMLElement).hidden).toBe(false);
+    });
+  });
+
+  it('claims no refused write for a store that refused none', () => {
+    withoutWebStorage(() => {
+      application = start(document);
+
+      const live = application as Application;
+
+      // The transition record names DURABILITY, not a refusal: the memory store
+      // accepted everything it was given.
+      const crossings = live.logger
+        .recent(400)
+        .filter((record) => record.fields?.status === 'ephemeral');
+
+      for (const crossing of crossings) {
+        expect(crossing.fields?.refusedWrites).toBe(0);
+      }
+    });
+  });
+});
+
 describe('a run-state write that storage refuses', () => {
   /**
    * Refuses every write to the run-state key at the PLATFORM boundary, for the
@@ -2931,12 +3119,12 @@ describe('a run-state write that storage refuses', () => {
     ).toBeGreaterThan(0);
   });
 
-  // ADDED: the same scenario measured ONE COMMIT EARLIER. The controller writes
-  // after every view has taken the commit, so the status the HUD read during
-  // the refused turn was the one in force BEFORE that write — and a store whose
-  // quota is exhausted refuses every later write too, so with no follow-up
-  // commit the interface kept saying the run was being saved for the rest of the
-  // run. The crossing itself now reaches the screen. DL-MAIN-38, DL-HUD-17.
+  // The same scenario measured ONE COMMIT EARLIER. The controller writes after
+  // every view has taken the commit, so the status the HUD read during the
+  // refused turn is the one in force BEFORE that write — and a store whose
+  // quota is exhausted refuses every later write too, so without the crossing
+  // reaching the screen the interface would go on saying the run was being
+  // saved for the rest of the run. DL-MAIN-38, DL-HUD-17.
   it('tells the player on the very turn the write was refused', () => {
     window.localStorage.setItem(RUN_STATE_KEY, SEEDED_ENVELOPE);
 
@@ -3133,12 +3321,12 @@ describe('a run-state write that storage refuses', () => {
 /* ==========================================================================
  * A caught value a screen reports
  *
- * The run-summary screen's clipboard refusal used to reduce the rejection to
- * `Error.name: Error.message` and put that text in an ORDINARY field. Fields
- * are shape-normalised and never sensitivity-redacted, so a rejection message
- * written by a browser implementation — or by an injected rejection — was
- * retained in the log ring buffer and downloadable with the diagnostics
- * snapshot. The field now carries the rejection's CLASS, and the value itself
+ * The run-summary screen's clipboard refusal must not reduce the rejection to
+ * `Error.name: Error.message` in an ORDINARY field. Fields are shape-normalised
+ * and never sensitivity-redacted, so a rejection message written by a browser
+ * implementation — or by an injected rejection — would be retained in the log
+ * ring buffer and downloadable with the diagnostics
+ * snapshot. The field carries the rejection's CLASS, and the value itself
  * travels on the level-preserving failure channel, where the logger's
  * redaction model and its record budget apply to it.
  * Decisions DL-SETTINGS-07, DL-SUMMARY-15, DL-LOG-08, DL-LOG-10.

@@ -1,23 +1,19 @@
 // Integration suite for the COMPLETE screen registry, AAP R8 and Rule 3.
 //
-// WHAT WAS WRONG
-//   Six screen modules shipped complete and fully unit tested — run start,
-//   stage progress, reward, run summary and the shared game-over verdict — and
-//   the composition root built exactly one of them. `createScreenRouter` was
-//   called with no `screens` option at all, so `screens` defaulted to `{}` and
-//   every routed state showed an empty container: the run-start screen the cold
-//   load lands on, the interstitial a cleared stage passes through, the summary
-//   a finished run ends on and the verdict panel a loss or a win renders. Each
-//   of those modules also carries its own reporter, so the whole of their
-//   logging, counting and degradation reporting was unreachable from the
-//   running application.
+// EVERY ROUTED STATE HAS A REGISTERED MODULE `createScreenRouter` is called
+// WITH its `screens` option. Were `screens` to default to `{}`, every routed
+// state would show an empty container — the run-start screen the cold load
+// lands on, the interstitial a cleared stage passes through, the summary a
+// finished run ends on and the verdict panel a loss or a win renders — and each
+// module's own reporter, and so the whole of its logging, counting and
+// degradation reporting, would be unreachable from the running application.
 //
-//   The reward state was worse than absent. The router carries a reward surface
-//   of its own that predates src/ui/screens/, and it stamps the same
-//   `data-relic-id` on its own buttons as the relic-card component does.
-//   Registering the module without retiring that surface would have rendered
-//   `#screen-reward` twice, engaged two focus traps over one dialog and given a
-//   single card press two selection paths.
+// The reward state carries a second constraint. The router has a reward surface
+// of its own that predates src/ui/screens/, and it stamps the same
+// `data-relic-id` on its own buttons as the relic-card component does.
+// Registering the module without retiring that surface would render
+// `#screen-reward` twice, engage two focus traps over one dialog and give a
+// single card press two selection paths.
 //
 // WHAT THIS SUITE PINS
 //   That every overlay state of AAP Figure 6 has a registered module and a

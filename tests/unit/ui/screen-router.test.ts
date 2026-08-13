@@ -431,6 +431,47 @@ describe('the settings dialog', () => {
     expect(router.context()).toBe('game');
   });
 
+  // The refused open is a CLOSE-EQUIVALENT — it shows the panel, hands it
+  // to the open hook and hides it again — so it re-presents the control layer the
+  // way a close does. The open hook is where a composition renders the body and
+  // re-applies availability with the dialog SHOWN (DL-CONTROL-06), and the
+  // availability layer reads a shown dialog as the overlay context: a refusal
+  // that refreshed nothing would leave every board-only control withheld with no
+  // dialog up. DL-ROUTER-46.
+  it('re-presents the control layer when the open is refused for holding nothing focusable', () => {
+    setup();
+
+    const refreshes: { hidden: boolean; open: boolean }[] = [];
+
+    router = createScreenRouter({
+      document,
+
+      // Renders a paragraph and nothing focusable, so the trap refuses.
+      onSettingsOpen: (host): void => {
+        host.appendChild(document.createElement('p'));
+      },
+    });
+
+    router.attach({
+      controls: {
+        refresh: (): void => {
+          refreshes.push({
+            hidden: panel().hidden === true,
+            open: router?.isSettingsOpen() ?? false,
+          });
+        },
+      },
+    });
+
+    const attached = refreshes.length;
+
+    expect(router.openSettings()).toBe(false);
+
+    // Exactly one refresh, and it read the SETTLED document: the panel is hidden
+    // again and no dialog is open, so the board's own controls come back.
+    expect(refreshes.slice(attached)).toEqual([{ hidden: true, open: false }]);
+  });
+
   it('renders its body through the open hook, before the trap engages', () => {
     setup();
 
@@ -515,7 +556,7 @@ describe('the settings dialog', () => {
     expect(document.activeElement).toBe(trigger);
   });
 
-  // ADDED: the ordering the restore above depends on. The control layer
+  // The ordering the restore above depends on. The control layer
   // withholds every control inside an inert host, and the trigger is one, so a
   // refresh taken before the release leaves it withheld and the restore is
   // aimed at a control that cannot take focus. DL-ROUTER-41, DL-FOCUS-08.
@@ -794,12 +835,13 @@ describe('the settings dialog', () => {
 /* ==========================================================================
  * AN ATTACHMENT GROUP THAT CANNOT BE COMPLETED
  *
- * Both groups the router registers — the input surface's four actions and the
- * engine emitter's seven events — were built as array literals, so a refusal
- * from a later `on()` discarded the half-built array and left every
- * registration before it attached to the source with no reference to it
- * anywhere: the router went on acting on a surface it had reported it was not
- * attached to, unreachable by `destroy()` or by the handle. DL-ROUTER-44.
+ * A refusal from any `on()` in either group the router registers — the input
+ * surface's four actions and the engine emitter's seven events — rolls back the
+ * registrations taken before it. Were a group built as an array literal, the
+ * refusal would discard the half-built array and leave every registration
+ * before it attached to the source with no reference to it anywhere: the router
+ * acting on a surface it reported it was not attached to, unreachable by
+ * `destroy()` or by the handle. DL-ROUTER-44.
  * ========================================================================== */
 
 /** The four input actions `attach()` registers, in order. */
@@ -1233,15 +1275,14 @@ const createSurface = (): {
  * ========================================================================== */
 
 /**
- * WHAT WAS WRONG
- *   `attach()` and `subscribe()` merely pushed their releases onto one
- *   append-only list that only `destroy()` drained. Attaching the same input
- *   surface twice therefore installed a second copy of all four dialog
- *   listeners, so one Escape closed the dialog twice and one digit press chose
- *   twice; subscribing a replaced engine left the previous engine's seven
- *   handlers registered for the rest of the session; and the releaser
- *   `subscribe()` returned did not remove its entries from that list, so a
- *   released engine's closures were retained until teardown.
+ * WHY ONE OWNER PER ATTACHMENT MATTERS
+ *   Each release is held under its own owner, not pooled on an append-only
+ *   list that only `destroy()` drains. Were they pooled, attaching the same
+ *   input surface twice would install a second copy of all four dialog
+ *   listeners — one Escape closing the dialog twice, one digit press choosing
+ *   twice — subscribing a replaced engine would leave the prior engine's seven
+ *   handlers registered for the rest of the session, and the releaser
+ *   `subscribe()` returns would strand its entries until teardown.
  *
  * WHAT THIS SUITE PINS
  *   That the router owns exactly ONE input attachment and ONE engine
@@ -1397,12 +1438,12 @@ describe('the router s owned attachments', () => {
 /* ==========================================================================
  * The stage-clear gate
  *
- * `stage:end` used to take BOTH declared edges — `stage -> stageClear` and
- * `stageClear -> reward` — inside one event, so `stageClear` was entered and left
- * in a single tick and the stage-progress screen was unreachable however correct
- * the transition table was. It also ignored `payload.cleared`, so a stage that
- * ended WITHOUT its goal met put a reward screen up and offered a relic for a
- * stage the player had not cleared.
+ * `stage:end` takes ONE declared edge, not both — `stage -> stageClear` and
+ * `stageClear -> reward` inside one event would enter and leave `stageClear` in
+ * a single tick, leaving the stage-progress screen unreachable however correct
+ * the transition table is. It also reads `payload.cleared`, so a stage that
+ * ends WITHOUT its goal met puts no reward screen up and offers no relic for a
+ * stage the player has not cleared.
  * ========================================================================== */
 
 describe('a cleared stage', () => {
@@ -1455,13 +1496,13 @@ describe('a cleared stage', () => {
  * ========================================================================== */
 
 /**
- * WHAT WAS WRONG
- *   `onSettingsOpen`, `onSettingsClose` and `onRewardSelect` were called bare.
- *   A raising composition escaped through whichever listener happened to be on
- *   the stack — the DOM event dispatch for a pointer press, the input manager's
- *   listener walk for a keyboard press — so one failure behaved differently by
- *   modality, none of them was reported, and a reward selection left the flow
- *   advanced over a choice that was never applied.
+ * WHY CONTAINMENT MATTERS HERE `onSettingsOpen`, `onSettingsClose` and
+ * `onRewardSelect` are contained rather than called bare. Were they bare, a
+ * raising composition would escape through whichever listener happened to be on
+ * the stack — the DOM event dispatch for a pointer press, the input manager's
+ * listener walk for a keyboard press — so one failure would behave differently
+ * by modality, none would be reported, and a reward selection would leave the
+ * flow advanced over a choice never applied.
  *
  * WHAT THIS SUITE PINS
  *   That each of the three is contained, that the rollback is deterministic and
@@ -2048,7 +2089,7 @@ describe('send', () => {
 });
 
 /* ==========================================================================
- * ADDED: a terminal verdict cannot outlive the state that raised it, against
+ * A terminal verdict cannot outlive the state that raised it, against
  * the REAL announcer and a deferred scheduler (DL-LIVE-06, DL-LIVE-07).
  * ========================================================================== */
 

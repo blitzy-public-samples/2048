@@ -419,8 +419,8 @@ describe('indexed actions resolve their payload from the binding', () => {
   });
 
   it('keeps the index after a remap onto keys carrying no digit', () => {
-    // The defect: the index was read out of the digit text, so this remap
-    // collapsed all three offers onto index 0.
+    // The index is carried by the binding rather than read out of the digit
+    // text, so a remap onto digitless keys keeps the three offers distinct.
     const remapped = remapAction(DEFAULT_KEY_BINDINGS, 'selectReward', {
       keys: ['x', 'y', 'z'],
       codes: ['KeyX', 'KeyY', 'KeyZ'],

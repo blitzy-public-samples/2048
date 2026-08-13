@@ -26,7 +26,7 @@ export interface MockWebGLContext {
   readonly calls: readonly string[];
 
   /**
-   * ADDED: every `pixelStorei` write, in order.
+   * Every `pixelStorei` write, in order.
    *
    * The unpack state is the one piece of context state that OUTLIVES the
    * renderer that wrote it, so a suite asserting which teardown resets it needs
@@ -111,7 +111,7 @@ export function createMockWebGLContext(): MockWebGLContext {
     createRenderbuffer: (): unknown => ({}),
     isContextLost: (): boolean => false,
 
-    // ADDED: recorded rather than dropped, so a suite can say WHICH parameter a
+    // Recorded rather than dropped, so a suite can say WHICH parameter a
     // teardown wrote and to what. DL-THREE-07.
     pixelStorei: (parameter: number, value: unknown): unknown => {
       pixelStore.push({

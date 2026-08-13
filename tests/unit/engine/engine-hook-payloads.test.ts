@@ -302,7 +302,7 @@ describe('onBeforeMove: the resolved direction is the one executed', () => {
     // Read inside the emission, before the move resolved the pair.
     expect(seen.valueAtEmission).toBe(2);
 
-    // CHANGED: this line repeated the assertion above it. It now proves the other
+    // This line repeated the assertion above it. It now proves the other
     // half of the comment: the hook path receives the CAPABILITY VIEW, which is
     // a different object from the live board the event path receives, reporting
     // the same size and carrying no `cells` to write engine state through.

@@ -404,7 +404,7 @@ describe('the settings dialog', () => {
     expect(control('#settings-panel').hidden).toBe(true);
   });
 
-  // ADDED: the close hands focus back to the control that opened the dialog.
+  // The close hands focus back to the control that opened the dialog.
   // The control layer withholds `#settings-button` for TWO reasons while the
   // dialog is up — `openSettings` is unauthorized in `'settings'`, and the
   // shell the button sits in is inert — and the second is only answerable once
@@ -425,8 +425,8 @@ describe('the settings dialog', () => {
       true,
     );
 
-    // Sampled AT THE INSTANT focus lands rather than afterwards, because
-    // `settle()` refreshes the layer a second time and would make a later
+    // Sampled AT THE INSTANT focus lands rather than afterwards, because the
+    // focus transition schedules a pass of its own and would make a later
     // reading true either way. This document cannot fail on the ORDERING on its
     // own — it allows focus on a disabled control that still carries
     // `tabindex="-1"`, where a browser refuses it and drops focus to the body —
@@ -457,6 +457,51 @@ describe('the settings dialog', () => {
     expect(control('.container').hasAttribute('inert')).toBe(false);
     expect(trigger.hasAttribute('disabled')).toBe(false);
     expect(trigger.getAttribute('tabindex')).toBeNull();
+  });
+
+  // The composed close walks the control layer ONCE. The router refreshes
+  // from inside the trap release, and the composition callback refreshed again
+  // after it, so every managed control was re-applied twice per close.
+  // DL-MAIN-43.
+  it('applies the control layer once per composed settings close', () => {
+    application = startPlaying();
+
+    pressControl('#settings-button');
+
+    // Any generated control answers for the whole pass: `apply()` walks every
+    // record it holds and writes `tabindex` on each, so one write here is one
+    // pass of the layer.
+    const generated = document.querySelector<HTMLElement>(
+      '#on-screen-controls .on-screen-control[data-action]',
+    );
+
+    expect(generated).not.toBeNull();
+
+    if (generated === null) {
+      throw new Error('the composed page generated no on-screen control');
+    }
+
+    let passes = 0;
+    const write = generated.setAttribute.bind(generated);
+
+    generated.setAttribute = (name: string, value: string): void => {
+      if (name === 'tabindex') {
+        passes += 1;
+      }
+
+      write(name, value);
+    };
+
+    const close = Array.from(
+      document.querySelectorAll<HTMLButtonElement>('#settings-panel button'),
+    ).find((candidate) => candidate.textContent === 'Close settings');
+
+    close?.click();
+
+    // Read before any microtask runs, so the focus-transition coalescer's own
+    // later pass cannot be counted into this one.
+    expect(passes).toBe(1);
+    expect(control('#settings-panel').hidden).toBe(true);
   });
 
   it('engages exactly one focus trap on the dialog container', () => {
@@ -503,10 +548,9 @@ describe('the settings dialog', () => {
 
   it('reaches the audio layer through the store alone', () => {
     // The store is the single owner of mute and volume, and the audio layer
-    // follows it through its own subscription. The dialog used to write the
-    // store AND push the same value into the engine, so one value had two
-    // writers and a later sync could push a value the engine had already taken
-    // (N1).
+    // follows it through its own subscription. The dialog writes the store and
+    // does NOT push the same value into the engine, so one value has one writer
+    // and no later sync can push a value the engine has already taken (N1).
     //
     // The store is written directly here rather than through the dialog's mute
     // control, because jsdom supplies no `AudioContext`: the engine reports
@@ -759,7 +803,7 @@ describe('the win overlay', () => {
     expect(overlay.classList.contains('game-won')).toBe(true);
     expect(application.engine.isGameTerminated()).toBe(true);
 
-    // CHANGED: the RETAINED control stays withdrawn, because the `won` state
+    // The RETAINED control stays withdrawn, because the `won` state
     // marks the page shell it sits in `inert` and the control layer no longer
     // presents a control its host has put out of reach. The operable control is
     // the one the state renders inside its own trapped container, which is what
@@ -797,7 +841,7 @@ describe('the win overlay', () => {
 
     expect(application.engine.isGameTerminated()).toBe(true);
 
-    // CHANGED: the state's own control, inside the container the trap holds,
+    // The state's own control, inside the container the trap holds,
     // rather than the retained one behind the inert shell. DL-CONTROL-11.
     pressControl('#screen-game-over [data-action="keepPlaying"]');
 
@@ -1385,11 +1429,11 @@ describe('the three screen-flow actions', () => {
     expect(application.engine.isGameTerminated()).toBe(true);
     expect(shownScreens()).toEqual([SCREEN_MOUNTS.won]);
 
-    // CHANGED: the generated control is WITHHELD here, and the state's own
-    // control is the surface that publishes the action. The `won` state marks
-    // the page shell `inert`, and the control layer no longer presents a control
-    // whose host has put it out of reach — every liveness signal read live while
-    // a real press did nothing at all. DL-CONTROL-11.
+    // The generated control is WITHHELD here, and the state's own control is
+    // the surface that publishes the action. The `won` state marks the page
+    // shell `inert`, and the control layer no longer presents a control whose
+    // host has put it out of reach — every liveness signal read live while a
+    // real press did nothing at all. DL-CONTROL-11.
     const endRun = generated('endRun');
 
     expect(control('.container').hasAttribute('inert')).toBe(true);
@@ -1492,9 +1536,9 @@ describe('the three screen-flow actions', () => {
 
     expect(shownScreens()).toEqual([SCREEN_MOUNTS.stageClear]);
 
-    // CHANGED: withheld for the same reason as `endRun` above — `stageClear`
-    // marks the shell inert — and the interstitial's own continue control is the
-    // surface that publishes the action. DL-CONTROL-11.
+    // Withheld for the same reason as `endRun` above — `stageClear` marks the
+    // shell inert — and the interstitial's own continue control is the surface
+    // that publishes the action. DL-CONTROL-11.
     const continueStage = generated('continueStage');
 
     expect(control('.container').hasAttribute('inert')).toBe(true);

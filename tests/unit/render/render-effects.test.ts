@@ -456,7 +456,7 @@ describe('the camera punch', () => {
 });
 
 /* ==========================================================================
- * ADDED: both geometry-derived magnitudes follow the geometry in force, not the
+ * Both geometry-derived magnitudes follow the geometry in force, not the
  * desktop constants (DL-PARTICLE-07, DL-CAMERA-05, DL-THREE-10).
  *
  * `spread` is one CELL PITCH and the punch's peak is a share of the FIELD
@@ -486,8 +486,8 @@ describe('the geometry-derived effect magnitudes', () => {
     expect(desktop.readStats().spread).toBeCloseTo(particleDefaults.spread, 6);
     expect(mobile.readStats().spread).toBeCloseTo(pitchOf(mobileGeometry), 6);
 
-    // The defect: the desktop pitch on the mobile field is about 1.8 of the
-    // pitches the spray is supposed to cross.
+    // The margin this guards: the desktop pitch on the mobile field would be
+    // about 1.8 of the pitches the spray is supposed to cross.
     expect(particleDefaults.spread / pitchOf(mobileGeometry)).toBeGreaterThan(
       1.7,
     );
@@ -553,8 +553,8 @@ describe('the geometry-derived effect magnitudes', () => {
 
     expect(mobilePeak).toBeGreaterThan(desktopPeak);
 
-    // The defect: the desktop share on the mobile field is 280/500 of the punch
-    // that field deserves — about 44% weaker.
+    // The margin this guards: the desktop share on the mobile field would be
+    // 280/500 of the punch that field deserves — about 44% weaker.
     expect(desktopPeak / mobilePeak).toBeCloseTo(
       mobileGeometry.fieldWidth / desktopGeometry.fieldWidth,
       6,

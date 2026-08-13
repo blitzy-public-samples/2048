@@ -23,10 +23,8 @@
 // fake clock. `silent` is `false`, so a log record a spec asserts on reaches
 // the reporter.
 //
-// The behaviour the setup file compensates for, from the deleted vanilla
-// sources: `clearGameState` removed the board snapshot and no vanilla member
-// removed the best score; the writability probe ran once at construction; and
-// `setup` read the snapshot once.
+// The setup file tests/fixtures/storage.ts registers the persistence teardown
+// both gates share; it removes the best score as well as the board snapshot.
 //
 // Decisions behind this file: DL-TEST-04, the pinned snapshot write mode;
 // DL-TEST-05, the snapshot gate in its own configuration.

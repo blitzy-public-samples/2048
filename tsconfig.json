@@ -1,15 +1,15 @@
 // TypeScript configuration for the browser-context sources: src/ and every
-// suite under tests/, the Playwright specs included, because their
-// `page.evaluate()` callbacks are authored against DOM globals; the files that
-// read the filesystem are the exception. The four root tooling configs and those
+// suite under tests/, the Playwright specs included, whose `page.evaluate()`
+// callbacks are authored against DOM globals; the seven files that read the
+// filesystem are the exception. The four root tooling configs and those
 // filesystem readers belong to tsconfig.node.json, so the two projects partition
 // the repository's root file set. `npm run typecheck` runs both in sequence.
 //
 // Supersedes the deleted .jshintrc. Its `unused: true` is carried forward as
-// the two unused-symbol options below. Its `indent: 2`, `maxlen: 80` and
+// the two unused-symbol options below; its `indent: 2`, `maxlen: 80` and
 // `camelcase: true` have no compiler equivalent and no package in the
-// dependency set enforces them, so the sources follow those three conventions
-// by authoring discipline.
+// dependency set enforces them, so the sources hold all three by authoring
+// discipline.
 {
   "compilerOptions": {
     "target": "ES2022",
@@ -29,8 +29,8 @@
 
 
     // Permits the explicit `.ts` specifier that vite.config.ts's import chain
-    // carries, which Vite's native config loader requires. Available because
-    // this project emits nothing.
+    // carries, which Vite's native config loader requires. Available wherever
+    // nothing is emitted, as here.
     "allowImportingTsExtensions": true,
 
     "strict": true,
@@ -72,6 +72,8 @@
     "tests/unit/quality/content-security-policy.test.ts",
     "tests/unit/quality/decision-log.test.ts",
     "tests/unit/quality/decision-log-integrity.test.ts",
-    "tests/unit/quality/traceability-matrix.test.ts"
+    "tests/unit/quality/traceability-matrix.test.ts",
+    "tests/unit/quality/comment-policy.test.ts",
+    "tests/unit/quality/executive-deck.test.ts"
   ]
 }

@@ -48,8 +48,8 @@
 //   js/html_actuator.js L135-L139  clearMessage(): both classes removed
 //   js/game_manager.js L95         the best score rendered from the payload,
 //                                  which is the value re-read from storage
-//   style/main.scss L103, L205     the z-index ceiling of 100, extended through
-//                                  `zIndex.hud` of ../../theme/tokens
+//   style/main.scss z-index        the ceiling of 100, extended through
+//   ceiling                        `zIndex.hud` of ../../theme/tokens
 //
 // Every lookup is guarded through `resolveMount`: none of the eight selectors
 // of the vanilla markup was null-checked, so a renamed class was a startup
@@ -132,8 +132,8 @@ import type {
   LiveRegionAnnouncer,
 } from '../a11y/live-region';
 
-// CHANGED: a value import beside the type imports, for the one line this screen
-// writes assertively. DL-HUD-15.
+// A value import beside the type imports, for the one line this screen writes
+// assertively. DL-HUD-15.
 import { ASSERTIVE_POLARITY } from '../a11y/live-region';
 import type { UiReporter } from '../a11y/settings';
 import {
@@ -436,6 +436,17 @@ const ANNOUNCED_METRIC = 'ui.hud.announced';
  */
 const ASSERTIVE_WITHDRAWN_METRIC = 'ui.hud.assertive.withdrawn';
 
+/**
+ * The source this screen raises its persistence alert under and
+ * withdraws it by.
+ *
+ * Exported so the composition root, the other assertive writer on the page, can
+ * assert it is using a different one — two producers sharing a source would
+ * withdraw each other's lines, which is the defect the scope exists to close.
+ * DL-HUD-16, DL-LIVE-08.
+ */
+export const PERSISTENCE_ANNOUNCEMENT_SOURCE = 'hud/persistence';
+
 /** Counter raised per injected reader that raised or answered badly. */
 const READER_FAULT_METRIC = 'ui.hud.reader.faulted';
 
@@ -489,7 +500,7 @@ export interface HudSnapshot {
  * declares it. A structural subset, so the announcer is exercisable with a
  * stand-in.
  *
- * CHANGED: `clearAssertive` joins the two writers, OPTIONAL so a stand-in that
+ * `clearAssertive` sits beside the two writers, OPTIONAL so a stand-in that
  * records lines alone still satisfies the port. It is called on exactly one
  * transition — a run whose persistence has recovered — where the withdrawn line
  * is the failure this screen itself raised. DL-HUD-16.
@@ -576,9 +587,8 @@ export interface HudOptions {
    * `RelicRegistry.degradedIds()` satisfies it, and it is durable state: the
    * bus skips a marked relic for the rest of its registration.
    *
-   * Absent, or raising, no row is marked — which is the state before this
-   * reader existed, and which showed a relic that no longer fires as healthy.
-   * Called on every write; nothing is cached from it.
+   * Absent, or raising, no row is marked, so a relic the bus has stopped firing
+   * reads as healthy. Called on every write; nothing is cached from it.
    */
   readonly degradedRelics?: () => readonly string[];
 
@@ -1095,14 +1105,15 @@ export function createHud(options: HudOptions = {}): Hud {
    *
    * @param text Line to announce.
    * @param kind Kind carried into the report.
-   * @param polarity CHANGED: polarity the line is written with. Omitted, the
-   *   announcer's own default governs, which is polite — the behaviour every
-   *   caller but the persistence notice keeps. DL-HUD-15.
+   * @param polarity Polarity the line is written with. Omitted, the announcer's
+   *   own default governs, which is polite — what every caller but the
+   *   persistence notice relies on. DL-HUD-15.
    */
   const announceLine = (
     text: string,
     kind: string,
     polarity?: AnnouncementPolarity,
+    source?: string,
   ): void => {
     const announcer = readAnnouncer();
 
@@ -1111,7 +1122,14 @@ export function createHud(options: HudOptions = {}): Hud {
     }
 
     try {
-      announcer.announceText(text, polarity);
+      // The producer's own source travels with the line, so this
+      // screen's withdrawal below reaches this line and nothing else.
+      // DL-HUD-16, DL-LIVE-08.
+      announcer.announceText(
+        text,
+        polarity,
+        source === undefined ? undefined : { source },
+      );
       reporter.count(ANNOUNCED_METRIC, {
         context: REPORT_CONTEXT,
         kind,
@@ -1126,14 +1144,20 @@ export function createHud(options: HudOptions = {}): Hud {
   };
 
   /**
-   * Withdraws whatever the assertive region holds, where the announcer offers
+   * Withdraws THIS SCREEN'S standing assertive line, where the announcer offers
    * that operation.
    *
-   * The one caller is the persistence RECOVERY: this screen is the only writer
-   * of an assertive line here, so the text being withdrawn is its own
-   * run-not-saved alert. The announcer's own operation drains its queue stages
-   * as well, so a failure line still queued behind the recovery cannot be
-   * written back. DL-HUD-16, DL-LIVE-07.
+   * The one caller is the persistence RECOVERY, and the line being withdrawn is
+   * this screen's own run-not-saved alert. The announcer's own operation drains
+   * its queue stages as well, so a failure line still queued behind the recovery
+   * cannot be written back. DL-HUD-16, DL-LIVE-07.
+   *
+   * The withdrawal names `PERSISTENCE_ANNOUNCEMENT_SOURCE` rather than
+   * withdrawing everything. This screen is NOT the only assertive writer on the
+   * page — the composition root announces a lost board, a refused reward and a
+   * stage that would not open, and a terminal verdict is composed assertively —
+   * so an unscoped withdrawal here erased whatever a peer had queued in the same
+   * turn. DL-HUD-16, DL-LIVE-08.
    */
   const withdrawAssertive = (): void => {
     const announcer = readAnnouncer();
@@ -1144,9 +1168,10 @@ export function createHud(options: HudOptions = {}): Hud {
     }
 
     try {
-      withdraw();
+      withdraw(PERSISTENCE_ANNOUNCEMENT_SOURCE);
       reporter.count(ASSERTIVE_WITHDRAWN_METRIC, {
         context: REPORT_CONTEXT,
+        source: PERSISTENCE_ANNOUNCEMENT_SOURCE,
       });
     } catch (error: unknown) {
       reporter.error('withdrawing the HUD alert raised', error, {
@@ -1255,9 +1280,10 @@ export function createHud(options: HudOptions = {}): Hud {
   /**
    * Shows or clears the unconfirmed-status notice.
    *
-   * @param degraded What the payload reported.
-   * @returns The flag, so a snapshot records what was asked for even where
-   *   no outlet resolved to write it into.
+   * @param degraded Whether the payload reported the run's status as
+   *   unconfirmed. True sets the notice attribute; false clears it.
+   * @returns The flag as given, so a snapshot records what was asked for even
+   *   where no outlet resolved to write it into.
    */
   const renderDegraded = (degraded: boolean): boolean => {
     if (hudGroup === null) {
@@ -1336,7 +1362,7 @@ export function createHud(options: HudOptions = {}): Hud {
     // ordinary first write, which would say the run is being saved to a player
     // who has no reason to think otherwise.
     if (changed || (first && status === 'ephemeral')) {
-      // CHANGED: the assertive failure is WITHDRAWN before the polite recovery
+      // The assertive failure is WITHDRAWN before the polite recovery
       // is written. An `alert` region holds its text until something replaces
       // it, and the recovery goes to the polite region, so the run-not-saved
       // alert stayed readable beside a line saying the run was being saved
@@ -1351,12 +1377,17 @@ export function createHud(options: HudOptions = {}): Hud {
           : copy.persistentAnnouncement,
         'persistence',
 
-        // CHANGED: the LOSS of persistence is written assertively, into the
+        // The LOSS of persistence is written assertively, into the
         // `role="alert"` region ../a11y/live-region.ts keeps for that polarity
         // — the treatment src/main.ts already gives a lost WebGL context. The
         // recovery keeps the default polite polarity. The notice element itself
         // takes no `role="alert"`. DL-HUD-15.
         status === 'ephemeral' ? ASSERTIVE_POLARITY : undefined,
+
+        // The source the recovery above withdraws by. Carried on the
+        // recovery line too, which costs nothing and keeps the two halves of
+        // the pair symmetrical. DL-HUD-16, DL-LIVE-08.
+        PERSISTENCE_ANNOUNCEMENT_SOURCE,
       );
       reporter.count(PERSISTENCE_METRIC, {
         context: REPORT_CONTEXT,
@@ -1848,6 +1879,10 @@ export function createHud(options: HudOptions = {}): Hud {
    * Writes the active-relic tray in pickup order, reusing the rows on screen.
    *
    * @param relics The relics to show, in the order supplied.
+   * @param degraded Identifiers the hook bus has marked degraded. Every relic
+   * whose identifier it holds is announced once and marked on its row; an empty
+   * set marks none. Read on every write, so a relic dropped from the set is
+   * announced afresh if it is marked again.
    * @returns The identifiers written, in that order.
    */
   const renderRelics = (

@@ -79,6 +79,7 @@ import type { Relic } from '../../../src/relics/relic-types';
 import {
   MAX_PERSISTED_RELICS,
   NOOP_RUN_REPORTER,
+  RUN_FAULT_OPERATIONS,
   RUN_STATE_SCHEMA_VERSION,
   createFreshRunState,
   describeRunStateProblems,
@@ -117,8 +118,8 @@ import {
  *
  * Every declared member is captured VERBATIM, absences included: the point of
  * the reward-outcome suite is that a report says which relic, at which stage,
- * accepted or not, and refused by what — and the members were previously
- * omitted or mangled while the report still type-checked.
+ * accepted or not, and refused by what — a member omitted or mangled would
+ * leave the report type-checking all the same.
  */
 interface RecordedRewardDraw {
   readonly stageIndex: number;
@@ -144,6 +145,9 @@ interface RecordedReports {
     status: string;
     previous: string;
     refusedWrites: number;
+
+    /** Which of the three causes established the status. DL-RUN-10. */
+    reason: string;
   }[];
   readonly offered: { stageIndex: number; offeredRelicIds: readonly string[] }[];
   readonly drawn: RecordedRewardDraw[];
@@ -202,6 +206,7 @@ function createRecorder(): { reports: RecordedReports; reporter: RunReporter } {
         status: report.status,
         previous: report.previous,
         refusedWrites: report.refusedWrites,
+        reason: report.reason,
       });
     },
     onRewardOffered(report): void {
@@ -648,9 +653,9 @@ describe('RunController.begin', () => {
 
   it('replays a typed seed from the start even where the stored run is ' +
     'playing that very seed', () => {
-    // The adoption decision used to be the seed alone, so typing the seed of
-    // the run in progress RESUMED it — mid-stage, with its relics and its
-    // advanced cursors — and the replay a typed seed asks for was unreachable.
+    // The adoption decision is not the seed alone: typing the seed of the run
+    // in progress must not RESUME it — mid-stage, with its relics and its
+    // advanced cursors — because a typed seed asks for a replay from the start.
     const backing = new MemoryStorage();
     const typed = 'the-seed-i-typed';
 
@@ -1179,7 +1184,12 @@ describe('a commit whose write is refused', () => {
     // first already said.
     expect(reports.writeFailures.length).toBeGreaterThan(1);
     expect(reports.persistence).toEqual([
-      { status: 'ephemeral', previous: 'persistent', refusedWrites: 1 },
+      {
+        status: 'ephemeral',
+        previous: 'persistent',
+        refusedWrites: 1,
+        reason: 'write-refused',
+      },
     ]);
     expect(controller.persistenceStatus()).toBe('ephemeral');
 
@@ -1215,13 +1225,90 @@ describe('a commit whose write is refused', () => {
     engine.move(DIRECTION_LEFT);
 
     expect(reports.persistence).toEqual([
-      { status: 'ephemeral', previous: 'persistent', refusedWrites: 1 },
-      { status: 'persistent', previous: 'ephemeral', refusedWrites: 0 },
+      {
+        status: 'ephemeral',
+        previous: 'persistent',
+        refusedWrites: 1,
+        reason: 'write-refused',
+      },
+      {
+        status: 'persistent',
+        previous: 'ephemeral',
+        refusedWrites: 0,
+        reason: 'durable-write',
+      },
     ]);
     expect(controller.persistenceStatus()).toBe('persistent');
     expect(readStored(backing)?.board).toEqual(engine.serialize());
 
     stop();
+  });
+
+  it('calls a run over a store that does not survive a reload ephemeral', () => {
+    // THE MEMORY-FALLBACK CASE. `MemoryStorage` accepts every write, so the
+    // status derived from the write outcome alone said the run was saved while a
+    // reload would discard it — and the readiness surface, deriving the same
+    // verdict from the storage strategy, called it ephemeral. One rule now, and
+    // it is durability. DL-RUNCTL-33.
+    const run = drive({ durable: (): boolean => false });
+
+    // Ephemeral BEFORE any write of its own: nothing has to fail first.
+    expect(run.controller.persistenceStatus()).toBe('ephemeral');
+
+    // The write is ACCEPTED — the store is in memory, not broken — and the
+    // status stays ephemeral because acceptance is not durability.
+    expect(run.controller.persist(run.engine.port, run.cursors)).toBe(true);
+    expect(run.controller.persistenceStatus()).toBe('ephemeral');
+
+    // And no write was counted as refused, because none was.
+    const crossings = run.sink.of('persistence-status-changed');
+
+    for (const crossing of crossings) {
+      expect(crossing.detail.refusedWrites).toBe(0);
+    }
+  });
+
+  it('reports the crossing when the store stops being durable mid-run', () => {
+    let durable = true;
+    const run = drive({ durable: (): boolean => durable });
+
+    expect(run.controller.persist(run.engine.port, run.cursors)).toBe(true);
+    expect(run.controller.persistenceStatus()).toBe('persistent');
+
+    durable = false;
+
+    // Read at once rather than at the next write: the HUD, the readiness
+    // surface and this accessor cannot disagree in the window between the
+    // change and the next commit. DL-RUNCTL-33.
+    expect(run.controller.persistenceStatus()).toBe('ephemeral');
+
+    // And the crossing is REPORTED on the next write, naming durability rather
+    // than a refusal.
+    expect(run.controller.persist(run.engine.port, run.cursors)).toBe(true);
+
+    const crossings = run.sink.of('persistence-status-changed');
+    const last = crossings[crossings.length - 1];
+
+    expect(last?.detail).toMatchObject({
+      status: 'ephemeral',
+      previous: 'persistent',
+      refusedWrites: 0,
+      reason: 'store-not-durable',
+    });
+  });
+
+  it('treats a durability reader that raises as durable', () => {
+    const run = drive({
+      durable: (): boolean => {
+        throw new Error('the strategy could not be read');
+      },
+    });
+
+    // The same optimism the status opens with: a reader that cannot answer is
+    // not evidence the store is ephemeral. DL-RUNCTL-33.
+    expect(run.controller.persistenceStatus()).toBe('persistent');
+    expect(run.controller.persist(run.engine.port, run.cursors)).toBe(true);
+    expect(run.controller.persistenceStatus()).toBe('persistent');
   });
 
   it('says nothing at all about a run that is reaching storage', () => {
@@ -2180,7 +2267,7 @@ describe('run-scoped rebuild', () => {
         restart: () => undefined,
         move: () => false,
         isGameTerminated: () => false,
-        continuePlaying: () => undefined,
+        continueAfterWin: () => undefined,
       },
       { seed: 'brand-new-seed' },
     );
@@ -2223,7 +2310,7 @@ describe('run-scoped rebuild', () => {
         restart: () => undefined,
         move: () => false,
         isGameTerminated: () => false,
-        continuePlaying: () => undefined,
+        continueAfterWin: () => undefined,
       },
       { seed: 'a-supplied-seed' },
     );
@@ -2698,7 +2785,7 @@ function seedRewardFixture(
  *
  * The registry is bound through `runPort()` rather than as the instance, which
  * is the route src/relics/relic-registry.ts documents as the one between the
- * two folders — and the route on which a selected relic used to be lost.
+ * two folders, and the route a selected relic has to survive.
  */
 function composeWithRewards(
   options: ComposeOptions = {},
@@ -3101,8 +3188,8 @@ describe('a reward round resolved on the stage the old bound refused', () => {
 
     const selection = controller.selectReward(chosen.id, engine);
 
-    // The transaction COMMITTED. It used to answer 'refused' here, because the
-    // write that is part of it carried a stage index the store rejected.
+    // The transaction COMMITTED rather than answering 'refused': the write that
+    // is part of it carries a stage index the store accepts.
     expect(selection.outcome).toBe('accepted');
     expect(controller.stageIndex()).toBe(PAST_OLD_BOUND);
     expect(controller.isRewardPending()).toBe(false);
@@ -3464,10 +3551,10 @@ describe('an unresolved reward round', () => {
     expect(second.controller.isRewardPending()).toBe(true);
     expect(second.controller.stageIndex()).toBe(0);
 
-    // A MOVE MADE WHILE THE CHOICE IS STANDING, which is the case that used to
-    // resolve the same stage over and over: the goal a cleared stage met is still
-    // met on this commit and on every later one, so the standing round is the
-    // only thing that says its end is already resolved.
+    // A MOVE MADE WHILE THE CHOICE IS STANDING, which must not resolve the same
+    // stage twice: the goal a cleared stage met is still met on this commit and
+    // on every later one, so the standing round is the only thing that says its
+    // end is already resolved.
     second.engine.move(DIRECTION_LEFT);
 
     // No second resolution: no advance, no second offer drawn, and the same three
@@ -3671,19 +3758,16 @@ describe('the reward selection outcome codes', () => {
  * ========================================================================== */
 
 /**
- * WHAT WAS WRONG
- *   `selectReward()` and `refuseSelection()` each assembled an `onRewardDrawn`
- *   payload of their own instead of going through `reportReward`. Both omitted
- *   the declared `accepted` member — which was optional, so the payloads
- *   type-checked — the refusal path encoded the outcome INTO the identifier as
- *   `` `${relicId} (${outcome})` `` and left `refusal` absent, and the accepted
- *   path read `current.stageIndex` after `closeRewardRound()` had already
- *   advanced the stage, so every accepted report named the stage the run had
- *   moved ON TO rather than the stage the offer was made at.
+ * THE REPORT CONTRACT `selectReward()` and `refuseSelection()` both report
+ * through `reportReward`, so one assembler produces every `onRewardDrawn`
+ * payload. `accepted` is always present, the outcome travels in `refusal`
+ * rather than encoded into the identifier as `` `${relicId} (${outcome})` ``,
+ * and the accepted path names the stage the OFFER was made at rather than the
+ * stage `closeRewardRound()` has already advanced to.
  *
  * WHAT THIS SUITE PINS
  *   The report, not the return value. Section 18 above asserts
- *   `RewardSelection.outcome` and could not see any of the four defects; these
+ *   `RewardSelection.outcome`, which is blind to all four of those; these
  *   cases read `RunReporter.onRewardDrawn` directly and assert the offer stage,
  *   the raw identifier, `accepted` and `refusal` for every outcome the two
  *   public methods produce — accepted, no-offer, already-resolved, not-offered,
@@ -4286,6 +4370,12 @@ interface RecordingEngine {
   /** Whether `startStage` raises. Writable, so a retry can be made to work. */
   startStageThrows: boolean;
 
+  /**
+   * Whether `endStage` raises. Writable, so a case can let the run open
+   * normally and refuse only the resolution the finish asks for. DL-RUNCTL-31.
+   */
+  endStageThrows: boolean;
+
   /** Calls `startStage` received, raising or not. */
   readonly startStageAttempts: number;
 
@@ -4310,6 +4400,12 @@ interface RecordingEngineOptions {
    * failure both stage-transition paths have to contain.
    */
   readonly startStageThrows?: boolean;
+
+  /**
+   * Whether `endStage` raises when it is called. The failure the
+   * abandoned-stage resolution has to contain. DL-RUNCTL-32.
+   */
+  readonly endStageThrows?: boolean;
 }
 
 /**
@@ -4329,6 +4425,7 @@ function createRecordingEngine(
   const moves: MoveDirection[] = [];
 
   let held: SerializedGameState = options.board ?? createEmptyBoard();
+  let endStageThrows = options.endStageThrows === true;
 
   const observing: EnginePort = {
     events: events.source,
@@ -4341,7 +4438,14 @@ function createRecordingEngine(
 
     endStage(cleared: boolean): void {
       calls.push('endStage');
+
+      // Recorded BEFORE the refusal, so a case can assert the verdict the
+      // controller asked for even where the engine refused it. DL-RUNCTL-31.
       endStages.push(cleared);
+
+      if (endStageThrows) {
+        throw new Error('the stage could not be resolved');
+      }
     },
 
     // js/game_manager.js L36-L45: the snapshot the run opens on.
@@ -4369,8 +4473,8 @@ function createRecordingEngine(
       return held.over || (held.won && !held.keepPlaying);
     },
 
-    continuePlaying(): void {
-      calls.push('continuePlaying');
+    continueAfterWin(): void {
+      calls.push('continueAfterWin');
     },
   };
 
@@ -4413,6 +4517,14 @@ function createRecordingEngine(
 
     set startStageThrows(raises: boolean) {
       startStageThrows = raises;
+    },
+
+    get endStageThrows(): boolean {
+      return endStageThrows;
+    },
+
+    set endStageThrows(raises: boolean) {
+      endStageThrows = raises;
     },
 
     get startStageAttempts(): number {
@@ -4697,6 +4809,19 @@ function createReportSink(): ReportSink {
       });
     },
 
+    // The operation-aware fault channel. Every contained collaborator
+    // failure that touched no store used to arrive on `write-failed` above
+    // carrying the run-state key and a zero byte length, so a case asserting a
+    // failure was VISIBLE could not tell a skipped reward from an exhausted
+    // quota. DL-RUN-10.
+    onRunFaulted(report): void {
+      capture('run-faulted', report.correlationId, {
+        operation: report.operation,
+        affectsRunFlow: report.affectsRunFlow,
+        error: report.error,
+      });
+    },
+
     // The eleventh channel, which this sink used to omit — so no case composed
     // over it could observe a run losing or regaining its storage.
     onPersistenceStatusChanged(report): void {
@@ -4704,6 +4829,7 @@ function createReportSink(): ReportSink {
         status: report.status,
         previous: report.previous,
         refusedWrites: report.refusedWrites,
+        reason: report.reason,
       });
     },
 
@@ -4792,6 +4918,15 @@ interface DriveOptions {
   /** Whether the published `startStage` raises. */
   readonly startStageThrows?: boolean;
 
+  /** Whether the published `endStage` raises. DL-RUNCTL-32. */
+  readonly endStageThrows?: boolean;
+
+  /**
+   * Whether the store behind the controller survives a reload. Absent leaves
+   * the controller's own default, which is durable. DL-RUNCTL-33.
+   */
+  readonly durable?: () => boolean;
+
   /** `false` composes the controller with no registry at all. */
   readonly relics?: boolean;
 
@@ -4845,9 +4980,9 @@ interface Driven {
 /**
  * Runs `act`, failing the case where it raises, and answers what it produced.
  *
- * Written as a returning helper rather than an assignment inside
- * `expect(...).not.toThrow()` because a value assigned only inside a callback
- * stays narrowed to its initialiser for the reader below it.
+ * A RETURNING HELPER, so the value reaches the reader below it with its own
+ * type: a value assigned only inside an `expect(...).not.toThrow()` callback
+ * stays narrowed to its initialiser. DL-TEST-20.
  *
  * @param act The call under test.
  * @returns Whatever `act` returned.
@@ -4880,6 +5015,9 @@ const REPORTER_CHANNEL_COVERAGE = {
   onVersionMigrated: true,
   onBoardSizeReconciled: true,
   onWriteFailed: true,
+
+  // The operation-aware fault channel. DL-RUN-10.
+  onRunFaulted: true,
   onPersistenceStatusChanged: true,
   onRunStarted: true,
   onStageAdvanced: true,
@@ -4938,6 +5076,7 @@ function drive(options: DriveOptions = {}): Driven {
     board: options.board,
     startStage: options.startStage,
     startStageThrows: options.startStageThrows,
+    endStageThrows: options.endStageThrows,
   });
 
   const createToken = (): string => {
@@ -4982,6 +5121,7 @@ function drive(options: DriveOptions = {}): Driven {
     createToken,
     reporter,
     correlationId: readCorrelationId,
+    ...(options.durable === undefined ? {} : { durable: options.durable }),
     relics: options.relics === false ? undefined : registry.port,
     rewards:
       offers === undefined
@@ -5022,8 +5162,9 @@ function drive(options: DriveOptions = {}): Driven {
 
 /** A board snapshot as an event carries it: the live lattice. */
 function gridOf(board: SerializedGameState): Grid {
-  // `Grid.fromState` reads `state[x][y]`, so the second argument is the CELLS
-  // matrix and not the serialised grid. js/grid.js L21-L34.
+  // The constructor's second argument is the CELLS matrix and not the
+  // serialised grid: it is handed to the instance method `fromState`, which
+  // reads `state[x][y]`. js/grid.js L21-L34.
   return new Grid(board.grid.size, board.grid.cells);
 }
 
@@ -6273,14 +6414,88 @@ describe('the stage a run ended on', () => {
 
     run.controller.endRun('abandoned');
 
-    // The stage's goal was MET when the run ended, so the commit the resolution
-    // produces re-enters the commit handler with `stageCleared` standing. Nothing
-    // may be drawn or opened for a run that is ending.
-    expect(run.engine.endStages).toEqual([false]);
+    // The stage's goal was MET when the run ended, so the resolution carries the
+    // CLEARED verdict — and the commit it produces re-enters the commit handler
+    // with `stageCleared` standing. Nothing may be drawn or opened for a run
+    // that is ending. DL-RUNCTL-31.
+    expect(run.engine.endStages).toEqual([true]);
     expect(run.controller.isRewardPending()).toBe(false);
     expect(run.engine.startStages).toHaveLength(startsBefore);
     expect(run.sink.of('reward-drawn')).toEqual([]);
   });
+
+  it('carries the cleared verdict when the goal was met, not a bare false',
+    () => {
+      const run = drive();
+
+      startStage(run, createEmptyBoard());
+
+      // The opening goal is highest tile 16, so this board meets it.
+      resolveMove(run, boardWithHighest(16), 400);
+
+      run.controller.endRun('abandoned');
+
+      // The stage ended having met its goal, and `stage:end` says so. It said
+      // `false`, so every `onStageEnd` handler written for a stage that did NOT
+      // clear — a spawn-weight restoration, a bank reset — fired on a stage that
+      // had cleared. DL-RUNCTL-31.
+      expect(run.engine.endStages).toEqual([true]);
+      expect(run.controller.lastSummary()?.stageIndex).toBe(0);
+    });
+
+  it('carries it for the terminal win the payout was deferred on', () => {
+    const run = drive();
+
+    startStage(run, createEmptyBoard());
+
+    // A won, unresolved 2048: `onCommit` defers the stage payout while the
+    // player is being asked to keep going or end the run, which leaves
+    // `stageCleared` standing. This is the `won -> endRun` edge of AAP Figure 6.
+    run.engine.hold({
+      ...boardWithHighest(2048),
+      score: 20_480,
+      won: true,
+      keepPlaying: false,
+    });
+    resolveMove(run, run.engine.board(), 20_480);
+
+    expect(run.controller.isRewardPending()).toBe(false);
+    expect(run.engine.endStages).toEqual([]);
+
+    run.controller.endRun('won');
+
+    expect(run.engine.endStages).toEqual([true]);
+    expect(run.sink.of('run-ended')[0]?.detail.outcome).toBe('won');
+  });
+
+  it('finishes the run even when the resolution and its report both raise',
+    () => {
+      const run = drive({ throwOn: 'onRunFaulted' });
+
+      startStage(run, createEmptyBoard());
+      resolveMove(run, boardWithHighest(8), 24);
+
+      // The engine refuses the resolution AND the sink refuses the report of
+      // that refusal. Reported directly, the second throw travelled out of the
+      // finish, which sat before the summary, `onRunEnded`, the envelope removal
+      // and the fresh envelope. DL-RUNCTL-31.
+      run.engine.endStageThrows = true;
+
+      const summary = withoutThrowing((): RunSummary =>
+        run.controller.endRun('abandoned'),
+      );
+
+      // The resolution was asked for, and refused, and the finish completed
+      // every step that follows it.
+      expect(run.engine.endStages).toEqual([false]);
+      expect(summary.stageIndex).toBe(0);
+      expect(run.controller.lastSummary()).toEqual(summary);
+      expect(run.sink.of('run-ended')).toHaveLength(1);
+
+      // The envelope of a finished run is gone, which is the step the escaping
+      // throw used to skip.
+      expect(storedEnvelope(run.backing)).toBeNull();
+    });
 
   it('dispatches onStageEnd and emits stage:end through a real engine', () => {
     const backing = new MemoryStorage();
@@ -6343,6 +6558,164 @@ describe('the stage a run ended on', () => {
     // outcome, exactly once.
     expect(dispatched).toEqual([false]);
     expect(emitted).toEqual([false]);
+
+    stop();
+  });
+
+  it('emits the cleared verdict through a real engine, advancing nothing',
+    () => {
+      const backing = new MemoryStorage();
+      const manager = new LocalStorageManager({ storage: backing });
+      const config = createDefaultRulesConfig();
+      const stages = createDefaultStageConfig();
+      const hooks = createHookBus();
+      const dispatched: boolean[] = [];
+
+      expect(
+        hooks.register({
+          id: 'cleared-probe',
+          hooks: {
+            onStageEnd: (payload): void => {
+              dispatched.push(payload.cleared);
+            },
+          },
+        }),
+      ).toBe(true);
+
+      const controller = new RunController({
+        store: new RunStateStore({ storage: manager, config }),
+        identity: resolveRunIdentity({
+          storage: manager,
+          createToken: (): string => 'cleared-stage-run',
+        }),
+        config,
+        stages,
+        createToken: (): string => 'cleared-stage-run',
+      });
+
+      controller.begin();
+
+      const streams = createRngStreams(controller.seed(), controller.cursors());
+      const engine = new Engine({
+        config,
+        stages,
+        streams,
+        hooks,
+        stageContext: (): StageCommitContext => controller.stageContext(),
+      });
+
+      const emitted: boolean[] = [];
+
+      engine.events.on('stage:end', (event): void => {
+        emitted.push(event.cleared);
+      });
+
+      const stop = controller.observe(engine, () => streams.snapshotCursors());
+
+      // A board one move from the opening goal of highest tile 16. The merge it
+      // produces is well below the 2048 win value, so the goal is met without
+      // the game terminating.
+      controller.startRun(engine, {
+        seed: 'cleared-stage-seed',
+        board: mergePairBoard(8),
+      });
+      engine.move(DIRECTION_LEFT);
+
+      // The goal was met in play, so the engine resolved the stage itself and,
+      // with no draw port composed, the controller advanced. That is the
+      // pre-existing path and it stands.
+      expect(dispatched).toEqual([true]);
+      expect(emitted).toEqual([true]);
+
+      const stageAfterClear = controller.stageIndex();
+
+      expect(stageAfterClear).toBe(1);
+
+      controller.endRun('won');
+
+      // The stage the run ENDED on had not met its own goal, so the finish
+      // resolves it as uncleared — and the run's stage index is the one the
+      // summary describes, unmoved by the resolution. DL-RUNCTL-31.
+      expect(dispatched).toEqual([true, false]);
+      expect(emitted).toEqual([true, false]);
+      expect(controller.lastSummary()?.stageIndex).toBe(stageAfterClear);
+
+      stop();
+    });
+
+  it('advances no stage when a won run ends on a goal it had met', () => {
+    const backing = new MemoryStorage();
+    const manager = new LocalStorageManager({ storage: backing });
+    const config = createDefaultRulesConfig();
+
+    // A ladder whose first goal is the win value itself, so the goal is met by
+    // the very move that wins: `onCommit` defers the payout while the win stands
+    // unresolved, which is what leaves a MET goal to be resolved by the finish.
+    const stages: StageConfig = {
+      ...createDefaultStageConfig(),
+      ladder: Object.freeze([
+        { kind: 'highest-tile' as const, target: config.winValue },
+      ]),
+    };
+    const hooks = createHookBus();
+
+    const controller = new RunController({
+      store: new RunStateStore({ storage: manager, config }),
+      identity: resolveRunIdentity({
+        storage: manager,
+        createToken: (): string => 'won-stage-run',
+      }),
+      config,
+      stages,
+      createToken: (): string => 'won-stage-run',
+    });
+
+    controller.begin();
+
+    const streams = createRngStreams(controller.seed(), controller.cursors());
+    const engine = new Engine({
+      config,
+      stages,
+      streams,
+      hooks,
+      stageContext: (): StageCommitContext => controller.stageContext(),
+    });
+
+    const emitted: boolean[] = [];
+    const started: number[] = [];
+
+    engine.events.on('stage:end', (event): void => {
+      emitted.push(event.cleared);
+    });
+    engine.events.on('stage:start', (event): void => {
+      started.push(event.stageIndex);
+    });
+
+    const stop = controller.observe(engine, () => streams.snapshotCursors());
+
+    // Two tiles of half the win value: one move wins the run, and the 2048 it
+    // produces also meets the opening goal of highest tile 16.
+    controller.startRun(engine, {
+      seed: 'won-stage-seed',
+      board: createNearWinBoard(config.boardSize, config.winValue),
+    });
+    engine.move(DIRECTION_LEFT);
+
+    // The win TERMINATED the turn, so the stage payout was deferred rather than
+    // resolved: nothing has ended the stage, and the met goal still stands.
+    expect(emitted).toEqual([]);
+    expect(started).toEqual([0]);
+
+    controller.endRun('won');
+
+    // The resolution carries the met goal, and it advances nothing: the summary
+    // describes the stage the run was played on. Without the guard the emission
+    // reached the advance and the run was summarised one stage further on than
+    // it ever reached. DL-RUNCTL-31.
+    expect(emitted).toEqual([true]);
+    expect(started).toEqual([0]);
+    expect(controller.lastSummary()?.stageIndex).toBe(0);
+    expect(controller.lastSummary()?.score).toBeGreaterThan(0);
 
     stop();
   });
@@ -6827,7 +7200,14 @@ describe('a stage transition whose opener refuses', () => {
     expect(run.controller.stageOpenPending()).toBe(
       run.controller.stageIndex(),
     );
-    expect(run.sink.of('write-failed')).not.toHaveLength(0);
+
+    // The fault channel, not the write channel. A stage the engine
+    // refused to open wrote nothing, and the report now names that operation.
+    // DL-RUN-10.
+    expect(
+      run.sink.of('run-faulted').map((record) => record.detail.operation),
+    ).toContain(RUN_FAULT_OPERATIONS.stageOpen);
+    expect(run.sink.of('write-failed')).toHaveLength(0);
 
     // The retry opens it, and the debt clears.
     run.engine.startStageThrows = false;
@@ -6855,7 +7235,7 @@ describe('a stage transition whose opener refuses', () => {
 
     let resolution: RewardResolution | null = null;
 
-    // The throw used to escape this call, AFTER the reward had been persisted.
+    // No throw escapes this call, which runs AFTER the reward is persisted.
     expect(() => {
       resolution = run.controller.completeReward(run.engine.port, 'port-plain');
     }).not.toThrow();
@@ -6904,12 +7284,13 @@ describe('a stage transition whose opener refuses', () => {
 /* ==========================================================================
  * A REPORTER THAT THROWS ON ONE CHANNEL
  *
- * Every `this.reporter.*` call in the controller now runs inside `emit()`, which
- * mirrors `RunStateStore.emit`. Before that, an observer that raised took the
- * caller down with it: a logger that threw on `onRunStarted` aborted `begin()`
- * mid-adoption, and one that threw on `onRewardDrawn` aborted a selection AFTER
- * the envelope had been written — the run and its envelope disagreeing because a
- * REPORT failed. Observation is not part of the transaction. DL-RUNCTL-22.
+ * Every `this.reporter.*` call in the controller now runs inside `emit()`,
+ * which mirrors `RunStateStore.emit`. An observer that raises does NOT take the
+ * caller down with it: a logger that throws on `onRunStarted` cannot abort
+ * `begin()` mid-adoption, and one that throws on `onRewardDrawn` cannot abort a
+ * selection after the envelope is written, which would leave the run and its
+ * envelope disagreeing because a REPORT failed. Observation is not part of the
+ * transaction. DL-RUNCTL-22.
  * ========================================================================== */
 
 describe('a reporter that throws on one channel', () => {
@@ -7030,6 +7411,67 @@ describe('a reporter that throws on one channel', () => {
         'write-failed',
       ].sort(),
     );
+  });
+
+  it('ends the run when the stage resolution AND the reporter both throw', () => {
+    // THE COMBINED CASE, and the one the containment contract exists for. The
+    // abandoned-stage resolution called the sink directly rather than through
+    // `emit`, so an engine that raised beside a sink that raised sent the sink's
+    // exception out of the finish BEFORE the run was marked ended and its
+    // envelope cleared — observation deciding gameplay state.
+    // DL-RUNCTL-32, DL-RUN-10.
+    const run = drive({
+      endStageThrows: true,
+      throwOn: 'onRunFaulted',
+      offers: [drivenOffer('port-plain')],
+    });
+
+    // Written first, so the clear the finish performs is observable.
+    run.controller.persist(run.engine.port, run.cursors);
+
+    expect(storedEnvelope(run.backing)).not.toBeNull();
+
+    // Read BEFORE the finish: ending a run mints a fresh envelope with a new
+    // run identifier, so the ended run's own identifier is the one to hold.
+    const endedRunId = run.controller.runId();
+    const summary = withoutThrowing((): RunSummary =>
+      run.controller.endRun('abandoned'),
+    );
+
+    // THE RUN ENDED, and every consequence of ending it landed: the summary is
+    // produced, the finished run is readable, the envelope is cleared and a
+    // second offer is refused.
+    expect(summary.runId).toBe(endedRunId);
+    expect(run.controller.lastSummary()).not.toBeNull();
+    expect(storedEnvelope(run.backing)).toBeNull();
+    expect(run.controller.offerReward()).toEqual([]);
+
+    // The engine WAS asked to resolve the stage, and the broken channel
+    // recorded nothing — which is what makes this the double-failure path
+    // rather than a path where nothing was reported at all.
+    expect(run.engine.calls).toContain('endStage');
+    expect(run.sink.of('run-faulted')).toHaveLength(0);
+    expect(run.sink.of('run-ended')).toHaveLength(1);
+  });
+
+  it('names the stage resolution when only the engine throws', () => {
+    const run = drive({ endStageThrows: true });
+    const endedRunId = run.controller.runId();
+
+    const summary = withoutThrowing((): RunSummary =>
+      run.controller.endRun('abandoned'),
+    );
+
+    expect(summary.runId).toBe(endedRunId);
+    expect(run.sink.of('run-ended')[0].detail.outcome).toBe('abandoned');
+    expect(
+      run.sink.of('run-faulted').map((record) => record.detail.operation),
+    ).toEqual([RUN_FAULT_OPERATIONS.stageResolution]);
+
+    // Reported as a fault that ALTERED THE RUN: the stage the summary describes
+    // never resolved, which is visible in play. DL-RUN-10.
+    expect(run.sink.of('run-faulted')[0].detail.affectsRunFlow).toBe(true);
+    expect(run.sink.of('write-failed')).toHaveLength(0);
   });
 
   it('does not let a corruption report abort adoption', () => {
@@ -7251,10 +7693,10 @@ describe('a registry port whose members live on a prototype', () => {
   });
 
   it('restores a resumed run through the `restore` alias', () => {
-    // The defect: the restore read `restoreRelics` alone, so an instance-shaped
-    // port was handed nothing and a resumed run held relics the envelope
-    // recorded and the registry had never seated — every hook they bind silent
-    // for the rest of the run.
+    // The restore reads the alias as well as `restoreRelics`, so an
+    // instance-shaped port is seated: without it a resumed run would hold
+    // relics the envelope recorded and the registry never seated, leaving every
+    // hook they bind silent for the rest of the run.
     const seed = 'alias-restore';
     const backing = storageHolding({
       [RUN_STATE_KEY]: JSON.stringify(
@@ -7374,10 +7816,10 @@ describe('a registry port whose members live on a prototype', () => {
  *
  * An ABSENT registry means "this composition drives the relics itself", and the
  * controller records an entry on shape alone. An ATTACHED one that publishes no
- * activation member means the wiring is WRONG, and the two used to be
- * indistinguishable — so a port attached under the wrong member names persisted
- * a reward that fired on no hook, was drawn as held by the HUD, and was excluded
- * from every later draw. DL-RUNCTL-28.
+ * activation member means the wiring is WRONG, and the two are distinguishable:
+ * without that distinction a port attached under the wrong member names would
+ * persist a reward that fired on no hook, was drawn as held by the HUD, and was
+ * excluded from every later draw. DL-RUNCTL-28.
  * ========================================================================== */
 
 describe('an attached registry that cannot seat a relic', () => {
@@ -7397,7 +7839,15 @@ describe('an attached registry that cannot seat a relic', () => {
 
       // Nothing recorded, and the failure is VISIBLE rather than silent.
       expect(composed.controller.relics()).toEqual([]);
-      expect(composed.sink.of('write-failed')).not.toHaveLength(0);
+
+      // The fault channel names the registry that could not seat it.
+      // DL-RUN-10.
+      expect(
+        composed.sink
+          .of('run-faulted')
+          .map((record) => record.detail.operation),
+      ).toContain(RUN_FAULT_OPERATIONS.relicPickupUnsupported);
+      expect(composed.sink.of('write-failed')).toHaveLength(0);
     });
 
   it('records the entry on shape alone where no registry is attached', () => {
@@ -8140,13 +8590,13 @@ function composedPort(board?: SerializedGameState): {
 }
 
 describe('the ported engine port', () => {
-  it('publishes move, restart and continuePlaying, one per input action', () => {
+  it('publishes move, restart and continueAfterWin, one per input action', () => {
     const { port } = composedPort();
 
     // The three names js/game_manager.js L9-L11 subscribed at construction.
     expect(typeof port.move).toBe('function');
     expect(typeof port.restart).toBe('function');
-    expect(typeof port.continuePlaying).toBe('function');
+    expect(typeof port.continueAfterWin).toBe('function');
 
     // And the observation half of the same port, which the controller attaches
     // through: the emitter, the snapshot and the two stage members.
@@ -8160,12 +8610,12 @@ describe('the ported engine port', () => {
     const { port } = composedPort();
 
     expect(typeof port.isGameTerminated).toBe('function');
-    expect(typeof port.continuePlaying).toBe('function');
+    expect(typeof port.continueAfterWin).toBe('function');
 
     // Two members, never one name carrying both a method and a boolean —
     // js/game_manager.js L24-L27 assigned `this.keepPlaying = true` over its own
     // prototype method of that name, and L31 read the shadowed member.
-    expect(port.isGameTerminated).not.toBe(port.continuePlaying);
+    expect(port.isGameTerminated).not.toBe(port.continueAfterWin);
     expect(port.isGameTerminated()).toBe(false);
 
     // The query answers on the engine's own state and stays a query: asking it
@@ -8196,7 +8646,7 @@ describe('the ported engine port', () => {
     // continues it, and the flag it writes carries the frozen wire name.
     expect(port.isGameTerminated()).toBe(true);
 
-    port.continuePlaying();
+    port.continueAfterWin();
 
     expect(port.isGameTerminated()).toBe(false);
     expect(port.serialize().keepPlaying).toBe(true);

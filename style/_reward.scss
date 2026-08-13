@@ -5,24 +5,22 @@
 //
 // One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of this
 // file's area enumerated:
-//   TR-REWARD-01  style/main.scss L196-L221  the `.game-message` overlay
-//                                            treatment, from which the reward
-//                                            panel's surface is compiled
-//   TR-REWARD-02  style/main.scss L334-L402  the tile ramp's anchors, from which
-//                                            the per-rarity accents are
-//                                            interpolated
-//   TR-REWARD-03  style/main.scss L159-L168  the `button` mixin, from which
-//                                            `.relic-card` is compiled
-//   TR-REWARD-04  target-only row            the three-offer list and its
-//                                            without-replacement rendering
-//   TR-REWARD-05  target-only row            the rarity chip, the charges chip
-//                                            and the hook badges
-//   TR-REWARD-06  target-only row            the description, rendered whole
-//   TR-REWARD-07  target-only row            the narrow-layout restatement at
-//                                            the mobile threshold
+//   TR-REWARD-01  style/main.scss  the `.game-message` overlay treatment, from
+//                 .game-message    which the reward panel's surface is compiled
+//   TR-REWARD-02  style/main.scss  the tile ramp's anchors, from which the
+//                 ramp loop        per-rarity accents are interpolated
+//   TR-REWARD-03  style/main.scss  the `button` mixin, from which `.relic-card`
+//                 button mixin     is compiled
+//   TR-REWARD-04  target-only row  the three-offer list and its
+//                                  without-replacement rendering
+//   TR-REWARD-05  target-only row  the rarity chip, the charges chip and the
+//                                  hook badges
+//   TR-REWARD-06  target-only row  the description, rendered whole
+//   TR-REWARD-07  target-only row  the narrow-layout restatement at the mobile
+//                                  threshold
 //
 // Decisions: DL-REWARD-01, DL-REWARD-02, DL-REWARD-03, DL-REWARD-04,
-// DL-REWARD-16 (docs/DECISION_LOG.md).
+// DL-REWARD-16, DL-REWARD-17, DL-THEME-11 (docs/DECISION_LOG.md).
 
 @use "sass:color";
 @use "sass:list";
@@ -113,6 +111,20 @@ $reward-rarities: $rarity-tiers !default;
 // every palette, with the mix above as the fallback.
 @function reward-rarity-accent($rarity) {
   $name: "--theme-rarity-" + ("" + $rarity);
+
+  @return string.unquote("var(#{$name}, #{reward-rarity-color($rarity)})");
+}
+
+// The tier's accent as the CARD's own surface resolves it — the
+// `--theme-rarity-<tier>-card` property style/_themes.scss publishes, lifted per
+// palette until every tier's chip label clears the ratio WCAG 2.1 asks of text
+// against that palette's card colour.
+//
+// The fallback is unchanged from the bare accent's, because the default palette
+// takes no lift: it already reads at 6.70:1 or better there. DL-THEME-11,
+// DL-REWARD-17.
+@function reward-rarity-card($rarity) {
+  $name: "--theme-rarity-" + ("" + $rarity) + "-card";
 
   @return string.unquote("var(#{$name}, #{reward-rarity-color($rarity)})");
 }
@@ -258,10 +270,17 @@ $reward-rarities: $rarity-tiers !default;
   background: var(--theme-tile-super, #{$reward-card-surface});
   color: var(--theme-tile-super-numeral, #{$bright-text-color});
 
-  // The block-start edge is the rarity accent.
+  // The block-start edge is the rarity accent as this surface resolves it.
+  //
+  // CHANGED from `reward-rarity-accent`, the unqualified accent. It is painted ON
+  // the card, and in both additive palettes the ramp's own anchors are dark by
+  // design, so the edge that carries the tier measured 1.29:1 against a
+  // near-black card — an indicator that was not there. The card variant is the
+  // same accent lifted for this surface, identical in the default palette.
+  // DL-THEME-11, DL-REWARD-17.
   border: $reward-hairline solid transparent;
   border-block-start: $reward-accent-thickness solid
-    reward-rarity-accent(list.nth($reward-rarities, 1));
+    reward-rarity-card(list.nth($reward-rarities, 1));
   border-radius: $tile-border-radius;
 
   // Neutralises the user-agent button styling, so the card inherits the
@@ -329,28 +348,26 @@ $reward-rarities: $rarity-tiers !default;
 // CHANGED from the card's own text colour, which every chip took and which made
 // the rarity chip identical for all four tiers: the tier was encoded on the
 // card's block-start edge alone, so the one chip whose whole purpose is to name
-// the tier said nothing about it in colour. The accent is the colour of this
-// surface plus the tier and clears 6.7:1 against it at every tier, so the label
-// stays above the 4.5:1 asked of text. DL-REWARD-15.
+// the tier said nothing about it in colour. DL-REWARD-15.
+//
+// CHANGED AGAIN, and the measurement that stood here is corrected: the colour is
+// the CARD variant, derived per palette from the 4.5:1 a text label owes against
+// this card's own surface. The bare accent cleared that in the default palette
+// only — both additive palettes measured down to 1.29:1 here. DL-REWARD-17,
+// DL-THEME-11.
 .reward-offer .relic-card-rarity {
   @include reward-chip;
 
-  color: var(
-    --theme-rarity-#{"" + list.nth($reward-rarities, 1)},
-    #{reward-rarity-color(list.nth($reward-rarities, 1))}
-  );
+  color: reward-rarity-card(list.nth($reward-rarities, 1));
 }
 
 .reward-offer .relic-card-charges {
   @include reward-chip;
 }
 
-// CHANGED: the description is no longer clamped. It carried
-// `-webkit-line-clamp: $reward-description-lines` with an ellipsis, which cut
-// the longest catalogue entry two lines short of its end at every desktop
-// width. The card grows to its text instead, and `.reward-offers` above stretches
-// all three cards to one height, so the row stays even and every badge row
-// still lands on the same line. DL-REWARD-16 supersedes DL-REWARD-03.
+// The description is NOT clamped: the card grows to its text, and
+// `.reward-offers` above stretches all three cards to one height, so the row
+// stays even and every badge row lands on the same line. DL-REWARD-16.
 .reward-offer .relic-card-description {
   min-inline-size: 0;
   line-height: $reward-line-height;
@@ -379,12 +396,15 @@ $reward-rarities: $rarity-tiers !default;
 
 @each $rarity in $reward-rarities {
   .reward-offer .relic-card[data-rarity="#{$rarity}"] {
-    border-block-start-color: reward-rarity-accent($rarity);
+    border-block-start-color: reward-rarity-card($rarity);
 
-    // ADDED: the same accent on the rarity chip, so the edge and the chip that
+    // The same accent on the rarity chip, so the edge and the chip that
     // names the tier carry one colour. DL-REWARD-15.
+    //
+    // CHANGED to the card variant on both, for the surface they share.
+    // DL-THEME-11, DL-REWARD-17.
     .relic-card-rarity {
-      color: reward-rarity-accent($rarity);
+      color: reward-rarity-card($rarity);
     }
   }
 }
@@ -436,7 +456,7 @@ $reward-rarities: $rarity-tiers !default;
     pointer-events: none;
     border-block-start-style: dashed;
 
-    // ADDED: the alpha every other disabled control carries, from
+    // The alpha every other disabled control carries, from
     // style/_a11y.scss's own token, so a card that cannot be chosen reads as
     // unavailable at a glance rather than only on close inspection of four
     // outlines. It is the shared value and not a local one, so the card cannot

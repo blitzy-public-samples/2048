@@ -1,12 +1,11 @@
 // Contract suite for the hook bus's SHARED ENGINE-EVENT CHANNEL, AAP R2.
 //
-// WHAT WAS WRONG
-//   The bus dispatched the six hooks to relics and nothing else, and every
-//   non-relic peer — the renderer, the HUD, the announcer, the sound engine, the
-//   screen router and the engine-event metrics — subscribed to the engine's own
-//   emitter instead. Relics and peers therefore sat on two parallel channels,
-//   where AAP Figure 2 and Figure 3 declare one: the emitter fans out to the
-//   bus, and relics, renderer, UI and observability are peers on it.
+// ONE CHANNEL, NOT TWO AAP Figure 2 and Figure 3 declare a single channel: the
+// engine's emitter fans out to the hook bus, and relics, renderer, UI and
+// observability are peers on it. Were the six hooks dispatched to relics alone,
+// every non-relic peer — the renderer, the HUD, the announcer, the sound
+// engine, the screen router and the engine-event metrics — would subscribe to
+// the emitter directly and sit on a second, parallel channel.
 //
 // WHAT THIS SUITE PINS
 //   That `attachEvents` relays all seven names, that a payload crosses the relay
@@ -262,9 +261,9 @@ describe('the shared engine-event channel', () => {
 
   it('registers no listener at all when a source refuses one part-way, and ' +
     'relays it in full on a retry', () => {
-    // A part-way attach used to leave every listener taken before the throw
-    // registered with no handle to release them, AND leave the source marked
-    // relayed — so the relay could neither be released nor attached again.
+    // A part-way attach must leave no listener registered without a handle to
+    // release it, and must leave the source unmarked, so the relay stays both
+    // releasable and attachable.
     const source = createEngineEvents();
     const registered: EngineEventName[] = [];
     const released: EngineEventName[] = [];

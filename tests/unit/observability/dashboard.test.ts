@@ -340,6 +340,19 @@ interface DashboardPage {
 const VOCABULARY_ID = 'dashboard-vocabulary-probe';
 
 /**
+ * The declared lookup tables that are READ WITH KEYS OUT OF THE LOADED
+ * FILE, and must therefore carry no prototype. DL-DIAG-25.
+ */
+const PROTOTYPE_FREE_TABLES: readonly string[] = Object.freeze([
+  'HEALTH_CHECK_SOURCES',
+  'GAUGE_TO_STATUS',
+  'STATUS_LABELS',
+]);
+
+/** Key the prototype answers are published under. DL-DIAG-25. */
+const PROTOTYPE_PROBE_KEY = 'prototypeFree';
+
+/**
  * The names the publisher reads out of the page's scope. Each is a top-level
  * declaration of docs/dashboards/dashboard.html restating a constant of the
  * application, and each is held against that constant below.
@@ -375,9 +388,20 @@ const vocabularyPublisher = ((): string => {
       `${JSON.stringify(name)}: typeof ${name} === "undefined" ? null : ${name}`,
   ).join(',');
 
+  // Whether each declared lookup table has a NULL prototype, computed
+  // inside the page's own context. `JSON.stringify` erases the distinction, so
+  // the answer has to be taken there and carried across as a boolean.
+  // DL-DIAG-25.
+  const probes = PROTOTYPE_FREE_TABLES.map(
+    (name) =>
+      `${JSON.stringify(name)}: typeof ${name} !== "undefined" && ` +
+      `Object.getPrototypeOf(${name}) === null`,
+  ).join(',');
+
   return (
     `document.getElementById(${JSON.stringify(VOCABULARY_ID)})` +
-    `.textContent = JSON.stringify({${entries}});`
+    `.textContent = JSON.stringify({${entries},` +
+    `${JSON.stringify(PROTOTYPE_PROBE_KEY)}: {${probes}}});`
   );
 })();
 
@@ -584,7 +608,7 @@ describe('the static dashboard, fed the Prometheus text export', () => {
     expect(status.message).toContain('the pasted text');
     expect(status.message).toContain('Prometheus text exposition');
 
-    // CHANGED: the exposition form counts SAMPLE LINES, which is the unit it
+    // The exposition form counts SAMPLE LINES, which is the unit it
     // actually carries — one histogram is one series in the JSON form but
     // seventeen lines here — so the page reports the two forms under different
     // nouns and this reads the one it renders.
@@ -777,7 +801,7 @@ describe('the static dashboard, fed the Prometheus text export', () => {
     expect(provenance['Generated at']).toBe(
       'not carried by the Prometheus text form',
     );
-    // CHANGED: `readingLabel` for this form is "Sample lines read"; "Series
+    // `readingLabel` for this form is "Sample lines read"; "Series
     // read" is the JSON form's label, and reading it here asserted on an absent
     // row rather than on the count.
     expect(provenance['Sample lines read']).toMatch(/^\d+$/u);
@@ -803,6 +827,54 @@ describe('the static dashboard, fed the combined diagnostics export', () => {
     expect(provenance['Schema version']).toBe(
       String(exports_().snapshot.schemaVersion),
     );
+  });
+
+  it('renders the run context only the combined form carries', () => {
+    // DL-DIAG-26. The panel and the guide promised the run's stage; the export
+    // carried none, so a reader holding a downloaded file could not tell which
+    // stage it described. Every expectation is DERIVED from the snapshot rather
+    // than restated, so this cannot drift from what was exported.
+    const dash = dashboard();
+
+    dash.load(exports_().combinedJson);
+
+    const run = exports_().snapshot.run;
+    const provenance = dash.provenance();
+
+    expect(run).not.toBeNull();
+
+    if (run === null) {
+      return;
+    }
+
+    expect(provenance.Stage).toBe(
+      `${run.stageIndex + 1} (index ${run.stageIndex})`,
+    );
+    expect(provenance['Stage goal']).toBe(`${run.goalKind} ${run.goalTarget}`);
+    expect(provenance['Goal progress']).toBe(
+      `${Math.round(run.goalProgress * 100)}%`,
+    );
+    expect(provenance['Relics held']).toBe(String(run.relics));
+    expect(provenance['Run persistence']).toBe(run.persistence);
+
+    // AND CARRIES NO RUN IDENTIFIER AND NO SEED, because the file it read
+    // carries neither: DL-LOG-09 keeps the run identifier out of every export
+    // and DL-LOG-07 keeps a seed out of one.
+    expect(Object.keys(provenance)).not.toContain('Run id');
+    expect(Object.keys(provenance)).not.toContain('Seed');
+  });
+
+  it('renders no run rows for the Prometheus form, which carries none', () => {
+    const dash = dashboard();
+
+    dash.load(exports_().prometheusText);
+
+    const provenance = dash.provenance();
+
+    // Nothing is pushed rather than a row of dashes being shown: the exposition
+    // writes metric families and nothing else. DL-DIAG-26.
+    expect(provenance.Stage).toBeUndefined();
+    expect(provenance['Relics held']).toBeUndefined();
   });
 
   it('renders the health detail the combined form carries', () => {
@@ -1024,7 +1096,230 @@ describe('the static dashboard, fed something it cannot read', () => {
 });
 
 /* ==========================================================================
- * 8. The vocabularies the page restates
+ * 8. Hostile keys in a loaded snapshot
+ * ========================================================================== */
+
+/**
+ * Own property names of `Object.prototype`, read before a hostile payload.
+ *
+ * Compared after each load: any addition here is prototype pollution, whichever
+ * panel it reached the page through.
+ */
+const PROTOTYPE_MEMBERS: readonly string[] = Object.freeze(
+  Object.getOwnPropertyNames(Object.prototype).sort(),
+);
+
+/** Keys that collide with `Object.prototype` when a `{}` is used as a map. */
+const HOSTILE_KEYS: readonly string[] = Object.freeze([
+  '__proto__',
+  'constructor',
+  'prototype',
+  'toString',
+]);
+
+/** Reports the own members added to `Object.prototype` since the read above. */
+const prototypeAdditions = (): readonly string[] =>
+  Object.getOwnPropertyNames(Object.prototype)
+    .sort()
+    .filter((name) => !PROTOTYPE_MEMBERS.includes(name));
+
+/**
+ * The real text export with extra sample lines appended.
+ *
+ * The real export is the base so every assertion about the canonical panels
+ * still holds: a page that refused, dropped or mis-keyed the hostile lines but
+ * also lost a real reading has not passed.
+ *
+ * @param lines Sample lines to append.
+ * @returns The payload to load.
+ */
+const textWith = (lines: readonly string[]): string =>
+  `${exports_().prometheusText}\n${lines.join('\n')}\n`;
+
+describe('the static dashboard, fed keys that collide with Object.prototype', () => {
+  /** One engine-event sample line carrying `value` under `event="key"`. */
+  const eventLine = (key: string, value: number): string =>
+    `${METRIC_NAMES.engineEventsTotal}{${METRIC_LABELS.event}="${key}"} ${String(value)}`;
+
+  it('renders a row per hostile label value instead of losing it', () => {
+    const dash = dashboard();
+
+    // One event count per hostile event name. `byLabel` accumulates these under
+    // the label value, which is the map the prototype-safety finding named:
+    // `found["__proto__"] = 0 + 3` reached an inherited setter that discards a
+    // number, so the row vanished, and `found["toString"]` read back a function
+    // that the sum turned into text.
+    dash.load(
+      textWith(HOSTILE_KEYS.map((key, index) => eventLine(key, (index + 1) * 3))),
+    );
+
+    expect(dash.status().level).not.toBe('error');
+
+    for (const [index, key] of HOSTILE_KEYS.entries()) {
+      // A key outside the declared vocabulary is marked with a star, so the
+      // lookup names the row exactly as the page writes it.
+      expect(dash.bar('engine-events', `${key} *`)).toBe(
+        formatCount((index + 1) * 3),
+      );
+    }
+
+    expect(prototypeAdditions()).toEqual([]);
+  });
+
+  it('keeps every real reading while those rows are present', () => {
+    const dash = dashboard();
+
+    dash.load(textWith([eventLine('__proto__', 3)]));
+
+    // The canonical panels read the same values as they do from the untouched
+    // export: a hostile key is data beside them, not a fault in them.
+    expect(dash.readout('run-totals', 'turns')).toBe(
+      formatCount(scalar(METRIC_NAMES.turnsTotal)),
+    );
+    expect(dash.bar('engine-events', 'state:commit')).toBe(
+      formatCount(
+        labelled(
+          METRIC_NAMES.engineEventsTotal,
+          METRIC_LABELS.event,
+          'state:commit',
+        ),
+      ),
+    );
+    expect(dash.row('hook-counts', 'onBeforeMove')?.[1]).toBe(
+      formatCount(
+        labelled(
+          METRIC_NAMES.hookDispatchesTotal,
+          METRIC_LABELS.hook,
+          'onBeforeMove',
+        ),
+      ),
+    );
+  });
+
+  it('refuses a label name the exposition format reserves', () => {
+    const dash = dashboard();
+
+    // `isValidLabelName` of src/observability/metrics.ts rejects the `__`
+    // prefix, so no export this repository writes can carry one. A line that
+    // does is malformed, and the count of sample lines read says so: the two
+    // reserved-name lines below are not among them.
+    const reservedName = `${METRIC_NAMES.engineEventsTotal}{__proto__="state:commit"} 4`;
+
+    dash.load(textWith([reservedName, reservedName]));
+
+    const read = Number(dash.provenance()['Sample lines read']);
+
+    dash.load(exports_().prometheusText);
+
+    expect(read).toBe(Number(dash.provenance()['Sample lines read']));
+    expect(prototypeAdditions()).toEqual([]);
+  });
+
+  it('carries a hostile family name as ordinary data', () => {
+    const dash = dashboard();
+
+    // `__proto__` and `constructor` are both legal metric names under the
+    // exposition grammar, so they are read rather than refused — into a map that
+    // has no prototype for them to collide with. This is a corruption guard
+    // rather than a witness of a visible defect: a `{}` map assigned a family
+    // object under `__proto__` had its own PROTOTYPE replaced by that object and
+    // kept no key, silently, and every canonical reading below is what would
+    // drift if the family map were corrupted that way again.
+    dash.load(
+      textWith([
+        '# HELP __proto__ A family named after the prototype accessor.',
+        '# TYPE __proto__ counter',
+        '__proto__ 12',
+        'constructor 13',
+      ]),
+    );
+
+    expect(dash.status().level).not.toBe('error');
+    expect(dash.readout('run-totals', 'turns')).toBe(
+      formatCount(scalar(METRIC_NAMES.turnsTotal)),
+    );
+    expect(prototypeAdditions()).toEqual([]);
+  });
+
+  it('reads hostile ids, statuses and label keys out of the JSON form', () => {
+    const dash = dashboard();
+
+    dash.load(
+      JSON.stringify({
+        correlationId: 'hostile-combined',
+        // A classic pollution attempt through the envelope itself: `JSON.parse`
+        // defines this as an own property rather than invoking the setter, so
+        // it must reach no prototype.
+        __proto__: { polluted: true },
+        metrics: {
+          series: [
+            {
+              kind: 'counter',
+              name: METRIC_NAMES.engineEventsTotal,
+              // The reserved name is dropped and the hostile VALUE is kept, so
+              // the row is keyed `constructor`.
+              labels: {
+                __proto__: 'state:commit',
+                [METRIC_LABELS.event]: 'constructor',
+              },
+              value: 9,
+            },
+            { kind: 'counter', name: '__proto__', labels: {}, value: 1 },
+            { kind: 'counter', name: 'constructor', labels: {}, value: 2 },
+          ],
+        },
+        health: {
+          status: 'unhealthy',
+          checks: [
+            { id: '__proto__', status: 'prototype', detail: 'hostile row one' },
+            { id: 'constructor', status: 'toString', detail: 'hostile row two' },
+          ],
+        },
+      }),
+    );
+
+    expect(dash.status().level).not.toBe('error');
+    expect(dash.bar('engine-events', 'constructor *')).toBe(formatCount(9));
+    // The dropped reserved name took nothing with it: no series was attributed
+    // to the event name it carried.
+    expect(dash.bar('engine-events', 'state:commit')).toBe(formatCount(null));
+
+    // The status column reads `STATUS_LABELS` with the status the file states.
+    // A prototype-bearing table answered `prototype` and `toString` with its
+    // own members, and a function's source went into the cell.
+    expect(dash.row('health', '__proto__')?.slice(0, 3)).toEqual([
+      '__proto__',
+      'prototype',
+      'hostile row one',
+    ]);
+    expect(dash.rowStatus('health', 'constructor')).toBe('toString');
+    expect(dash.row('health', 'constructor')?.[1]).toBe('toString');
+
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined();
+    expect(prototypeAdditions()).toEqual([]);
+  });
+
+  it('leaves Object.prototype untouched by every hostile form', () => {
+    const dash = dashboard();
+
+    for (const key of HOSTILE_KEYS) {
+      dash.load(
+        textWith([`${METRIC_NAMES.turnsTotal}{${METRIC_LABELS.hook}="${key}"} 1`]),
+      );
+      dash.load(
+        JSON.stringify({
+          series: [{ kind: 'counter', name: key, labels: { hook: key }, value: 1 }],
+        }),
+      );
+    }
+
+    expect(prototypeAdditions()).toEqual([]);
+    expect(Object.getOwnPropertyNames({})).toEqual([]);
+  });
+});
+
+/* ==========================================================================
+ * 9. The vocabularies the page restates
  * ========================================================================== */
 
 describe('the vocabularies docs/dashboards/dashboard.html restates', () => {
@@ -1135,7 +1430,7 @@ describe('the vocabularies docs/dashboards/dashboard.html restates', () => {
 });
 
 /* ==========================================================================
- * 9. The Grafana template
+ * 10. The Grafana template
  * ========================================================================== */
 
 /** One query of one panel. */
@@ -1590,5 +1885,201 @@ describe('the Grafana template docs/dashboards/dashboard.json declares', () => {
     }
 
     expect(problems).toEqual([]);
+  });
+});
+
+/* ==========================================================================
+ * 9. A hostile file: keys that collide with Object.prototype
+ * ========================================================================== */
+
+describe('the static dashboard, fed keys that collide with Object.prototype', () => {
+  /**
+   * A Prometheus exposition whose label VALUES and family name are
+   * prototype-bearing keys.
+   *
+   * `__proto__` matches the metric-name and label-value grammars, so a file may
+   * legitimately contain it. On an ordinary `{}` dictionary the assignment
+   * `found["__proto__"] = 7` does not create an own key — it attempts to replace
+   * the dictionary's prototype — so the group vanished from the analysis; and
+   * `found["constructor"]` read back an inherited FUNCTION, so the running sum
+   * beside it concatenated onto a function instead of starting at zero.
+   * DL-DIAG-25.
+   */
+  const HOSTILE_TEXT = [
+    '# HELP game2048_engine_events_total Engine events by event.',
+    '# TYPE game2048_engine_events_total counter',
+    'game2048_engine_events_total{event="__proto__"} 7',
+    'game2048_engine_events_total{event="constructor"} 5',
+    'game2048_engine_events_total{event="state:commit"} 3',
+    '# HELP __proto__ A family named for the prototype key.',
+    '# TYPE __proto__ counter',
+    '__proto__ 11',
+    '# HELP game2048_turns_total Turns.',
+    '# TYPE game2048_turns_total counter',
+    'game2048_turns_total 4',
+    '',
+  ].join('\n');
+
+  /** A combined snapshot whose health check identifiers are the same keys. */
+  const HOSTILE_JSON = JSON.stringify({
+    schemaVersion: 2,
+    correlationId: 'hostile-correlation',
+    generatedAt: '2026-01-01T00:00:00.000Z',
+    run: null,
+    health: {
+      status: 'fail',
+      checks: [
+        { id: '__proto__', status: 'fail', detail: 'injected', source: null },
+        {
+          id: 'constructor',
+          status: 'constructor',
+          detail: 'injected too',
+          source: null,
+        },
+        { id: 'storage', status: 'pass', detail: 'a real one', source: null },
+      ],
+      counts: { pass: 1, fail: 1, 'not-applicable': 0 },
+      report: null,
+      readiness: null,
+    },
+    hooks: null,
+    metrics: {
+      schemaVersion: 1,
+      correlationId: 'hostile-correlation',
+      generatedAt: '2026-01-01T00:00:00.000Z',
+      elapsedMs: 1,
+      rejected: 0,
+      reporterFaults: 0,
+      series: [
+        {
+          name: 'game2048_turns_total',
+          kind: 'counter',
+          labels: {},
+          value: 4,
+        },
+        {
+          name: '__proto__',
+          kind: 'counter',
+          labels: {},
+          value: 11,
+        },
+        {
+          name: 'game2048_engine_events_total',
+          kind: 'counter',
+          labels: { event: '__proto__' },
+          value: 7,
+        },
+      ],
+    },
+    logs: [],
+  });
+
+  it('keeps a prototype-bearing label value as its own group', () => {
+    const dash = dashboard();
+
+    dash.load(HOSTILE_TEXT);
+
+    expect(dash.status().level).toBe('loaded');
+
+    // Rendered with the ` *` marker every key outside the declared vocabulary
+    // carries, so the group is visible AS unexpected rather than absent.
+    expect(dash.bar('engine-events', '__proto__ *')).toBe(formatCount(7));
+
+    // And the sum beside it starts at ZERO rather than at an inherited function.
+    expect(dash.bar('engine-events', 'constructor *')).toBe(formatCount(5));
+
+    // Nothing declared is misattributed by their presence.
+    expect(dash.bar('engine-events', 'state:commit')).toBe(formatCount(3));
+    expect(dash.readout('run-totals', 'turns')).toBe(formatCount(4));
+  });
+
+  it('keeps the same keys as groups out of the JSON form', () => {
+    const dash = dashboard();
+
+    dash.load(HOSTILE_JSON);
+
+    expect(dash.status().level).toBe('loaded');
+    expect(dash.bar('engine-events', '__proto__ *')).toBe(formatCount(7));
+    expect(dash.readout('run-totals', 'turns')).toBe(formatCount(4));
+  });
+
+  it('renders a prototype-bearing health identifier as its own row', () => {
+    const dash = dashboard();
+
+    dash.load(HOSTILE_JSON);
+
+    // The row exists at all, which is the property the plain dictionary lost:
+    // `fromSection["__proto__"] = row` never became an own key, so
+    // `Object.keys` did not report it and the check disappeared.
+    expect(dash.row('health', '__proto__')?.slice(0, 3)).toEqual([
+      '__proto__',
+      'UNHEALTHY',
+      'injected',
+    ]);
+
+    // And an identifier that names an inherited MEMBER draws its provenance
+    // from a miss rather than from a function: the declared table is read
+    // through a null prototype, so `HEALTH_CHECK_SOURCES["constructor"]` misses.
+    const injected = dash.row('health', 'constructor');
+
+    expect(injected?.[0]).toBe('constructor');
+    expect(injected?.[3]).toBe('not carried');
+
+    // An unrecognised status word is rendered AS ITSELF rather than as the
+    // inherited function `STATUS_LABELS["constructor"]` used to answer with.
+    expect(injected?.[1]).toBe('constructor');
+    expect(injected?.[1]).not.toContain('function');
+
+    // The real check beside them is untouched.
+    expect(dash.row('health', 'storage')?.slice(0, 3)).toEqual([
+      'storage',
+      'healthy',
+      'a real one',
+    ]);
+  });
+
+  it('leaves Object.prototype alone', () => {
+    const dash = dashboard();
+
+    dash.load(HOSTILE_TEXT);
+    dash.load(HOSTILE_JSON);
+
+    // The dictionaries are local, so this was never a global-pollution defect —
+    // it is asserted anyway, because a future `JSON.parse` reviver or an
+    // assignment through a different path would make it one.
+    const plain = {} as Record<string, unknown>;
+
+    expect(Object.getPrototypeOf(plain)).toBe(Object.prototype);
+    expect(plain['event']).toBeUndefined();
+    expect(plain['status']).toBeUndefined();
+    expect(typeof plain.toString).toBe('function');
+    expect(
+      Object.prototype.hasOwnProperty.call(Object.prototype, 'samples'),
+    ).toBe(false);
+  });
+
+  it('declares every file-keyed lookup table with no prototype', () => {
+    const dash = dashboard();
+
+    dash.load(HOSTILE_JSON);
+
+    // Measured INSIDE the page's own context, because `JSON.stringify` erases
+    // the distinction: a table read with a key out of the loaded file must miss
+    // on `constructor` rather than answer with an inherited function.
+    const probes = dash.global(PROTOTYPE_PROBE_KEY) as Record<
+      string,
+      boolean
+    > | null;
+
+    expect(probes).not.toBeNull();
+
+    for (const name of PROTOTYPE_FREE_TABLES) {
+      expect(probes?.[name]).toBe(true);
+
+      // And each still carries its entries, so the copy lost nothing.
+      const table = dash.global(name) as Record<string, unknown> | null;
+
+      expect(Object.keys(table ?? {}).length).toBeGreaterThan(0);
+    }
   });
 });

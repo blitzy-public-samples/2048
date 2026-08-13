@@ -12,14 +12,14 @@
 //                                                      from
 //                                                      `KeyboardEvent.key` and
 //                                                      `KeyboardEvent.code`
-//   TR-PANEL-02  index.html L31, L38, L39              the three hrefless `<a>`
+//   TR-PANEL-02  index.html `<a>` controls             the three hrefless `<a>`
 //                                                      controls, superseded by
 //                                                      real `<button>` and
 //                                                      `<input>` elements
-//   TR-PANEL-03  style/main.scss L159-L168             the button mixin,
+//   TR-PANEL-03  style/main.scss button mixin          the button mixin,
 //                                                      applied through
 //                                                      `.screen-button`
-//   TR-PANEL-04  style/main.scss L109-L115             the `:after`
+//   TR-PANEL-04  style/main.scss `:after` captions     the `:after`
 //                                                      pseudo-content captions,
 //                                                      replaced by real text
 //                                                      nodes and the
@@ -39,7 +39,7 @@
 //                                                      the section vocabulary
 //
 // Decisions: DL-PANEL-01, DL-PANEL-02, DL-PANEL-03, DL-PANEL-04, DL-PANEL-05,
-// DL-PANEL-06, DL-PANEL-07 (docs/DECISION_LOG.md).
+// DL-PANEL-06, DL-PANEL-07, DL-PANEL-08 (docs/DECISION_LOG.md).
 
 import type { FocusManager, FocusTrapHandle } from '../a11y/focus-manager';
 import type { LiveRegionAnnouncer } from '../a11y/live-region';
@@ -73,7 +73,10 @@ import {
   listBindings,
 } from '../../input/keymap';
 import type { InputEmitter, RemapResult } from '../../input/input-manager';
-import type { SoundEngine } from '../../audio/sound-engine';
+import type {
+  SoundEngine,
+  SoundEngineState,
+} from '../../audio/sound-engine';
 import type { ThemeId } from '../../theme/themes';
 import { getTheme, themeIds } from '../../theme/themes';
 
@@ -99,7 +102,7 @@ export const SETTINGS_ROW_CLASS = 'settings-row';
 export const SETTINGS_BINDING_CLASS = 'settings-binding';
 
 /**
- * ADDED: carried by a key-binding row in ADDITION to `SETTINGS_ROW_CLASS`, so
+ * Carried by a key-binding row in ADDITION to `SETTINGS_ROW_CLASS`, so
  * style/_screens.scss lays those rows out as aligned columns without reaching
  * the theme, motion, sound and capture-action rows that share the base class.
  * DL-PANEL-05.
@@ -223,16 +226,28 @@ export interface SettingsPanelCopy {
   readonly soundAvailable: string;
 
   /**
-   * ADDED: shown while the audio layer is available and the player has muted
+   * Shown while the audio layer is available and the player has muted
    * it, so the status does not read as a live claim. DL-PANEL-06.
    */
   readonly soundMuted: string;
+
+  /**
+   * Shown while the audio layer is available and unmuted but the volume
+   * is at its minimum, which is silence. DL-PANEL-08.
+   */
+  readonly soundSilent: string;
+
+  /**
+   * Shown while the audio layer is available and would sound, but no user
+   * gesture has yet brought its context to `'running'`. DL-PANEL-08.
+   */
+  readonly soundLocked: string;
 
   /** Name of the control that rebinds one action. */
   readonly rebindLabel: (action: string) => string;
 
   /**
-   * ADDED: the VISIBLE text of that control, constant across every row.
+   * The VISIBLE text of that control, constant across every row.
    *
    * It must be contained in `rebindLabel`'s result case-insensitively, which is
    * what keeps the accessible name a superset of the visible label
@@ -302,7 +317,29 @@ function themeIdLabel(id: ThemeId): string {
   }
 }
 
-/** Fails the type check where an audio-availability outcome is unhandled. */
+/**
+ * What the audio layer is doing, as this panel reports it.
+ *
+ * Six states rather than the three availability outcomes it had, because three of
+ * them are `available` layers that still sound nothing: the player has muted it,
+ * the volume is at the minimum, or no gesture has resumed its context.
+ * DL-PANEL-08.
+ */
+type SoundStatus =
+  | 'absent'
+  | 'no-context'
+  | 'muted'
+  | 'silent'
+  | 'locked'
+  | 'playing';
+
+/**
+ * The one `AudioContext.state` in which a voice can be heard, as
+ * `SoundEngineState.contextState` reports it.
+ */
+const RUNNING_CONTEXT_STATE = 'running';
+
+/** Fails the type check where an audio state is unhandled. */
 function unreachableAvailability(availability: never): string {
   return String(availability);
 }
@@ -340,10 +377,17 @@ export const settingsPanelCopy: SettingsPanelCopy = Object.freeze({
     'off.',
   soundAvailable: 'Sound plays through this device.',
 
-  // ADDED: the available-but-silent case. The string above reported
-  // availability only, so it claimed sound was playing while the player had
-  // muted it. DL-PANEL-06.
+  // The available-but-silent case, distinct from the string above, which
+  // reports availability alone. DL-PANEL-06.
   soundMuted: 'Sound is available on this device and is muted.',
+
+  // The two states `soundAvailable` was also claiming playback for. A
+  // volume held at the minimum is silence, and a context that no gesture has
+  // resumed cannot sound anything yet. DL-PANEL-08.
+  soundSilent:
+    'Sound is available on this device and the volume is at zero.',
+  soundLocked:
+    'Sound is ready on this device and starts at your next press.',
 
   numberOnlyForcedHint: (reason: string | null): string =>
     reason === null
@@ -991,12 +1035,10 @@ export function createSettingsPanel(
 
     const numberButton = makeButton(copy.numberOnlyLabel);
 
-    // CHANGED: built EMPTY, where it used to be built holding the forced-hint
-    // text. The element is hidden until a force applies, but it carried a claim
-    // that 3D rendering was unavailable from the moment the dialog was
-    // rendered — text no state had asserted, one attribute away from being
-    // read. `syncNumberOnly` writes it when a force actually holds.
-    // DL-PANEL-07.
+    // Built EMPTY rather than holding the forced-hint text: the element is
+    // hidden until a force applies, and text one attribute away from being read
+    // may not claim 3D rendering is unavailable before a state asserts it.
+    // `syncNumberOnly` writes it when a force actually holds. DL-PANEL-07.
     const hint = makeStatus(SETTINGS_NUMBER_ONLY_HINT_ID, '');
 
     if (numberButton !== null) {
@@ -1060,7 +1102,10 @@ export function createSettingsPanel(
     const field = make('div', SETTINGS_FIELD_CLASS);
     const label = make('label', SETTINGS_LABEL_CLASS);
     const slider = make('input', SETTINGS_SLIDER_CLASS);
-    const status = makeStatus(SETTINGS_SOUND_STATUS_ID, copy.soundAvailable);
+    // CHANGED from `copy.soundAvailable`: nothing has unlocked the audio context
+    // at construction, so a claim of playback here is untrue for as long as it
+    // stands. `syncSound` replaces it on the same open. DL-PANEL-08.
+    const status = makeStatus(SETTINGS_SOUND_STATUS_ID, copy.soundLocked);
 
     if (
       group === null ||
@@ -1137,11 +1182,10 @@ export function createSettingsPanel(
       const name = makeRowLabel(describeAction(action));
       const keys = make('span', SETTINGS_BINDING_CLASS);
 
-      // CHANGED: the control paints the short constant and is NAMED by the
-      // verbose per-action string, where it used to paint the verbose string.
-      // Fourteen rows of "Change key for <action>" could not share a line with
-      // their label and binding inside the panel's measure, and each row sized
-      // its own columns, so the list read ragged. DL-PANEL-05.
+      // The control paints the short constant and is NAMED by the verbose
+      // per-action string. Fourteen painted rows of "Change key for <action>"
+      // would not share a line with their label and binding inside the panel's
+      // measure, and each row would size its own columns. DL-PANEL-05.
       const rebind = makeButton(copy.rebindShortLabel);
 
       if (row === null || name === null || keys === null || rebind === null) {
@@ -1300,8 +1344,8 @@ export function createSettingsPanel(
       hint.hidden = false;
       describeBy(button, SETTINGS_NUMBER_ONLY_HINT_ID);
     } else {
-      // CHANGED: cleared as well as hidden, so a force that is released leaves
-      // no stale claim behind it. DL-PANEL-07.
+      // Cleared as well as hidden, so a force that is released leaves no stale
+      // claim behind it. DL-PANEL-07.
       hint.textContent = '';
       hint.hidden = true;
       undescribeBy(button, SETTINGS_NUMBER_ONLY_HINT_ID);
@@ -1325,11 +1369,30 @@ export function createSettingsPanel(
   };
 
   /**
-   * Whether the audio layer can sound anything, and which cause holds when it
-   * cannot. The first observed degradation is reported once; a later cause is
+   * What the audio layer is actually doing, and whether its controls are
+   * operable. The first observed degradation is reported once; a later cause is
    * returned but not reported again.
+   *
+   * This answered `available | absent | no-context`, and every
+   * `available` answer with mute switched off was presented as sound playing.
+   * `SoundEngineState` reports three more facts that decide whether anything can
+   * be heard — `unlocked`, `contextState` and `volume` — so an available layer
+   * whose context no gesture had resumed, or whose volume sat at the minimum,
+   * claimed playback that was not happening. DL-PANEL-08.
+   *
+   * `available` is deliberately still a two-state answer keyed on the CONTEXT
+   * alone: it is what enables the mute button and the volume slider, and a layer
+   * that is merely locked or silent must keep both operable — they are how a
+   * player leaves those states.
+   *
+   * @param muted Whether the store holds mute on.
+   * @param volume The volume the store holds.
+   * @returns The state to describe, and whether the controls are operable.
    */
-  const readSoundAvailability = (): 'available' | 'absent' | 'no-context' => {
+  const readSoundStatus = (
+    muted: boolean,
+    volume: number,
+  ): { readonly status: SoundStatus; readonly available: boolean } => {
     const engine = soundEngine;
 
     if (engine === null) {
@@ -1338,55 +1401,80 @@ export function createSettingsPanel(
         reportDegraded('sound-engine', 'absent');
       }
 
-      return 'absent';
+      return { status: 'absent', available: false };
     }
 
+    let state: SoundEngineState;
+
     try {
-      const state = engine.getState();
-
-      if (state.available) {
-        return 'available';
-      }
-
-      if (!soundDegradationReported) {
-        soundDegradationReported = true;
-        reportDegraded('audio-context', 'unavailable');
-      }
-
-      return 'no-context';
+      state = engine.getState();
     } catch (error: unknown) {
       reporter.error('sound engine state threw', error, {
         context: SETTINGS_PANEL_CONTEXT,
       });
 
-      return 'absent';
+      return { status: 'absent', available: false };
     }
+
+    if (!state.available) {
+      if (!soundDegradationReported) {
+        soundDegradationReported = true;
+        reportDegraded('audio-context', 'unavailable');
+      }
+
+      return { status: 'no-context', available: false };
+    }
+
+    // THE PLAYER'S OWN CHOICES FIRST, in the order they silence the layer: a
+    // muted layer is muted whatever its context is doing, and the state a player
+    // set is the one they can act on. Both are read off the store rather than off
+    // the engine, so the status agrees with the two controls beside it — the
+    // engine follows the store, and a divergence between them is the store's
+    // report to make.
+    if (muted) {
+      return { status: 'muted', available: true };
+    }
+
+    if (volume <= MIN_VOLUME) {
+      return { status: 'silent', available: true };
+    }
+
+    // A context that no gesture has resumed cannot sound anything. The panel's
+    // own controls unlock it, so this state resolves itself at the next press —
+    // which is what the copy says.
+    if (!state.unlocked || state.contextState !== RUNNING_CONTEXT_STATE) {
+      return { status: 'locked', available: true };
+    }
+
+    return { status: 'playing', available: true };
   };
 
   /**
    * The text naming the audio layer's state.
    *
-   * The `never` branch is unreachable while the three outcomes above are the
-   * only ones, and fails the type check when a fourth is added.
+   * The `never` branch is unreachable while `SoundStatus` is the only source of
+   * these values, and fails the type check when a member is added.
+   *
+   * One case per state rather than one case per availability with the
+   * mute state folded in, because `playing` is now a claim this panel has to
+   * earn rather than the default for anything not switched off. DL-PANEL-08.
    */
-  const soundStatusText = (
-    availability: 'available' | 'absent' | 'no-context',
-
-    // ADDED: the mute state, so the available branch distinguishes sound that
-    // is playing from sound that is merely able to. The two unavailable
-    // branches already say mute is switched off and are unaffected by it.
-    // DL-PANEL-06.
-    muted: boolean,
-  ): string => {
-    switch (availability) {
-      case 'available':
-        return muted ? copy.soundMuted : copy.soundAvailable;
+  const soundStatusText = (status: SoundStatus): string => {
+    switch (status) {
+      case 'playing':
+        return copy.soundAvailable;
+      case 'muted':
+        return copy.soundMuted;
+      case 'silent':
+        return copy.soundSilent;
+      case 'locked':
+        return copy.soundLocked;
       case 'absent':
         return copy.soundAbsent;
       case 'no-context':
         return copy.soundContextUnavailable;
       default:
-        return unreachableAvailability(availability);
+        return unreachableAvailability(status);
     }
   };
 
@@ -1419,10 +1507,9 @@ export function createSettingsPanel(
 
   const syncSound = (): void => {
     const store = preferences;
-    const availability = readSoundAvailability();
-    const available = availability === 'available';
     const muted = store !== null && store.isMuted();
     const volume = store === null ? MAX_VOLUME : store.getVolume();
+    const { status, available } = readSoundStatus(muted, volume);
 
     if (mutedButton !== null) {
       writeToggleState(mutedButton, muted, !available);
@@ -1442,7 +1529,7 @@ export function createSettingsPanel(
     }
 
     if (soundStatus !== null) {
-      soundStatus.textContent = soundStatusText(availability, muted);
+      soundStatus.textContent = soundStatusText(status);
     }
 
     // Nothing is pushed into the audio layer from here.

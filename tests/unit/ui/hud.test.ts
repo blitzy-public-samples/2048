@@ -13,7 +13,13 @@ import type {
 import { EMPTY_RELIC_CONTEXT, EMPTY_STAGE_CONTEXT } from '../../../src/engine/types';
 import { Grid } from '../../../src/engine/grid';
 import { createNumberOnlyRenderer } from '../../../src/render/number-only-renderer';
-import { HUD_Z_INDEX, createHud, hudCopy } from '../../../src/ui/screens/hud';
+import { createLiveRegionAnnouncer } from '../../../src/ui/a11y/live-region';
+import {
+  HUD_Z_INDEX,
+  PERSISTENCE_ANNOUNCEMENT_SOURCE,
+  createHud,
+  hudCopy,
+} from '../../../src/ui/screens/hud';
 import type { Hud, HudAnnouncerPort } from '../../../src/ui/screens/hud';
 import { defaultRelicCardCopy } from '../../../src/ui/components/relic-card';
 import type { ActiveRelic, Rarity } from '../../../src/relics/relic-types';
@@ -1161,7 +1167,7 @@ describe('the tray renders the held relics in pickup order', () => {
 
     // AN EMPTY ANSWER IS AN ANSWER. The reader is the authority whenever it
     // answers, so a run holding no relic shows an empty tray; falling back to
-    // the slice on an empty answer kept the previous run's row on screen.
+    // the slice on an empty answer would keep the prior run's row on screen.
     expect(hud.readRendered()?.relics).toEqual([]);
     expect(
       outlets.tray.querySelectorAll('.relic-tray-item:not([data-relic-empty])'),
@@ -1204,7 +1210,7 @@ describe('the tray renders the held relics in pickup order', () => {
 /**
  * A recording stand-in for the one announcer of ../a11y/live-region.
  *
- * CHANGED: `written` records the POLARITY beside each line, because the
+ * `written` records the POLARITY beside each line, because the
  * persistence notice is the one line this screen writes assertively and `lines`
  * alone cannot tell the two polarities apart. DL-HUD-15.
  */
@@ -1215,16 +1221,28 @@ function recorder(): {
   readonly structured: { kind: string; name?: string; rarity?: string }[];
 
   /**
-   * ADDED: every call in arrival order, so the ORDER of the withdrawal and the
+   * Every call in arrival order, so the ORDER of the withdrawal and the
    * recovery line is assertable — the withdrawal has to come first or the alert
    * outlives the line saying it is over. DL-HUD-16.
    */
   readonly calls: string[];
+
+  /**
+   * The source each written line carried and each withdrawal named, so
+   * the SCOPE of the withdrawal is assertable — an unscoped one erases a peer's
+   * alert. DL-HUD-16, DL-LIVE-08.
+   */
+  readonly sources: (string | undefined)[];
+
+  /** The source each `clearAssertive` was asked for, in order. */
+  readonly withdrawals: (string | undefined)[];
 } {
   const lines: string[] = [];
   const written: { text: string; polarity?: string }[] = [];
   const structured: { kind: string; name?: string; rarity?: string }[] = [];
   const calls: string[] = [];
+  const sources: (string | undefined)[] = [];
+  const withdrawals: (string | undefined)[] = [];
 
   return {
     announcer: {
@@ -1232,12 +1250,14 @@ function recorder(): {
         structured.push({ ...input });
         calls.push(`announce:${input.kind}`);
       },
-      announceText: (text, polarity): void => {
+      announceText: (text, polarity, options): void => {
         lines.push(text);
         written.push({ text, polarity });
+        sources.push(options?.source);
         calls.push(`announceText:${polarity ?? 'polite'}`);
       },
-      clearAssertive: (): void => {
+      clearAssertive: (source): void => {
+        withdrawals.push(source);
         calls.push('clearAssertive');
       },
     },
@@ -1245,6 +1265,8 @@ function recorder(): {
     written,
     structured,
     calls,
+    sources,
+    withdrawals,
   };
 }
 
@@ -1740,12 +1762,12 @@ describe('a commit is counted once, and a lifecycle write is not counted as one'
 /* ==========================================================================
  * The two failure states a run can be in, projected
  *
- * A RELIC THAT NO LONGER FIRES WAS SHOWN HEALTHY, and a run that was no longer
- * reaching storage said nothing at all. The bus marks a relic degraded the
- * moment its handler throws, and a refused write leaves the run ephemeral;
- * both were known to the layers below and neither reached the surface the
- * player reads, so a player went on planning around a relic that does nothing
- * and playing a run no reload would ever find.
+ * A RELIC THE BUS HAS STOPPED FIRING IS SHOWN AS SUCH, and so is a run that has
+ * stopped reaching storage. The bus marks a relic degraded the moment its
+ * handler throws, and a refused write leaves the run ephemeral; both are known
+ * to the layers below, and these projections are what carry them to the surface
+ * the player reads, so no player plans around a relic that does nothing or
+ * plays a run no reload would find.
  * ========================================================================== */
 
 /** A reporter that records the metrics it was handed. */
@@ -1982,7 +2004,7 @@ describe('a run that is no longer reaching storage', () => {
     hud.destroy();
   });
 
-  // ADDED: the loss interrupts and the recovery does not, and the notice element
+  // The loss interrupts and the recovery does not, and the notice element
   // stays out of the announcement path so one event is spoken once. DL-HUD-15.
   it('writes the loss assertively, the recovery politely, and announces once', () => {
     const outlets = runFixture();
@@ -2035,7 +2057,7 @@ describe('a run that is no longer reaching storage', () => {
     hud.destroy();
   });
 
-  // ADDED: an `alert` region holds its text until something replaces it, and the
+  // An `alert` region holds its text until something replaces it, and the
   // recovery is written to the POLITE region — so the failure has to be
   // withdrawn, and withdrawn BEFORE the recovery speaks. DL-HUD-16.
   it('withdraws the assertive failure before announcing the recovery', () => {
@@ -2061,6 +2083,49 @@ describe('a run that is no longer reaching storage', () => {
       'clearAssertive',
       'announceText:polite',
     ]);
+
+    hud.destroy();
+  });
+
+  // The withdrawal names THIS screen's own source. Unscoped, it drained
+  // every assertive line on the page — a terminal verdict and its final score
+  // among them — because this screen is not the only assertive writer.
+  // DL-HUD-16, DL-LIVE-08.
+  it('withdraws under its own source, and raises its alert under it', () => {
+    runFixture();
+
+    const sink = recorder();
+    let status: 'persistent' | 'ephemeral' = 'ephemeral';
+    const hud = createHud({
+      document,
+      persistence: (): 'persistent' | 'ephemeral' => status,
+      announcer: (): HudAnnouncerPort => sink.announcer,
+    });
+
+    hud.render(commit(10));
+
+    // The alert is raised UNDER the source, which is what makes it withdrawable
+    // by it.
+    expect(sink.sources).toEqual([PERSISTENCE_ANNOUNCEMENT_SOURCE]);
+
+    status = 'persistent';
+    hud.render(commit(20));
+
+    // And the withdrawal names it rather than asking for everything.
+    expect(sink.withdrawals).toEqual([PERSISTENCE_ANNOUNCEMENT_SOURCE]);
+    expect(sink.withdrawals).not.toContain(undefined);
+
+    // The recovery carries it too, so both halves of the pair are symmetrical.
+    expect(sink.sources).toEqual([
+      PERSISTENCE_ANNOUNCEMENT_SOURCE,
+      PERSISTENCE_ANNOUNCEMENT_SOURCE,
+    ]);
+
+    // PINNED. The value is a contract with every other assertive writer on the
+    // page: two producers sharing one source would withdraw each other's lines,
+    // which is the defect the scope exists to close. A rename is therefore a
+    // deliberate act, not an incidental one.
+    expect(PERSISTENCE_ANNOUNCEMENT_SOURCE).toBe('hud/persistence');
 
     hud.destroy();
   });
@@ -2147,7 +2212,7 @@ describe('a run that is no longer reaching storage', () => {
     raising.destroy();
   });
 
-  // ADDED: the status-only refresh a host calls when the run reports a crossing
+  // The status-only refresh a host calls when the run reports a crossing
   // AFTER the commit every view has already taken. DL-HUD-17.
   it('refreshes the status alone, without a commit', () => {
     const outlets = runFixture();
@@ -2302,5 +2367,120 @@ describe('the frozen best-score contract survives the HUD', () => {
     expect(hud.readRendered()?.bestScore).toBe(0);
 
     hud.destroy();
+  });
+});
+/* ==========================================================================
+ * The HUD and the REAL announcer together (DL-HUD-16, DL-LIVE-08).
+ *
+ * Every case above drives a recording stand-in, which records the withdrawal
+ * without performing it — so the cost of an unscoped withdrawal was invisible
+ * there. These two wire the actual announcer of ../../../src/ui/a11y/live-region
+ * behind the HUD's port and assert what a screen reader would have been left
+ * with: before the scope existed, a run's own verdict and final score were
+ * erased by the HUD recovering its persistence in the same turn.
+ * ========================================================================== */
+
+describe('a persistence recovery beside a run verdict', () => {
+  /** Both live regions, as index.html declares them. */
+  const seedRegions = (): void => {
+    const regions = document.createElement('div');
+
+    regions.innerHTML =
+      '<div class="visually-hidden live-region" id="live-region" ' +
+      'role="status" aria-live="polite" aria-atomic="true"></div>' +
+      '<div class="visually-hidden live-region" id="live-region-assertive" ' +
+      'role="alert" aria-live="assertive" aria-atomic="true"></div>';
+
+    document.body.append(...Array.from(regions.children));
+  };
+
+  /** A scheduler that runs each step on the spot. */
+  const immediate = (callback: () => void): { cancel(): void } => {
+    callback();
+
+    return {
+      cancel: (): void => {
+        // Already run.
+      },
+    };
+  };
+
+  it('leaves the verdict and its final score readable', () => {
+    runFixture();
+    seedRegions();
+
+    const announcer = createLiveRegionAnnouncer({
+      autoFlush: false,
+      assertiveSelector: '#live-region-assertive',
+      schedule: immediate,
+    });
+    let status: 'persistent' | 'ephemeral' = 'ephemeral';
+    const hud = createHud({
+      document,
+      persistence: (): 'persistent' | 'ephemeral' => status,
+      announcer: (): HudAnnouncerPort => announcer,
+    });
+    const assertive = document.querySelector('#live-region-assertive');
+
+    // The run is unsaved, so the HUD raises its alert.
+    hud.render(commit(10));
+    announcer.flush();
+
+    expect(assertive?.textContent ?? '').toContain('no longer being saved');
+
+    // The run then ENDS, and its verdict is queued — the composition root
+    // announces it off the same commit the HUD renders.
+    announcer.announce({
+      kind: 'terminal',
+      verdict: 'loss',
+      score: 3274,
+      source: 'main/terminal',
+    });
+
+    // And in the same turn the store recovers, so the HUD withdraws its alert.
+    status = 'persistent';
+    hud.render(commit(20));
+    announcer.flush();
+
+    // The verdict survives the withdrawal and speaks, final score included.
+    expect(assertive?.textContent ?? '').toContain('3274');
+    expect(assertive?.textContent ?? '').not.toContain('no longer being saved');
+
+    hud.destroy();
+    announcer.destroy();
+  });
+
+  it('still withdraws its own alert when no verdict is in flight', () => {
+    runFixture();
+    seedRegions();
+
+    const announcer = createLiveRegionAnnouncer({
+      autoFlush: false,
+      assertiveSelector: '#live-region-assertive',
+      schedule: immediate,
+    });
+    let status: 'persistent' | 'ephemeral' = 'ephemeral';
+    const hud = createHud({
+      document,
+      persistence: (): 'persistent' | 'ephemeral' => status,
+      announcer: (): HudAnnouncerPort => announcer,
+    });
+    const assertive = document.querySelector('#live-region-assertive');
+
+    hud.render(commit(10));
+    announcer.flush();
+
+    expect(assertive?.textContent ?? '').toContain('no longer being saved');
+
+    status = 'persistent';
+    hud.render(commit(20));
+    announcer.flush();
+
+    // The scope did not cost the HUD its own withdrawal: the stale alert is gone
+    // rather than sitting beside a line saying the run is saved again.
+    expect(assertive?.textContent).toBe('');
+
+    hud.destroy();
+    announcer.destroy();
   });
 });

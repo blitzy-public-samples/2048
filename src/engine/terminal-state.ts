@@ -55,10 +55,9 @@ interface ProbeTileView extends MergeTileView {
  * Presents a face value and its cell to the merge predicate with no merge
  * history.
  *
- * The cell was ADDED: the probe previously presented `{ value, mergedFrom }`
- * alone, which is not the operand shape `resolveMove` presents, so a predicate
- * keyed on position answered the probe from its no-position fall-through rather
- * than from its rule. DL-TERM-05.
+ * The view carries the cell as well as the value, so it is the operand shape
+ * `resolveMove` presents and a predicate keyed on position answers the probe
+ * from its rule rather than from a no-position fall-through. DL-TERM-05.
  *
  * @param value Face value to present.
  * @param cell Cell the probed tile stands in.

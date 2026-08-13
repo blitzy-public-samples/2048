@@ -3,13 +3,13 @@
 // them.
 //
 // The seam is the system's only asynchronous boundary and the one validation
-// gate V8 names as previously unmeasured. The loop CONTAINS a throw from a
-// registered callback and from either lifecycle hook, so a frame that failed
-// still ran to completion and the loop kept scheduling — and the lifecycle pair
-// the root wires carried no error channel, so the `render.frame` span closed as
-// though the frame had been clean. This suite drives the two production modules
-// through the real wiring and asserts what the closed span says about a frame
-// that failed.
+// gate V8 names as unmeasured in the retired tree. The loop CONTAINS a throw
+// from a registered callback and from either lifecycle hook, so a frame that
+// failed runs to completion and the loop keeps scheduling — which is why the
+// lifecycle pair the root wires carries an error channel, without which the
+// `render.frame` span would close as a clean frame. This suite drives the two
+// production modules through the real wiring and asserts what the closed span
+// says about a frame that failed.
 //
 // Nothing here reads a DOM node: the scheduler and the clock are injected, so
 // each frame runs synchronously and the durations are exact.
@@ -163,8 +163,8 @@ describe('a frame whose callback throws', () => {
 
     expect(frames()).toHaveLength(1);
 
-    // The span the root's lifecycle pair opened is closed as the failure it
-    // was, where it used to close as a clean frame. DL-TRACE-14.
+    // The span the root's lifecycle pair opened is closed as the failure it is,
+    // not as a clean frame. DL-TRACE-14.
     expect(frame.attributes[SPAN_ATTRIBUTES.failed]).toBe(true);
     expect(frame.attributes[SPAN_ATTRIBUTES.outcome]).toBe(
       SPAN_OUTCOMES.failed,

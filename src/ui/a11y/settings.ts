@@ -48,8 +48,8 @@
  *                                                 `deserializePreferences`
  *
  * Decisions: DL-SETTINGS-01, DL-SETTINGS-02, DL-SETTINGS-03, DL-SETTINGS-04,
- * DL-SETTINGS-05, DL-SETTINGS-06, DL-SETTINGS-07, DL-SETTINGS-08, DL-THEME-01,
- * DL-THEME-02 (docs/DECISION_LOG.md).
+ * DL-SETTINGS-05, DL-SETTINGS-06, DL-SETTINGS-07, DL-SETTINGS-08,
+ * DL-SETTINGS-09, DL-THEME-01, DL-THEME-02 (docs/DECISION_LOG.md).
  */
 
 import {
@@ -88,7 +88,7 @@ export interface UiReporter {
   error(message: string, error: unknown, fields?: UiReportFields): void;
 
   /**
-   * ADDED: reports a caught value AT A LEVEL THE CALLER CHOOSES.
+   * Reports a caught value AT A LEVEL THE CALLER CHOOSES.
    *
    * `error` above fixes the severity at `error`, so a RECOVERED failure — a
    * clipboard refusal the selection path carries — had nowhere to send the value
@@ -114,6 +114,25 @@ export interface UiReporter {
     thrown: unknown,
     fields?: UiReportFields,
   ): void;
+
+  /**
+   * Reads the correlation scope this sink is currently filing under.
+   *
+   * A screen that awaits — the run summary awaits `clipboard.writeText` — can
+   * be answered after the player has begun another run, and a run beginning
+   * ROTATES the one scope every report is keyed to. A report filed at that
+   * point describes the run that made the attempt while being labelled with the
+   * run now in force. Reading the scope when the attempt OPENS gives the
+   * delayed report something to compare against, so it can name the run it
+   * belongs to and withhold a per-run count that would land in the wrong one.
+   *
+   * Optional so an existing sink stays valid, and `createSafeUiReporter` fills
+   * the gap with the empty string — which callers read as "no scope is
+   * knowable", never as a scope that differs. DL-SUMMARY-18.
+   *
+   * @returns The scope identifier, or the empty string where none is knowable.
+   */
+  scope?(): string;
 }
 
 /** Value reported where a caught value offered no usable name. */
@@ -131,7 +150,7 @@ const UNKNOWN_THROWN_NAME = 'unknown';
 const THROWN_NAME_PATTERN = /^[A-Za-z_$][\w$]{0,63}$/u;
 
 /**
- * ADDED: names a caught value in a form that carries no caught text.
+ * Names a caught value in a form that carries no caught text.
  *
  * The name of an `Error` — `NotAllowedError`, `SecurityError`, `TypeError` — is
  * a CLASS, so it says what kind of failure occurred without carrying the
@@ -164,8 +183,35 @@ export function nameThrown(thrown: unknown): string {
     : UNKNOWN_THROWN_NAME;
 }
 
+/** Shape reported for a value that will not answer what it is. */
+const UNREADABLE_SHAPE = 'unreadable';
+
+/** Shape reported for a field that is present as an accessor. */
+const ACCESSOR_SHAPE = 'accessor';
+
 /**
- * ADDED: names the SHAPE of an untrusted value without coercing it.
+ * `Array.isArray` under a guard.
+ *
+ * It is the one predicate in this module that can throw on a value nothing has
+ * been invoked on: the check consults a proxy's handler, and a REVOKED proxy
+ * has none, so `Array.isArray` on one raises a `TypeError`. Everything else the
+ * loader does to an untrusted payload — `typeof`, an identity comparison — is
+ * inert. DL-SETTINGS-09.
+ *
+ * @param value Value of unknown provenance.
+ * @returns Whether it is an array, or `null` where the question could not be
+ *   answered at all.
+ */
+function isArrayPayload(value: unknown): boolean | null {
+  try {
+    return Array.isArray(value);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Names the SHAPE of an untrusted value without coercing it.
  *
  * `typeof` reads a value's kind without invoking anything on it, so a value with
  * a hostile `toString` or `Symbol.toPrimitive` is described rather than executed
@@ -173,6 +219,10 @@ export function nameThrown(thrown: unknown): string {
  * are named apart from the plain objects `typeof` groups them with, because a
  * loader rejecting a payload is usually rejecting one of those two.
  * DL-SETTINGS-08.
+ *
+ * The array test goes through `isArrayPayload`, so a value that will
+ * not answer what it is — a revoked proxy — is named `unreadable` rather than
+ * raising out of the report being built. DL-SETTINGS-09.
  *
  * @param value Value of unknown provenance.
  * @returns One bounded word naming its shape.
@@ -182,7 +232,75 @@ function describeShape(value: unknown): string {
     return 'null';
   }
 
-  return Array.isArray(value) ? 'array' : typeof value;
+  const array = isArrayPayload(value);
+
+  if (array === null) {
+    return UNREADABLE_SHAPE;
+  }
+
+  return array ? 'array' : typeof value;
+}
+
+/**
+ * The outcome of reading one property off an untrusted payload.
+ *
+ * `ok` says the payload answered. It answers with `undefined` for a property it
+ * does not carry, which is the same answer an absent field has always given.
+ */
+type OwnDataRead =
+  | { readonly ok: true; readonly value: unknown }
+  | {
+      readonly ok: false;
+      readonly cause: typeof ACCESSOR_SHAPE | typeof UNREADABLE_SHAPE;
+    };
+
+/** The answer for a property the payload does not carry. */
+const OWN_DATA_ABSENT: OwnDataRead = Object.freeze({
+  ok: true,
+  value: undefined,
+});
+
+/**
+ * Reads one own DATA property, invoking nothing on the payload.
+ *
+ * A bracket lookup is not a read but a CALL waiting to happen: it walks the
+ * prototype chain, runs an accessor it finds there or on the object itself, and
+ * runs a proxy's `get` trap — any of which can throw straight out of a loader
+ * that promises never to. A descriptor read invokes none of them. The descriptor
+ * a proxy trap returns is normalised by the engine into an ordinary object
+ * before it is handed back, so reading `value` off it invokes nothing either;
+ * the trap can still refuse, which is what the guard is for.
+ *
+ * Own properties only. A payload this build wrote carries own data properties,
+ * so a value reachable only through a prototype was not written by
+ * `serializePreferences` and is not read back as though it had been.
+ * DL-SETTINGS-09.
+ *
+ * @param payload Payload of unknown provenance.
+ * @param key Property to read.
+ * @returns The value it carries, or why it could not be read.
+ */
+function readOwnData(payload: object, key: string): OwnDataRead {
+  let descriptor: PropertyDescriptor | undefined;
+
+  try {
+    descriptor = Object.getOwnPropertyDescriptor(payload, key);
+  } catch {
+    return Object.freeze({ ok: false, cause: UNREADABLE_SHAPE } as const);
+  }
+
+  if (descriptor === undefined) {
+    return OWN_DATA_ABSENT;
+  }
+
+  // A DATA descriptor carries `value`; an accessor carries `get` or `set` and no
+  // `value`. Refused where it stands rather than run to find out what it would
+  // have said.
+  if (!('value' in descriptor)) {
+    return Object.freeze({ ok: false, cause: ACCESSOR_SHAPE } as const);
+  }
+
+  return Object.freeze({ ok: true, value: descriptor.value } as const);
 }
 
 /**
@@ -204,6 +322,13 @@ export const NOOP_UI_REPORTER: UiReporter = Object.freeze({
   // the contract rather than falling through the wrapper's gap-filler.
   failure(): void {
     return;
+  },
+
+  // ADDED with the scope reader above. The empty string is the "no scope is
+  // knowable" answer, which a caller compares as equal to itself and therefore
+  // never reads as a rotation. DL-SUMMARY-18.
+  scope(): string {
+    return '';
   },
 });
 
@@ -251,7 +376,7 @@ export function createSafeUiReporter(reporter: UiReporter): UiReporter {
       }
     },
 
-    // ADDED: the level-preserving failure channel, with the gap-filler for a
+    // The level-preserving failure channel, with the gap-filler for a
     // sink that implements none. The fallback reports the caught value's NAME
     // and nothing else: copying its message here would put arbitrary caught
     // text into an ordinary field, which is the leak this channel exists to
@@ -282,6 +407,29 @@ export function createSafeUiReporter(reporter: UiReporter): UiReporter {
       } catch {
         return;
       }
+    },
+
+    // The scope reader, forwarded through the same guard and NORMALISED.
+    // A sink that implements none, one that raises, and one that answers with
+    // something other than a string all read as the empty string — the one
+    // answer a caller compares as equal to itself, so an unreadable scope can
+    // never be mistaken for a rotated one. DL-SUMMARY-18.
+    scope(): string {
+      const read = reporter.scope;
+
+      if (read === undefined) {
+        return '';
+      }
+
+      let value: unknown;
+
+      try {
+        value = read.call(reporter);
+      } catch {
+        return '';
+      }
+
+      return typeof value === 'string' ? value : '';
     },
   });
 }
@@ -1063,7 +1211,7 @@ export interface InitialUiPreferences {
 }
 
 /**
- * ADDED: schema version carried by the persisted preference envelope.
+ * Schema version carried by the persisted preference envelope.
  *
  * Present from the envelope's first version, so a later shape change is
  * DETECTABLE at load instead of inferred — the gap implicit requirement I5
@@ -1073,7 +1221,7 @@ export interface InitialUiPreferences {
 export const PREFERENCES_SCHEMA_VERSION = 1;
 
 /**
- * ADDED: the persisted shape. `serializePreferences` produces it and
+ * The persisted shape. `serializePreferences` produces it and
  * `deserializePreferences` reads it; neither touches storage, so this module
  * still declares no storage key and performs no I/O — the composition root
  * owns both. DL-SETTINGS-06.
@@ -1096,7 +1244,7 @@ export interface PreferencesPayload {
 }
 
 /**
- * ADDED: projects the live snapshot onto the persisted envelope.
+ * Projects the live snapshot onto the persisted envelope.
  *
  * @param preferences Snapshot to project, as `getPreferences()` returns it.
  * @returns The frozen envelope to persist.
@@ -1117,7 +1265,7 @@ export function serializePreferences(
 }
 
 /**
- * ADDED: reads a persisted envelope into starting values.
+ * Reads a persisted envelope into starting values.
  *
  * Tolerant by construction, in the manner the run-state loader is: a payload
  * of the wrong shape, one carrying a version this build cannot read, or one
@@ -1125,6 +1273,14 @@ export function serializePreferences(
  * not read and NEVER throws. A field that survives is handed to
  * `createPreferenceStore`, which validates and clamps it a second time and
  * reports what it repairs — so this function omits rather than substitutes.
+ *
+ * The never-throw promise is now TOTAL, where it previously held only
+ * for a payload that answered its reads. Every property is read as an own DATA
+ * descriptor through `readOwnData` and the array probe goes through
+ * `isArrayPayload`, so no accessor, no proxy trap and no prototype member is
+ * ever invoked: a value carried by an accessor or refused by a trap is reported
+ * and skipped, and an unreadable `schemaVersion` refuses the payload whole.
+ * DL-SETTINGS-09.
  *
  * @param payload Parsed value read from storage, of unknown shape.
  * @param reporter Sink every rejection is reported through.
@@ -1137,11 +1293,7 @@ export function deserializePreferences(
 ): InitialUiPreferences {
   const sink = createSafeUiReporter(reporter);
 
-  if (
-    typeof payload !== 'object' ||
-    payload === null ||
-    Array.isArray(payload)
-  ) {
+  if (typeof payload !== 'object' || payload === null) {
     sink.log('warn', 'stored preferences were not an object; defaults used', {
       received: payload === null ? 'null' : typeof payload,
     });
@@ -1150,21 +1302,61 @@ export function deserializePreferences(
     return {};
   }
 
-  const record = payload as Record<string, unknown>;
-  const version: unknown = record['schemaVersion'];
+  // The array probe is guarded and its refusal is a rejection of its
+  // own, where `Array.isArray(payload)` used to be called bare. A REVOKED proxy
+  // raises from that call, so the loader that promises never to throw threw on a
+  // payload it had invoked nothing on. DL-SETTINGS-09.
+  const array = isArrayPayload(payload);
+
+  if (array !== false) {
+    sink.log(
+      'warn',
+      array === null
+        ? 'stored preferences could not be read; defaults used'
+        : 'stored preferences were not an object; defaults used',
+      { received: array === null ? UNREADABLE_SHAPE : 'array' },
+    );
+    sink.count('ui.preferences.payload_rejected', {
+      cause: array === null ? UNREADABLE_SHAPE : 'shape',
+    });
+
+    return {};
+  }
+
+  // Every field below is read as an own DATA descriptor, where each
+  // used to be a bracket lookup — a lookup runs an accessor and a proxy `get`
+  // trap, either of which carries its own throw out of this function.
+  // DL-SETTINGS-09.
+  const versionRead = readOwnData(payload, 'schemaVersion');
+
+  // A payload that will not answer for its own version is refused WHOLE, for the
+  // reason the unknown-version branch below is: a build this one cannot identify
+  // may spell a field the same way and mean something else by it.
+  if (!versionRead.ok) {
+    sink.log('warn', 'stored preferences could not be read; defaults used', {
+      received: versionRead.cause,
+    });
+    sink.count('ui.preferences.payload_rejected', {
+      cause: versionRead.cause,
+    });
+
+    return {};
+  }
+
+  const version: unknown = versionRead.value;
 
   // An UNKNOWN version is refused whole rather than read field by field: a
   // payload written by a build this one does not know may spell a field the
   // same way and mean something else by it.
   if (version !== PREFERENCES_SCHEMA_VERSION) {
-    // CHANGED: an unrecognised version is reported by its TYPE, where it used to
-    // be reported as `String(version)`. The value comes from storage, so it is
-    // untrusted on two counts: its text is content this report has no business
-    // disclosing into the log buffer and every export of it, and the coercion
-    // itself ran BEFORE the safe reporter boundary below, so an injected object
-    // with a hostile `toString` or `Symbol.toPrimitive` threw out of the loader
-    // that promises never to throw. A number is kept as it is: a version number
-    // is bounded, is not content, and is the one form this branch can act on.
+    // An unrecognised version is reported by its TYPE and never coerced to
+    // text. The value comes from storage, so it is untrusted on two counts: its
+    // text is content this report has no business disclosing into the log
+    // buffer and every export of it, and a coercion would run BEFORE the safe
+    // reporter boundary below, where an injected object with a hostile
+    // `toString` or `Symbol.toPrimitive` would throw out of a loader that
+    // promises never to throw. A number is kept as it is: a version number is
+    // bounded, is not content, and is the one form this branch can act on.
     // DL-SETTINGS-08.
     sink.log('warn', 'stored preferences carried an unreadable version', {
       expected: PREFERENCES_SCHEMA_VERSION,
@@ -1187,7 +1379,38 @@ export function deserializePreferences(
     sink.count('ui.preferences.payload_field_rejected', { preference });
   };
 
-  const motionSetting: unknown = record['motionSetting'];
+  /**
+   * Reads one persisted field, reporting one the payload will not answer
+   * for.
+   *
+   * A field that cannot be read is treated as ABSENT rather than as a reason to
+   * refuse the whole payload: the version has already been read and matched, so
+   * the remaining fields are independent of one another and the store below
+   * fills each gap with its own default. DL-SETTINGS-09.
+   *
+   * @param preference Field to read.
+   * @returns Its value, or `undefined` where it is absent or unreadable.
+   */
+  const readField = (preference: string): unknown => {
+    const read = readOwnData(payload, preference);
+
+    if (read.ok) {
+      return read.value;
+    }
+
+    sink.log('warn', 'stored preference that could not be read ignored', {
+      preference,
+      received: read.cause,
+    });
+    sink.count('ui.preferences.payload_field_rejected', {
+      preference,
+      received: read.cause,
+    });
+
+    return undefined;
+  };
+
+  const motionSetting: unknown = readField('motionSetting');
 
   if (motionSetting !== undefined) {
     if (isMotionSetting(motionSetting)) {
@@ -1197,7 +1420,7 @@ export function deserializePreferences(
     }
   }
 
-  const theme: unknown = record['theme'];
+  const theme: unknown = readField('theme');
 
   if (theme !== undefined) {
     if (isThemeId(theme)) {
@@ -1207,7 +1430,7 @@ export function deserializePreferences(
     }
   }
 
-  const numberOnlyMode: unknown = record['numberOnlyMode'];
+  const numberOnlyMode: unknown = readField('numberOnlyMode');
 
   if (numberOnlyMode !== undefined) {
     if (typeof numberOnlyMode === 'boolean') {
@@ -1217,7 +1440,7 @@ export function deserializePreferences(
     }
   }
 
-  const muted: unknown = record['muted'];
+  const muted: unknown = readField('muted');
 
   if (muted !== undefined) {
     if (typeof muted === 'boolean') {
@@ -1227,7 +1450,7 @@ export function deserializePreferences(
     }
   }
 
-  const volume: unknown = record['volume'];
+  const volume: unknown = readField('volume');
 
   if (volume !== undefined) {
     // FINITE, not in-range: an out-of-range figure is handed through so the

@@ -1619,7 +1619,7 @@ describe('writeJson refuses a value that cannot be serialised', () => {
 });
 
 /**
- * ADDED: parse provenance is CARRIED, not inferred from the error's name.
+ * Parse provenance is CARRIED, not inferred from the error's name.
  *
  * `JSON.parse` is not the only source of a `SyntaxError` this adapter can
  * catch. A `toJSON` member raises one during serialisation, and an injected or

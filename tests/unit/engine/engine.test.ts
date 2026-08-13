@@ -1199,7 +1199,7 @@ describe('addRandomTile() (js/game_manager.js L69-L76)', () => {
       engine.setup(null);
       play(engine, [DIRECTION_LEFT, DIRECTION_UP, DIRECTION_RIGHT]);
       engine.serialize();
-      engine.continuePlaying();
+      engine.continueAfterWin();
       engine.endStage(true);
       engine.restart();
 
@@ -1360,7 +1360,7 @@ describe('move(): the terminal guard (js/game_manager.js L134)', () => {
   it('accepts moves again once the win is acknowledged (L30-L32)', () => {
     const { engine } = createTerminatedEngine();
 
-    engine.continuePlaying();
+    engine.continueAfterWin();
 
     expect(engine.isGameTerminated()).toBe(false);
     expect(engine.move(DIRECTION_DOWN)).toBe(true);
@@ -1477,6 +1477,12 @@ describe('move(): the moved? decision (js/game_manager.js L182-L190)', () => {
     const detach = attachEngineTracing(engine.events, tracer);
 
     expect(engine.move(DIRECTION_LEFT)).toBe(false);
+
+    // And the caller settles, which is what closes the turn span. The
+    // engine's `move:after` records the turn number and leaves the close to the
+    // caller holding `attemptMove()`'s outcome, which src/main.ts does in a
+    // `finally`. DL-TRACE-17.
+    expect(detach.settleTurn()).toBe(true);
 
     const turns = tracer
       .recent()
@@ -1944,7 +1950,7 @@ describe('the six hooks dispatch at their mapped points', () => {
 
     expect(engine.move(DIRECTION_LEFT)).toBe(true);
 
-    engine.continuePlaying();
+    engine.continueAfterWin();
 
     const played = boardValues(engine);
     const events: string[] = [];
@@ -2393,7 +2399,7 @@ describe('keepPlaying() (js/game_manager.js L24-L27)', () => {
     const engine = new Engine({ streams: streamsFor() });
     const members = engine as unknown as Record<string, unknown>;
 
-    expect(typeof members.continuePlaying).toBe('function');
+    expect(typeof members.continueAfterWin).toBe('function');
     expect(typeof members.continuedPlay).toBe('boolean');
     expect(engine.continuedPlay).toBe(false);
   });
@@ -2401,13 +2407,13 @@ describe('keepPlaying() (js/game_manager.js L24-L27)', () => {
   it('leaves no callable shadowing the flag after the method runs', () => {
     const engine = createWonEngine();
 
-    engine.continuePlaying();
+    engine.continueAfterWin();
 
     const members = engine as unknown as Record<string, unknown>;
 
     expect(typeof members.continuedPlay).toBe('boolean');
     expect(members.continuedPlay).toBe(true);
-    expect(typeof members.continuePlaying).toBe('function');
+    expect(typeof members.continueAfterWin).toBe('function');
   });
 
   it('carries no member under the shadowed name at all', () => {
@@ -2424,7 +2430,7 @@ describe('keepPlaying() (js/game_manager.js L24-L27)', () => {
 
     expect(engine.isGameTerminated()).toBe(true);
 
-    engine.continuePlaying();
+    engine.continueAfterWin();
 
     expect(engine.continuedPlay).toBe(true);
     expect(engine.won).toBe(true);
@@ -2435,7 +2441,7 @@ describe('keepPlaying() (js/game_manager.js L24-L27)', () => {
     const engine = createWonEngine();
     const commits = captureCommits(engine);
 
-    engine.continuePlaying();
+    engine.continueAfterWin();
 
     expect(commits).toHaveLength(1);
     expect(commits[0].won).toBe(true);
@@ -2463,7 +2469,7 @@ describe('keepPlaying() (js/game_manager.js L24-L27)', () => {
       engine.restart();
     });
     input.on('keepPlaying', () => {
-      engine.continuePlaying();
+      engine.continueAfterWin();
     });
 
     // Emitted through the manager's own public entry points, so the name each
@@ -2486,14 +2492,14 @@ describe('keepPlaying() (js/game_manager.js L24-L27)', () => {
   });
 
   it('is reached by no OTHER name the input layer emits', () => {
-    // `continuePlaying` must be reachable from `keepPlaying` and from nothing
+    // `continueAfterWin` must be reachable from `keepPlaying` and from nothing
     // else, so a later input event cannot silently resume a won run.
     const engine = new Engine({ streams: streamsFor() });
     const input = new InputManager();
 
     engine.setup(copyBoard(NEAR_WIN_BOARD));
     input.on('keepPlaying', () => {
-      engine.continuePlaying();
+      engine.continueAfterWin();
     });
     engine.move(DIRECTION_LEFT);
 
@@ -2615,7 +2621,7 @@ describe('serialize() (js/game_manager.js L102-L110)', () => {
 
     engine.setup(copyBoard(NEAR_WIN_BOARD));
     engine.move(DIRECTION_LEFT);
-    engine.continuePlaying();
+    engine.continueAfterWin();
 
     const snapshot = engine.serialize();
 

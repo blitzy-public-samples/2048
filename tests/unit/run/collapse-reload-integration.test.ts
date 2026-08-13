@@ -11,11 +11,11 @@
 //   contract, and NEITHER CONSTRUCTS AN ENGINE. They write an envelope by hand
 //   that already declares a collapsed edge length, then assert that the store,
 //   the registry and the controller agree about the number in it. So the two
-//   steps either side of the number were untested: that a relic dispatched
+//   steps either side of the number belong here: that a relic dispatched
 //   through the hook bus ACTUALLY SHRINKS the board and records the edge length
 //   it left behind, and that a reloaded engine REBUILDS at the reconciled size
-//   with its tiles and its terminal-state checks intact. A regression in either
-//   would leave both suites green.
+//   with its tiles and its terminal-state checks intact. A failure in either
+//   would leave both of those suites green.
 //
 //   The reconciliation itself has a cycle in it that only a composed run
 //   exercises: the value needed to load the envelope correctly lives inside the

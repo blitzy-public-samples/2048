@@ -131,7 +131,7 @@ describe('relic subsystem composed with the engine', () => {
     const taken = RELIC_CATALOGUE.slice(0, 3);
     const { engine } = compose(taken);
 
-    // CHANGED: a `commits` array was declared, never written to, and used only
+    // A `commits` array was declared, never written to, and used only
     // to seed `seen` with a copy of itself — always empty, and asserting
     // nothing. DL-TEST-14.
     const seen: string[][] = [];

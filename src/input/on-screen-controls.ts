@@ -97,7 +97,7 @@ const INDEX_REJECTED_METRIC = 'input.onScreen.index.rejected';
 const AVAILABILITY_FAULT_METRIC = 'input.onScreen.availability.faulted';
 
 /**
- * ADDED: counter raised once per apply that withheld at least one control
+ * Counter raised once per apply that withheld at least one control
  * because its host was inert, with the number withheld. The withholding is
  * otherwise invisible: an inert control answers every liveness probe — it
  * reports `pointer-events: auto`, `opacity: 1`, `tabIndex: 0` and
@@ -107,15 +107,15 @@ const AVAILABILITY_FAULT_METRIC = 'input.onScreen.availability.faulted';
 const INERT_WITHHELD_METRIC = 'input.onScreen.withheld.inert';
 
 /**
- * ADDED: counter raised once per apply driven by a focus change, labelled with
+ * Counter raised once per apply driven by a focus change, labelled with
  * the event that drove it. DL-CONTROL-11.
  */
 const FOCUS_REFRESH_METRIC = 'input.onScreen.focus.reapplied';
 
-/** ADDED: attribute the reachability term reads. DL-CONTROL-11. */
+/** Attribute the reachability term reads. DL-CONTROL-11. */
 const INERT_ATTRIBUTE = 'inert';
 
-/** ADDED: `INERT_ATTRIBUTE` as an attribute selector. DL-CONTROL-11. */
+/** `INERT_ATTRIBUTE` as an attribute selector. DL-CONTROL-11. */
 const INERT_SELECTOR = `[${INERT_ATTRIBUTE}]`;
 
 const BIND_FAILED_METRIC = 'input.onScreen.bind.failed';
@@ -300,13 +300,13 @@ export const DEFAULT_ON_SCREEN_HOST_SELECTOR = '#on-screen-controls';
  * `restart`, and `.keep-playing-button` publishes `keepPlaying`.
  *
  * NONE OF THE THREE DECLARES CONTEXTS OF ITS OWN, so each follows the contexts
- * its action carries in the keymap — `['game']` for `restart`, `['overlay']` for
- * `keepPlaying`. `.retry-button` previously declared `['game', 'overlay']` so
- * the terminal overlay's "Try again" stayed live, but `ACTION_SCREENS.restart`
- * of ../ui/screen-router authorizes `restart` in `stage` alone, and a control
- * that publishes an action its state refuses is a control that does nothing.
- * The terminal states offer their own controls instead — Keep going, End run and
- * See run summary, rendered by ../ui/screens/game-over. DL-CONTROL-08.
+ * its action carries in the keymap — `['game']` for `restart`, `['overlay']`
+ * for `keepPlaying`. `.retry-button` declares no `['game', 'overlay']` pair of
+ * its own: `ACTION_SCREENS.restart` of ../ui/screen-router authorizes `restart`
+ * in `stage` alone, so a control publishing it from a terminal state would do
+ * nothing. The terminal states offer their own controls instead — Keep going,
+ * End run and See run summary, rendered by ../ui/screens/game-over.
+ * DL-CONTROL-08.
  */
 export const LEGACY_CONTROL_BINDINGS: readonly MarkupControlBinding[] =
   Object.freeze([
@@ -521,8 +521,8 @@ function isInTabOrder(element: Element): boolean {
     return true;
   }
 
-  // The defect being repaired: index.html declared all three controls as bare
-  // `<a>` elements with no `href`, which no engine puts in the tab order.
+  // An `<a>` counts only with an `href`: a bare `<a>`, which is what
+  // js/html_actuator.js's three controls were, is in no engine's tab order.
   return element.tagName === 'A' && element.hasAttribute('href');
 }
 
@@ -787,7 +787,7 @@ function hasKey(binding: InputBinding): boolean {
 }
 
 /**
- * ADDED: whether a control can be reached at all, which is a separate question
+ * Whether a control can be reached at all, which is a separate question
  * from whether its action is legal.
  *
  * A control inside a subtree marked `inert` is announced by nothing, focused by
@@ -836,7 +836,7 @@ function labelFor(action: InputAction, ordinal: number): string {
 }
 
 /**
- * ADDED: the text a control PAINTS, which is not always the text it is NAMED.
+ * The text a control PAINTS, which is not always the text it is NAMED.
  *
  * The four movement controls paint the direction word alone and keep the verbose
  * accessible name: laid out as the 3x3 pad style/main.scss now gives them, their
@@ -887,7 +887,7 @@ function applyGeneratedName(
   action: InputAction,
   ordinal: number,
 ): void {
-  // CHANGED: the painted text and the accessible name are resolved separately.
+  // The painted text and the accessible name are resolved separately.
   // DL-CONTROL-09.
   element.textContent = paintedLabelFor(action, ordinal);
   element.setAttribute('aria-label', nameFor(keymap, action, ordinal));
@@ -1447,7 +1447,7 @@ export function mountOnScreenControls(
   let activeKeymap = resolveKeymap();
   let activeContext = resolveContext();
 
-  /** ADDED: controls withheld by the reachability term on the last apply. */
+  /** Controls withheld by the reachability term on the last apply. */
   let withheldByInert = 0;
 
   /**
@@ -1458,8 +1458,8 @@ export function mountOnScreenControls(
    * Contained: a predicate that raises is reported and the control is treated
    * as available. Decision DL-CONTROL-06.
    *
-   * CHANGED: the reachability term is new and comes first, because it can
-   * refuse a control the other two terms both accept. DL-CONTROL-11.
+   * The reachability term comes FIRST, because it can refuse a control the
+   * other two terms both accept. DL-CONTROL-11.
    *
    * @param action Action the control publishes.
    * @param index Payload index the control carries.
@@ -1642,13 +1642,11 @@ export function mountOnScreenControls(
     );
     reporter.count(HOST_MISSING_METRIC, fields);
   } else {
-    // OWNED NODES ARE REPLACED, NOT ADDED TO. A second mount over the same host
-    // used to append a second pad and a second action group, so the host
-    // carried two of every generated control: two tab stops per action, two
-    // accessible names, two click listeners publishing the same action twice.
-    // Removing what a previous mount left makes a repeat mount idempotent in
-    // effect — the host ends up holding exactly one set whichever number of
-    // times this runs (N10).
+    // OWNED NODES ARE REPLACED, NOT ADDED TO. Removing what a previous mount
+    // left makes a repeat mount idempotent in effect: the host holds exactly
+    // one pad and one action group whichever number of times this runs, rather
+    // than two tab stops, two accessible names and two click listeners per
+    // action (N10).
     const stale = root.querySelectorAll(`:scope > .${GROUP_CLASS}`);
 
     if (stale.length > 0) {
@@ -1730,7 +1728,7 @@ export function mountOnScreenControls(
   }
 
   /**
-   * ADDED: the reachability of the layer, as one comparable string.
+   * The reachability of the layer, as one comparable string.
    *
    * Read over the layer's ANCHORS rather than over every control: a generated
    * control's only inert ancestry is its group's, since this layer never marks
@@ -1757,7 +1755,7 @@ export function mountOnScreenControls(
   };
 
   /**
-   * ADDED: the reachability the last pass was made against. DL-CONTROL-12.
+   * The reachability the last pass was made against. DL-CONTROL-12.
    */
   let appliedReachability = '';
 
@@ -1775,7 +1773,7 @@ export function mountOnScreenControls(
     let padAvailable = false;
     let actionAvailable = false;
 
-    // ADDED: counted for THIS apply, so the report below states what this pass
+    // Counted for THIS apply, so the report below states what this pass
     // withheld rather than a running total. DL-CONTROL-11.
     withheldByInert = 0;
 
@@ -1830,11 +1828,11 @@ export function mountOnScreenControls(
     applyGroupAvailability(padGroup, padAvailable);
     applyGroupAvailability(actionGroup, actionAvailable);
 
-    // ADDED: recorded at the END of the pass, so a focus-driven refresh can tell
+    // Recorded at the END of the pass, so a focus-driven refresh can tell
     // whether anything it reads has moved since the last one. DL-CONTROL-12.
     appliedReachability = reachabilityOf();
 
-    // ADDED: the one report of the reachability term. An inert control answers
+    // The one report of the reachability term. An inert control answers
     // every liveness probe as live, so without this the withholding — and the
     // state that caused it — would be invisible to a reader of the logs.
     // DL-CONTROL-11.
@@ -1918,23 +1916,21 @@ export function mountOnScreenControls(
   apply(activeKeymap, activeContext);
   applyMotion();
 
-  // ADDED: a focus change re-applies the layer.
+  // A focus change re-applies the layer.
   //
   // `'textEntry'` is a focus-derived context — it MEANS a text field holds
-  // focus — so a focus change is one of the moments the context can change,
-  // and it was the one moment nothing re-read it: the layer re-applied on a
-  // settings toggle, a rebind, a committed turn and a screen transition, and a
-  // field taking focus is none of those. A pinned context cannot change, so the
-  // listeners are attached only where a resolver was supplied.
+  // focus — so a focus change is one of the moments the context can change. The
+  // other four moments already re-applied the layer: a settings toggle, a
+  // rebind, a committed turn and a screen transition. A pinned context cannot
+  // change, so these listeners are attached ONLY where a resolver was supplied.
   //
-  // Re-entrancy is guarded because the apply itself moves focus: withdrawing
-  // the control that holds it blurs it, which fires `focusout` from inside the
-  // apply. The second pass would compute the same verdicts, so it is dropped
-  // rather than queued. DL-CONTROL-11.
+  // RE-ENTRANCY IS GUARDED: the apply itself moves focus, since withdrawing the
+  // control that holds it blurs it and fires `focusout` from inside the apply.
+  // A pass entered from inside a pass is dropped, not queued. DL-CONTROL-11.
   //
-  // CHANGED: a transition is ONE refresh, scheduled on a microtask, and it is
-  // made only where the keymap, the context or the layer's reachability has
-  // moved since the last pass. DL-CONTROL-12.
+  // A transition is ONE refresh, scheduled on a microtask, and it is made only
+  // where the keymap, the context or the layer's reachability has moved since
+  // the last pass. DL-CONTROL-12.
   if (typeof options.context === 'function' && ownerDocument !== null) {
     let reapplying = false;
 
@@ -2028,13 +2024,12 @@ export function mountOnScreenControls(
 
   const controls = Object.freeze(records.map(projectControl));
 
-  // CHANGED: the count is broken out, because `controls` counts everything this
-  // layer manages and a reader of "the on-screen controls are mounted" counts
-  // what is inside the host. The two differ by the markup controls the layer
-  // ADOPTS from elsewhere in the page — `.retry-button`, `.restart-button`,
-  // `.keep-playing-button` and the settings control — so a single figure of 28
-  // stood against 24 buttons in `#on-screen-controls`. Both are now stated.
-  // DL-CONTROL-10.
+  // The count is broken out: `controls` counts everything this layer manages
+  // and `inHost` counts what is inside the host. The two differ by the markup
+  // controls the layer ADOPTS from elsewhere in the page — `.retry-button`,
+  // `.restart-button`, `.keep-playing-button` and the settings control — so a
+  // single figure would stand against a different number of buttons in
+  // `#on-screen-controls`. DL-CONTROL-10.
   const inHost = records.reduce(
     (total, record): number => (record.generated ? total + 1 : total),
     0,

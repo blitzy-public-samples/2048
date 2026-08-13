@@ -742,12 +742,11 @@ describe('storage', () => {
       expect(writes).toEqual([]);
     });
 
-    // CHANGED: this case used to assert `PASS`. The reader's throw was
-    // discarded and the construction-time probe result stood alone, so the row
-    // an operator trusts most stayed green — and readiness stayed
-    // `persistent`/`ready` — while the live verdict path was broken. A reader
-    // that answered NOTHING is not evidence that the store is writable.
-    // DL-HEALTH-09.
+    // A reader that THREW fails the check: its throw is not discarded in favour
+    // of the construction-time probe result, so the row an operator trusts most
+    // does not stay green — and readiness does not stay `persistent`/`ready` —
+    // while the live verdict path is broken. A reader that answered NOTHING is
+    // not evidence that the store is writable. DL-HEALTH-09.
     it('fails the check where the reader raises, and says why', () => {
       const live = createHealthSurface({
         logger,

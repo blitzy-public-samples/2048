@@ -2,7 +2,9 @@
 // the log record, the level filter, the sink registry, the bounded
 // recent-record buffer, error serialisation, and the three reporter adapters.
 //
-// `deriveCorrelationId` is the tree's single derivation. The final describe
+// `deriveCorrelationId` is one of the tree's two implementations of one
+// derivation; `runCorrelationId` of src/run/run-state.ts is the other, and
+// tests/unit/run/run-state.test.ts holds the two byte-equal. The final describe
 // block is the end-to-end identity evidence: the logger, the engine reporter
 // adapter, the hook bus and the run layer all carry one identical value for
 // one run.
@@ -373,7 +375,7 @@ describe('deriveCorrelationId', () => {
   });
 
   it('groups a replay when it is given the seed alone', () => {
-    // The seed-grouping form.
+    // The seed-only form.
     const replayed = 'run-seed-replayed';
 
     expect(deriveCorrelationId(replayed)).toBe(deriveCorrelationId(replayed));
@@ -397,9 +399,9 @@ describe('deriveCorrelationId', () => {
 
     // KEYED, NOT PREFIXED. Every segment of the instance form is derived from
     // the run identifier and the seed together, so the form a dictionary CAN
-    // recover — the seed-grouping one — appears nowhere inside it. It did
-    // appear, as the leading 18 characters, and that made every exported
-    // identifier a matcher for candidate seeds.
+    // recover — the seed-only one — appears nowhere inside it. Were it to
+    // appear, as the leading 18 characters, every exported identifier would
+    // be a matcher for candidate seeds.
     expect(instance).toHaveLength(26);
     expect(instance.startsWith(grouped)).toBe(false);
     expect(instance).not.toContain(grouped.slice('run-'.length));
@@ -2924,7 +2926,7 @@ describe('the canonical correlation identifier', () => {
     expect(deriveCorrelationId(SUITE_SEED)).toBe(SUITE_CORRELATION_ID);
   });
 
-  it('agrees with the run layer derivation, seed-grouping form', () => {
+  it('agrees with the run layer derivation, seed-only form', () => {
     expect(Object.keys(runStateModule)).toContain('runCorrelationId');
 
     for (const seed of ['', SUITE_SEED, 'another-seed', '\u{1F600}']) {

@@ -4,8 +4,8 @@
 // tiers, so the bound keeps the semantics it protects 3 the drop report, so a
 // discarded announcement is diagnosable
 //
-// The region is the one index.html L105 declares. The reporter is a
-// hand-written recorder: no mocking library, no spy on a global, no storage.
+// The region is the one `#live-region` of index.html declares. The reporter is
+// a hand-written recorder: no mocking library, no spy on a global, no storage.
 // This suite is collected by the `unit:dom` project of vitest.config.ts, whose
 // environment is 'jsdom'.
 //
@@ -63,7 +63,7 @@ function createRecorder(): UiReporter & {
 /** Every announcer built, destroyed after each test. */
 const built: LiveRegionAnnouncer[] = [];
 
-/** The announcer region index.html L105 declares. */
+/** The announcer region `#live-region` of index.html declares. */
 function seedRegion(): void {
   document.body.innerHTML =
     '<div class="visually-hidden live-region" id="live-region" ' +
@@ -499,7 +499,7 @@ describe('the assertive region can be blanked on its own', () => {
 });
 
 /* ==========================================================================
- * ADDED: the withdrawal holds against the DEFERRED scheduler (DL-LIVE-07).
+ * The withdrawal holds against the DEFERRED scheduler (DL-LIVE-07).
  * Every case above ran its write steps on the spot, so nothing ever sat in the
  * queue or the outbox across the clear — which is exactly where the verdict was
  * surviving it.
@@ -715,5 +715,270 @@ describe('withdrawing the alert holds against a deferred scheduler', () => {
           entry.fields?.method === 'clearAssertive',
       ),
     ).toBe(true);
+  });
+});
+/* ==========================================================================
+ * A withdrawal is SCOPED to the producer that asks for it (DL-LIVE-08).
+ *
+ * Every case above withdraws globally, which is what the screen flow's
+ * stale-verdict sweep wants and is preserved unchanged. The defect a review
+ * found is the other caller: the HUD withdrew its own persistence alert on
+ * recovery and took every peer's assertive line with it — a terminal verdict
+ * and a final score among them — because the operation had no notion of who
+ * had raised what. These cases hold the scope in both directions.
+ * ========================================================================== */
+
+describe('an assertive withdrawal reaches only the source that asks', () => {
+  /** The two producers, named as the shipped ones are. */
+  const HUD = 'hud/persistence';
+  const PEER = 'main/board-mode';
+
+  it("leaves a peer's queued verdict standing", () => {
+    seedBothRegions();
+
+    const scheduler = createManualScheduler();
+    const region = announcer({
+      assertiveSelector: '#live-region-assertive',
+      schedule: scheduler.schedule,
+    });
+    const assertive = document.querySelector('#live-region-assertive');
+
+    // Both queued in the same turn, the way a lost run does it: the HUD's alert
+    // and the run's verdict.
+    region.announceText('This run is not being saved.', 'assertive', {
+      source: HUD,
+    });
+    region.announce({
+      kind: 'terminal',
+      verdict: 'loss',
+      score: 3274,
+      source: PEER,
+    });
+
+    expect(region.pending()).toBe(2);
+
+    // The HUD recovers and withdraws ITS line.
+    region.clearAssertive(HUD);
+
+    // One announcement went; the verdict did not.
+    expect(region.pending()).toBe(1);
+
+    region.flush();
+    scheduler.runAll();
+
+    // And it still speaks, with its final score.
+    expect(assertive?.textContent ?? '').toContain('3274');
+    expect(assertive?.textContent ?? '').not.toContain('not being saved');
+  });
+
+  it("leaves a peer's PENDING utterance standing", () => {
+    seedBothRegions();
+
+    const scheduler = createManualScheduler();
+    const region = announcer({
+      assertiveSelector: '#live-region-assertive',
+      schedule: scheduler.schedule,
+    });
+    const assertive = document.querySelector('#live-region-assertive');
+
+    region.announceText('This run is not being saved.', 'assertive', {
+      source: HUD,
+    });
+    region.announce({
+      kind: 'terminal',
+      verdict: 'loss',
+      score: 4321,
+      source: PEER,
+    });
+
+    // Composed and held on the write step: both are utterances now, which is the
+    // stage the global withdrawal also drains.
+    region.flush();
+
+    expect(region.pending()).toBe(2);
+
+    region.clearAssertive(HUD);
+
+    expect(region.pending()).toBe(1);
+
+    scheduler.runAll();
+
+    expect(assertive?.textContent ?? '').toContain('4321');
+  });
+
+  it("does not blank a peer's line already standing on the region", () => {
+    seedBothRegions();
+
+    const scheduler = createManualScheduler();
+    const region = announcer({
+      assertiveSelector: '#live-region-assertive',
+      schedule: scheduler.schedule,
+    });
+    const assertive = document.querySelector('#live-region-assertive');
+
+    region.announce({
+      kind: 'terminal',
+      verdict: 'loss',
+      score: 77,
+      source: PEER,
+    });
+    region.flush();
+    scheduler.runAll();
+
+    expect(assertive?.textContent ?? '').toContain('77');
+
+    // The HUD withdraws its own alert, of which it has none standing. The
+    // region's text belongs to the peer and must survive.
+    region.clearAssertive(HUD);
+
+    expect(assertive?.textContent ?? '').toContain('77');
+  });
+
+  it('blanks the region for the source that DID write it', () => {
+    seedBothRegions();
+
+    const scheduler = createManualScheduler();
+    const region = announcer({
+      assertiveSelector: '#live-region-assertive',
+      schedule: scheduler.schedule,
+    });
+    const assertive = document.querySelector('#live-region-assertive');
+
+    region.announceText('This run is not being saved.', 'assertive', {
+      source: HUD,
+    });
+    region.flush();
+    scheduler.runAll();
+
+    expect(assertive?.textContent).toBe('This run is not being saved.');
+
+    region.clearAssertive(HUD);
+
+    expect(assertive?.textContent).toBe('');
+  });
+
+  it('withdraws everything when no source is named', () => {
+    seedBothRegions();
+
+    const scheduler = createManualScheduler();
+    const region = announcer({
+      assertiveSelector: '#live-region-assertive',
+      schedule: scheduler.schedule,
+    });
+    const assertive = document.querySelector('#live-region-assertive');
+
+    region.announceText('This run is not being saved.', 'assertive', {
+      source: HUD,
+    });
+    region.announce({
+      kind: 'terminal',
+      verdict: 'loss',
+      score: 5,
+      source: PEER,
+    });
+    region.announceText('An untagged alert.', 'assertive');
+
+    region.clearAssertive();
+
+    // The unscoped form is unchanged: every assertive line goes, tagged or not.
+    expect(region.pending()).toBe(0);
+
+    region.flush();
+    scheduler.runAll();
+
+    expect(assertive?.textContent).toBe('');
+  });
+
+  it('leaves an untagged line to the unscoped form alone', () => {
+    seedBothRegions();
+
+    const scheduler = createManualScheduler();
+    const region = announcer({
+      assertiveSelector: '#live-region-assertive',
+      schedule: scheduler.schedule,
+    });
+    const assertive = document.querySelector('#live-region-assertive');
+
+    // No source: a producer that has not adopted one. A scoped withdrawal must
+    // not claim it, because nothing says it is that producer's.
+    region.announceText('An untagged alert.', 'assertive');
+    region.flush();
+    scheduler.runAll();
+
+    expect(assertive?.textContent).toBe('An untagged alert.');
+
+    region.clearAssertive(HUD);
+
+    expect(assertive?.textContent).toBe('An untagged alert.');
+
+    region.clearAssertive();
+
+    expect(assertive?.textContent).toBe('');
+  });
+
+  it('reports the scope it withdrew under, and whether it blanked', () => {
+    seedBothRegions();
+
+    const scheduler = createManualScheduler();
+    const reporter = createRecorder();
+    const region = announcer({
+      assertiveSelector: '#live-region-assertive',
+      schedule: scheduler.schedule,
+      reporter,
+    });
+
+    region.announce({
+      kind: 'terminal',
+      verdict: 'loss',
+      score: 9,
+      source: PEER,
+    });
+    region.flush();
+    scheduler.runAll();
+
+    region.clearAssertive(HUD);
+    region.clearAssertive(PEER);
+
+    const cleared = reporter.counts.filter(
+      (entry) => entry.metric === 'ui.liveRegion.assertive.cleared',
+    );
+
+    expect(cleared).toHaveLength(2);
+    expect(cleared[0]?.fields?.source).toBe(HUD);
+    expect(cleared[0]?.fields?.blanked).toBe(false);
+    expect(cleared[1]?.fields?.source).toBe(PEER);
+    expect(cleared[1]?.fields?.blanked).toBe(true);
+  });
+
+  it('carries the source through composition onto the utterance', () => {
+    const composition = composeAnnouncements([
+      { kind: 'text', text: 'Alert.', polarity: 'assertive', source: HUD },
+      { kind: 'terminal', verdict: 'win', score: 1, source: PEER },
+    ]);
+
+    expect(composition.utterances.map((line) => line.source)).toEqual([
+      HUD,
+      PEER,
+    ]);
+  });
+
+  it('ignores a source that is not a usable string', () => {
+    const composition = composeAnnouncements([
+      { kind: 'text', text: 'Alert.', polarity: 'assertive', source: '' },
+      {
+        kind: 'text',
+        text: 'Another.',
+        polarity: 'assertive',
+        source: 7,
+      } as unknown as Announcement,
+    ]);
+
+    // An unusable source resolves to none, so the line stays withdrawable by the
+    // unscoped form rather than becoming unreachable under a source nothing
+    // names.
+    expect(composition.utterances.map((line) => line.source)).toEqual([
+      undefined,
+      undefined,
+    ]);
   });
 });

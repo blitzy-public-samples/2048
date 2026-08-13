@@ -44,6 +44,7 @@ import {
   settingsPanelCopy,
 } from '../../../src/ui/components/settings-panel';
 import { applyTheme } from '../../../src/theme/themes';
+import { MAX_VOLUME, MIN_VOLUME } from '../../../src/config/audio-bounds';
 
 interface TrapRecord {
   readonly container: Element;
@@ -56,6 +57,12 @@ interface SoundRecord {
   volume: number;
   unlocks: number;
   available: boolean;
+
+  /**
+   * The context state the engine reports, so a case can hold the layer
+   * suspended after a gesture. DL-PANEL-08.
+   */
+  contextState: string;
 }
 
 interface ReportRecord {
@@ -173,6 +180,7 @@ const harness = (options: HarnessOptions = {}): Harness => {
     volume: 1,
     unlocks: 0,
     available: true,
+    contextState: 'running',
   };
 
   let keymapWrites = 0;
@@ -296,7 +304,7 @@ const harness = (options: HarnessOptions = {}): Harness => {
           getState: () => ({
             available: sound.available,
             unlocked: sound.unlocks > 0,
-            contextState: 'running',
+            contextState: sound.contextState,
             muted: sound.muted,
             volume: sound.volume,
             liveVoices: 0,
@@ -863,10 +871,9 @@ describe('rebinding a key', () => {
 
     const row = rebindControl(host, 'moveUp');
 
-    // UPDATED with DL-PANEL-05: the control PAINTS the short constant and is
-    // NAMED by the verbose per-action string, where it used to paint the
-    // verbose string. The visible text stays contained in the accessible name,
-    // so WCAG 2.5.3 still holds.
+    // DL-PANEL-05: the control PAINTS the short constant and is NAMED by the
+    // verbose per-action string. The visible text stays contained in the
+    // accessible name, so WCAG 2.5.3 holds.
     expect(row.textContent).toBe('Change');
     expect(row.getAttribute('aria-label')).toBe(
       `Change key for ${describeAction('moveUp')}`,
@@ -1585,26 +1592,91 @@ describe('the settings body is laid out as an aligned list', () => {
   });
 });
 
-describe('the sound status reports mute as well as availability', () => {
+describe('the sound status reports what the layer is actually doing', () => {
   const soundStatus = (host: HTMLElement): string =>
     host.querySelector<HTMLElement>(`#${SETTINGS_SOUND_STATUS_ID}`)
       ?.textContent ?? '';
 
-  it('says sound is muted while it is muted, and playing while it is not', () => {
-    const { panel, host, preferences } = harness();
+  // This asserted `soundAvailable` — "Sound plays through this
+  // device." — from the moment the dialog opened, which encoded the defect a
+  // review found rather than the behaviour: no gesture has resumed the audio
+  // context at that point, so nothing can be heard and the panel said otherwise.
+  // The locked state is now named, and playback is claimed only once the context
+  // is actually running. DL-PANEL-08.
+  it('says sound is ready before a gesture, and playing only after one', () => {
+    const { panel, host, preferences, sound } = harness();
 
     panel.open();
 
-    expect(soundStatus(host)).toBe(settingsPanelCopy.soundAvailable);
-
-    preferences.setMuted(true);
-
-    expect(soundStatus(host)).toBe(settingsPanelCopy.soundMuted);
+    // Nothing has unlocked the context yet.
+    expect(sound.unlocks).toBe(0);
+    expect(soundStatus(host)).toBe(settingsPanelCopy.soundLocked);
     expect(soundStatus(host)).not.toBe(settingsPanelCopy.soundAvailable);
 
-    preferences.setMuted(false);
+    // The mute press IS the gesture: it unlocks the context on the way through.
+    buttonNamed(host, 'Mute sound').click();
+
+    expect(sound.unlocks).toBe(1);
+    expect(preferences.isMuted()).toBe(true);
+    expect(soundStatus(host)).toBe(settingsPanelCopy.soundMuted);
+
+    // Unmuted, with the context now running: the one state in which the claim of
+    // playback is true.
+    buttonNamed(host, 'Mute sound').click();
+
+    expect(preferences.isMuted()).toBe(false);
+    expect(soundStatus(host)).toBe(settingsPanelCopy.soundAvailable);
+  });
+
+  it('says sound is muted while it is muted, whatever the context is doing', () => {
+    const { panel, host, preferences } = harness();
+
+    panel.open();
+    preferences.setMuted(true);
+
+    // Mute is the player's own choice and outranks the locked state: it is the
+    // one they can act on, and it does not claim anything untrue.
+    expect(soundStatus(host)).toBe(settingsPanelCopy.soundMuted);
+    expect(soundStatus(host)).not.toBe(settingsPanelCopy.soundAvailable);
+  });
+
+  // `MIN_VOLUME` is zero, so an unmuted layer at the minimum is silent —
+  // and it was reported as playing. DL-PANEL-08.
+  it('says the volume is at zero rather than claiming playback', () => {
+    const { panel, host, preferences } = harness();
+
+    panel.open();
+    buttonNamed(host, 'Mute sound').click();
+    buttonNamed(host, 'Mute sound').click();
 
     expect(soundStatus(host)).toBe(settingsPanelCopy.soundAvailable);
+
+    preferences.setVolume(MIN_VOLUME);
+
+    expect(soundStatus(host)).toBe(settingsPanelCopy.soundSilent);
+    expect(soundStatus(host)).not.toBe(settingsPanelCopy.soundAvailable);
+
+    // And it comes back when the volume does.
+    preferences.setVolume(MAX_VOLUME);
+
+    expect(soundStatus(host)).toBe(settingsPanelCopy.soundAvailable);
+  });
+
+  // A context the engine reports as suspended is not playing either, even
+  // once a gesture has been made. DL-PANEL-08.
+  it('says sound is ready while the context is not running', () => {
+    const { panel, host, sound } = harness();
+
+    panel.open();
+    buttonNamed(host, 'Mute sound').click();
+    buttonNamed(host, 'Mute sound').click();
+
+    expect(soundStatus(host)).toBe(settingsPanelCopy.soundAvailable);
+
+    sound.contextState = 'suspended';
+    panel.refresh();
+
+    expect(soundStatus(host)).toBe(settingsPanelCopy.soundLocked);
   });
 
   it('leaves the two unavailable strings alone, which already name mute', () => {
@@ -1616,6 +1688,26 @@ describe('the sound status reports mute as well as availability', () => {
     // Not the muted string: mute is moot while nothing can sound at all.
     expect(soundStatus(host)).toBe(settingsPanelCopy.soundAbsent);
     expect(settingsPanelCopy.soundAbsent).toContain('switched off');
+  });
+
+  // The four available states are four DISTINCT strings, so a status
+  // cannot be right by collision.
+  it('names each state distinctly', () => {
+    const strings = [
+      settingsPanelCopy.soundAvailable,
+      settingsPanelCopy.soundMuted,
+      settingsPanelCopy.soundSilent,
+      settingsPanelCopy.soundLocked,
+      settingsPanelCopy.soundAbsent,
+      settingsPanelCopy.soundContextUnavailable,
+    ];
+
+    expect(new Set(strings).size).toBe(strings.length);
+
+    // And only one of them claims playback.
+    expect(
+      strings.filter((line): boolean => line.includes('plays through')),
+    ).toHaveLength(1);
   });
 });
 
@@ -1633,8 +1725,8 @@ describe('the number-only hint asserts nothing until a force holds', () => {
     expect(element).not.toBe(null);
     expect(element?.hidden).toBe(true);
 
-    // EMPTY, not merely hidden: it used to carry the forced-mode claim from the
-    // moment the dialog rendered.
+    // EMPTY, not merely hidden: it carries no forced-mode claim before a force
+    // holds.
     expect(element?.textContent).toBe('');
     expect(element?.textContent ?? '').not.toContain('unavailable');
   });

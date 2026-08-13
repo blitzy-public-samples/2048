@@ -83,12 +83,12 @@ const IDENTIFIER_PATTERN = /TR-[A-Z0-9]+-\d\d/g;
 /**
  * Any `TR-<AREA>-<digits>` occurrence, however many digits it carries.
  *
- * ADDED: `IDENTIFIER_PATTERN` requires exactly two digits and is UNANCHORED, so
- * a malformed ordinal was either invisible to it — a one-digit ordinal matches
+ * `IDENTIFIER_PATTERN` requires exactly two digits and is UNANCHORED, so a
+ * malformed ordinal was either invisible to it — a one-digit ordinal matches
  * nothing at all — or silently TRUNCATED, because a three-digit ordinal matches
  * on its first two and therefore resolves to a different row than the one
- * written. Collecting broadly and asserting the shape separately is what makes a
- * malformed identifier a failure rather than a misresolution.
+ * written. Collecting broadly and asserting the shape separately is what makes
+ * a malformed identifier a failure rather than a misresolution.
  *
  * No malformed identifier is written literally anywhere in this file: the sweep
  * reads its own source, so an illustrative example would itself be collected as
@@ -297,7 +297,7 @@ const declaringPaths: readonly string[] = Object.freeze([
 /**
  * Documents that cite matrix identifiers, swept for resolution.
  *
- * ADDED: only `src/`, `style/`, `tests/` and the four root configs were swept,
+ * Only `src/`, `style/`, `tests/` and the four root configs were swept,
  * so an identifier cited from a document resolved to nothing and no gate
  * noticed — `docs/DECISION_LOG.md` carries such a citation today. A citation in
  * prose means "the row behind this" exactly as one in a module header does.

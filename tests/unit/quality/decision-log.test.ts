@@ -59,7 +59,7 @@ const REGISTRY_PATH = 'CONTRIBUTING.md';
 /**
  * Directories never walked for citations.
  *
- * CHANGED: the sweep is now stated as an EXCLUSION list over the whole
+ * The sweep is now stated as an EXCLUSION list over the whole
  * repository rather than an inclusion list of two roots. `['src', 'tests']`
  * over `['.ts']` alone left real citation sites unswept — `tsconfig.node.json`
  * cites `DL-BUILD-14`, both `docs/dashboards/` artifacts cite twenty-one

@@ -392,11 +392,12 @@ describe('an unestablished status reaches the region', () => {
 /* ==========================================================================
  * A SUBSCRIPTION GROUP THAT CANNOT BE COMPLETED
  *
- * The six registrations were taken in one array literal, so a refusal from a
- * later `on()` discarded the half-built array and left every listener before it
- * attached to the emitter with no reference to it anywhere — the announcer went
- * on announcing for a subscription it had reported it did not hold, unreachable
- * by `destroy()` or the returned release. DL-ANNOUNCE-03.
+ * A refusal from any of the six `on()` calls rolls back the registrations taken
+ * before it, so nothing stays attached and the announcer reports the
+ * subscription as not held. Were a half-built group discarded instead, every
+ * listener before the refusal would remain attached to the emitter with no
+ * reference to it anywhere — announcing for a subscription reported as not
+ * held, and unreachable by `destroy()` or the returned release. DL-ANNOUNCE-03.
  * ========================================================================== */
 
 /** The six names `EngineAnnouncer.subscribe()` registers, in order. */
@@ -586,10 +587,10 @@ describe('a subscription group that cannot be completed', () => {
 
 describe('the translator lifecycle', () => {
   it('stops announcing once its SOLE subscription is released', () => {
-    // The previous form of this case released a SECOND subscription while the
-    // one the harness makes stayed attached, and then asserted that something
-    // WAS announced — so it proved the opposite of its own name and would have
-    // passed for a release that detached nothing at all.
+    // The subscription released here is the SOLE one, the harness having made
+    // none: releasing a second while this one stayed attached would assert
+    // that something WAS announced, proving the opposite of this case's name
+    // and passing for a release that detached nothing at all.
     const harness = setup({ subscribe: false });
     const release = harness.translator.subscribe(harness.events);
 

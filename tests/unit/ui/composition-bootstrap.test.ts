@@ -671,7 +671,19 @@ describe('the persisted preferences the root restores and records', () => {
   });
 
   it('opens on the defaults for an unreadable envelope, without throwing', () => {
-    for (const hostile of ['{', 'null', '[]', '"colorblind"', '{"theme":7}']) {
+    for (const hostile of [
+      '{',
+      'null',
+      '[]',
+      '"colorblind"',
+      '{"theme":7}',
+
+      // A payload whose preference is carried by an injected `__proto__`
+      // member rather than by a field of its own. The loader reads own DATA
+      // descriptors, so this restores nothing and pollutes nothing.
+      // DL-SETTINGS-09.
+      '{"schemaVersion":1,"__proto__":{"theme":"high-contrast","muted":true}}',
+    ]) {
       clearOwnedStorage();
       seedOwnedStorage({ 'roguelike2048:preferences': hostile });
 

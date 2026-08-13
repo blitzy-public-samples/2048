@@ -38,9 +38,11 @@ import {
 import type {
   PersistedRelic,
   RewardDrawnReport,
+  RunFaultReport,
   RunReporter,
   RunState,
 } from '../../../src/run/run-state';
+import { RUN_FAULT_OPERATIONS } from '../../../src/run/run-state';
 import { RunStateStore } from '../../../src/run/run-state-store';
 import { LocalStorageManager } from '../../../src/storage/local-storage-manager';
 import { MemoryStorage } from '../../../src/storage/memory-storage';
@@ -506,7 +508,7 @@ describe('resolveReward reports success only where the registry agrees', () => {
   });
 
   it('refuses the selection when the pickup throws, and reports it', () => {
-    const faults: unknown[] = [];
+    const faults: RunFaultReport[] = [];
     const backing = new MemoryStorage();
     const manager = new LocalStorageManager({ storage: backing });
     const config = createDefaultRulesConfig();
@@ -516,8 +518,11 @@ describe('resolveReward reports success only where the registry agrees', () => {
       identity: resolveRunIdentity({ storage: manager, seed: SEED }),
       config,
       reporter: {
-        onWriteFailed(report): void {
-          faults.push(report.error);
+        // The fault channel. A registry that threw wrote nothing, so
+        // the report names the operation rather than a run-state write.
+        // DL-RUN-10.
+        onRunFaulted(report): void {
+          faults.push(report);
         },
       },
       relics: {
@@ -534,6 +539,10 @@ describe('resolveReward reports success only where the registry agrees', () => {
     expect(controller.resolveReward(OFFER[0]).accepted).toBe(false);
     expect(controller.relics()).toEqual([]);
     expect(faults).toHaveLength(1);
+    expect(faults[0]).toMatchObject({
+      operation: RUN_FAULT_OPERATIONS.relicPickup,
+      affectsRunFlow: true,
+    });
   });
 
   it('refuses every offer when the catalogue accessor throws', () => {

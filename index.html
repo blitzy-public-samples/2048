@@ -47,10 +47,10 @@
            are invisible to assistive technology, so each outlet declares a real
            visually-hidden label that ScorePanel adopts and re-appends ahead of
            the value on every write.
-           These are NOT live regions: `role="status"` here made each outlet
-           announce itself on every change, so three regions raced the one
-           announcer and suppressed one another. Narration belongs to
-           `#live-region` alone; these are labelled values it talks about. -->
+           These are NOT live regions: narration belongs to `#live-region`
+           alone, so a `role="status"` here would set three regions announcing
+           on every change against the one announcer. These are labelled values
+           it talks about. -->
       <div class="scores-container" role="group" aria-label="Scores">
         <div class="score-container"><span class="visually-hidden">Score</span>0</div>
         <div class="best-container"><span class="visually-hidden">Best score</span>0</div>

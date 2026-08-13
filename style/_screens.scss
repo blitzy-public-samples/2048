@@ -6,24 +6,22 @@
 //
 // One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of this
 // file's area enumerated:
-//   TR-SCREEN-01  style/main.scss L196-L221  the `.game-message` overlay
-//                                            treatment, generalised into the
-//                                            shared screen-container surface
-//   TR-SCREEN-02  style/main.scss L159-L168  the `button` mixin, restated as
-//                                            `@mixin screen-control` with its
-//                                            user-agent reset
-//   TR-SCREEN-03  style/main.scss L475-L548  the mobile scale, restated for
-//                                            every screen state
-//   TR-SCREEN-04  target-only row            the run-start, stage-progress and
-//                                            game-over states
-//   TR-SCREEN-05  target-only row            `@mixin screen-text-field` and the
-//                                            seed entry field
-//   TR-SCREEN-06  target-only row            `.settings-slider` and the settings
-//                                            rows
-//   TR-SCREEN-07  target-only row            `@mixin screen-panel-surface` and
-//                                            `@mixin screen-modal-surface`
-//   TR-SCREEN-08  target-only row            `.settings-row-binding`, the
-//                                            aligned key-binding row
+//   TR-SCREEN-01  style/main.scss  the `.game-message` overlay treatment,
+//                 .game-message    generalised into the shared screen-container
+//                                  surface
+//   TR-SCREEN-02  style/main.scss  the `button` mixin, restated as `@mixin
+//                 button mixin     screen-control` with its user-agent reset
+//   TR-SCREEN-03  style/main.scss  the mobile scale, restated for every screen
+//                 mobile block     state
+//   TR-SCREEN-04  target-only row  the run-start, stage-progress and game-over
+//                                  states
+//   TR-SCREEN-05  target-only row  `@mixin screen-text-field` and the seed
+//                                  entry field
+//   TR-SCREEN-06  target-only row  `.settings-slider` and the settings rows
+//   TR-SCREEN-07  target-only row  `@mixin screen-panel-surface` and `@mixin
+//                                  screen-modal-surface`
+//   TR-SCREEN-08  target-only row  `.settings-row-binding`, the aligned
+//                                  key-binding row
 //
 // Decisions: DL-SCREEN-01, DL-SCREEN-02, DL-SCREEN-03, DL-SCREEN-04,
 // DL-SCREEN-05 (docs/DECISION_LOG.md).
@@ -64,8 +62,8 @@ $screen-surface-radius: $tile-border-radius * 2 !default;
 $screen-panel-measure: $field-width !default;
 $screen-panel-measure-mobile: $a11y-mobile-field-width !default;
 
-// ADDED: the name column of a key-binding row. A FIXED length, because that is
-// what puts the binding text at the same x in every row; one third of the
+// The name column of a key-binding row. A FIXED length, which is what puts the
+// binding text at the same x in every row; one third of the
 // reading measure holds the longest name ("Close settings") at either type
 // scale. DL-SCREEN-05.
 $settings-binding-label-measure: math.div($screen-panel-measure, 3) !default;
@@ -373,12 +371,11 @@ $settings-binding-label-measure-mobile: math.div(
     @include screen-panel-surface;
   }
 
-  // ADDED: the dialog body reads as a settings LIST, so its text starts at the
-  // same edge its rows do. `screen-surface` centres the whole overlay's text,
-  // which left every legend and every explanatory paragraph centred above
-  // left-packed control rows. The heading keeps the centred treatment, and the
-  // control rows are flex or grid and take their alignment from the layout
-  // rather than from this property. DL-SCREEN-05.
+  // The dialog body reads as a settings LIST, so its text starts at the same
+  // edge its rows do rather than taking the centring `screen-surface` gives the
+  // overlay. The heading keeps the centred treatment, and the control rows are
+  // flex or grid and take their alignment from the layout rather than from this
+  // property. DL-SCREEN-05.
   .settings-body {
     text-align: start;
 
@@ -424,7 +421,7 @@ $settings-binding-label-measure-mobile: math.div(
   gap: $screen-control-gap;
 }
 
-// ADDED: a key-binding row, laid out as three aligned columns rather than as a
+// A key-binding row, laid out as three aligned columns rather than as a
 // wrapping flex line.
 //
 // Each row declares the SAME first column length and the same auto-sized third
@@ -468,7 +465,7 @@ $settings-binding-label-measure-mobile: math.div(
   flex: 1 1 auto;
   overflow-wrap: break-word;
 
-  // ADDED: `flex-basis` governs it in the theme, motion and sound rows, which
+  // `flex-basis` governs it in the theme, motion and sound rows, which
   // are still flex; in a binding row the grid column governs it and the item's
   // automatic minimum has to be released for `minmax(0, 1fr)` to hold.
   min-inline-size: 0;
@@ -490,21 +487,19 @@ $settings-binding-label-measure-mobile: math.div(
 
     // FIXED, not auto. Under automatic layout a table is at least as wide as
     // the sum of its columns' min-content widths, and `overflow-wrap` does not
-    // reduce a cell's min-content contribution — so `inline-size: 100%` loses
-    // to a long metric name and the table grows past the surface, taking every
-    // value column out of view.
+    // reduce a cell's min-content contribution, so `inline-size: 100%` loses to
+    // a long metric name and the table grows past the surface.
     table-layout: fixed;
 
     td {
       padding: 0 $screen-field-padding-inline 0 0;
 
-      // CHANGED from `anywhere`, which broke every string at whatever character
-      // reached the cell edge — a health detail read "Function .protoy pe.bind
-      // is present." `anywhere` was chosen because it also reduces a cell's
-      // min-content contribution, but `table-layout: fixed` above already makes
-      // that irrelevant, so the weaker value costs nothing: ordinary words now
-      // wrap whole at their spaces, and only a token longer than its own line
-      // breaks. DL-DIAG-08.
+      // CHANGED from `anywhere`. Under `break-word` an ordinary word wraps
+      // whole at its spaces and only a token longer than its own line breaks;
+      // `anywhere` broke every string at whatever character reached the cell
+      // edge, so a health detail read "Function .protoy pe.bind is present."
+      // `table-layout: fixed` above is what makes the weaker value sufficient.
+      // DL-DIAG-08.
       overflow-wrap: break-word;
       vertical-align: top;
     }
@@ -526,19 +521,16 @@ $settings-binding-label-measure-mobile: math.div(
       text-align: end;
     }
 
-    // CHANGED: except the ones that hold a sentence.
+    // Except the cells that hold a sentence. The rule above suits figures; the
+    // Health panel's third column is prose and is set from its start edge. The
+    // overlay marks those cells with this class and mirrors the declaration
+    // inline; the class is stated after the rule above and with one more
+    // selector, so it wins on both counts.
     //
-    // The rule above justified itself on the figures and then applied to the
-    // Health panel's third column too, which is prose — so a health detail was
-    // set ragged-left and read from its end. The overlay marks those cells with
-    // this class and mirrors the declaration inline; the class is stated after
-    // the rule above and with one more selector, so it wins on both counts.
-    //
-    // `overflow-wrap: break-word` above is RETAINED, and a token longer than
-    // its own line still breaks mid-word. That is the price of the guarantee
-    // that this surface never overflows its width at any breakpoint, which the
-    // fixed table layout and the stated column widths exist to hold.
-    // DL-DIAG-10.
+    // `overflow-wrap: break-word` above is RETAINED, so a token longer than its
+    // own line breaks mid-word, which is what keeps this surface inside its
+    // width at every breakpoint alongside the fixed table layout and the stated
+    // column widths. DL-DIAG-10.
     td.diagnostics-prose {
       text-align: start;
     }
@@ -560,14 +552,14 @@ $settings-binding-label-measure-mobile: math.div(
   }
 }
 
-// ADDED: the collapsed surface, which renders its heading and its control row
-// and no panel.
+// The collapsed surface, which renders its heading and its control row and no
+// panel.
 //
 // The footprint is content-driven once the panels are gone, so the panel's own
-// height collapses with them; the negative end margin the control row carries
-// while it is sticky is released here, because there is nothing left for it to
-// sit over. The declaration is a state selector on the same element, so an
-// expanded surface reads exactly as it did. DL-DIAG-11.
+// height collapses with them, and the negative end margin the control row
+// carries while it is sticky is released here. The declaration is a state
+// selector on the same element, so an expanded surface is unaffected.
+// DL-DIAG-11.
 .diagnostics-overlay[data-collapsed="true"] {
   .diagnostics-controls {
     position: static;

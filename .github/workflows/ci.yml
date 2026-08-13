@@ -22,13 +22,14 @@
 # Constructs of this file are mapped in docs/TRACEABILITY_MATRIX.md:
 # TR-CI-01 the trigger surface and permissions, TR-CI-02 the job and its
 # timeout, TR-CI-03 the pinned runtime and locked install, TR-CI-04 the browser
-# provisioning, TR-CI-05 the five quality stages, and TR-CI-06 the uploads.
+# provisioning, TR-CI-05 the seven quality stages — type-check, stylesheet,
+# unit, seeded snapshot, dashboard template, static build and recorded gameplay
+# proof — and TR-CI-06 the uploads.
 #
 # THIRD-PARTY ACTIONS ARE PINNED TO A COMMIT, NOT A TAG. Every `uses:` below
 # names the full 40-character commit SHA of one published release, and the tag
-# that release carries is the comment at the end of the same line. A tag is a
-# mutable pointer its owner can move, so `@v5` is a different tree on two
-# different days; a SHA is the tree itself. Decision `DL-CI-06`.
+# that release carries is the comment at the end of the same line. Decision
+# `DL-CI-06`.
 #
 # To move an action to a newer release, in one edit:
 #   1. Read the SHA that release's tag points at. Either
@@ -38,11 +39,8 @@
 #      commit; use the COMMIT SHA.
 #   2. Replace the SHA in `uses:` and the tag comment beside it together, so the
 #      two never disagree.
-#   3. Read that release's notes for a required input change, because a major
-#      release is where one lands.
-# The pinned releases, current at the time of writing: actions/checkout
-# v5.1.0, actions/setup-node v6.5.0, actions/cache v5.1.0 and
-# actions/upload-artifact v6.0.0.
+#   3. Read that release's notes for a required input change.
+
 
 name: CI
 
@@ -64,18 +62,18 @@ jobs:
   ci:
     runs-on: ubuntu-latest
 
-    # Generous against playwright.config.ts's 15-minute globalTimeout: a
-    # browser context that is cut short never writes its video.
+    # 60 minutes, against the 15-minute `globalTimeout` of
+    # playwright.config.ts. A browser context cut short writes no video.
+    # DL-CI-01.
     timeout-minutes: 60
 
     steps:
       - name: Check out the repository
-        # Every action is pinned to the commit its release tag named when this
-        # file was written, with the tag kept alongside for a reader; a tag is
-        # mutable and a commit is not, and Dependabot reads that trailing
-        # comment. See DL-BUILD-16. The checkout token is not written into the
-        # local git config, because no step after this one performs an
-        # authenticated git operation.
+        # Every action is pinned to a commit SHA, with its release tag kept in
+        # the trailing comment, which is the form Dependabot reads. See
+        # DL-BUILD-16. The checkout token is not written into the local git
+        # config: no step after this one performs an authenticated git
+        # operation.
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           persist-credentials: false
@@ -109,11 +107,10 @@ jobs:
       - name: Install the recording browser and its system libraries
         # `e2e:install` of package.json is `playwright install --with-deps
         # chromium`, so this step does two things: it installs the apt packages
-        # headless Chromium links against, and it unpacks the browser build —
-        # around 115 MB of download on a cache miss, short-circuited on a
-        # restored cache. The library half runs either way, because a restored
-        # cache carries no system packages, and it is not conditional on the
-        # cache outcome for that reason.
+        # headless Chromium links against, and it unpacks the browser build,
+        # which the restored cache short-circuits. The step is unconditional:
+        # a restored cache carries no system packages, so the library half must
+        # run on a cache hit as well as a miss.
         run: npm run e2e:install
 
       - name: Type-check
@@ -123,10 +120,9 @@ jobs:
         run: npm run typecheck
 
       - name: Stylesheet deprecation gate
-        # Dart Sass exits 0 on a deprecation by default, so a bare compile
-        # would pass with one present. --fatal-deprecation carries the pinned
-        # compiler version, which promotes every deprecation that version
-        # knows about to an error. See DL-BUILD-17.
+        # Dart Sass exits 0 on a deprecation by default. `--fatal-deprecation`
+        # carries the pinned compiler version and promotes every deprecation
+        # that version knows about to an error. See DL-BUILD-17.
         run: npm run lint:styles
 
       - name: Unit suite
@@ -139,12 +135,22 @@ jobs:
 
       - name: Dashboard template gate
         # Named as its own step although the unit suite above already collects
-        # it: Rule 3 admits a dashboard template only where it can be
-        # exercised, so the step that exercises both templates — the static
-        # page's parser and renderer against a real export, and every Grafana
+        # it, so that the step exercising both templates — the static page's
+        # parser and renderer against a real export, and every Grafana
         # expression against the canonical families and labels — is visible in
-        # the log rather than folded into a suite of six thousand.
+        # the log rather than folded into the unit suite.
         run: npm run test:dashboard
+
+      - name: Executive deck security gate
+        # Named as its own step for the same reason, and for one more: the deck
+        # keeps a Mermaid pin that published advisories place in an affected
+        # range, and DL-DOC-09 grants that exception on premises which are all
+        # properties of the file — every diagram authored inline, nothing fetched
+        # at run time, a sha384 hash on every CDN resource, the strict security
+        # level stated, and the counts the row itself states. This step is where
+        # those premises are checked, so a release that voided one is visible in
+        # the log rather than folded into a suite of six thousand. DL-TEST-18.
+        run: npm run test:deck
 
       - name: Static build
         # The R12 deployment-parity gate, and the bundle the step below records
@@ -157,14 +163,12 @@ jobs:
         # tests/e2e/gameplay-recording.spec.ts under `gameplay-recording` and
         # `diagnostics-surface`, then the three cases of
         # tests/e2e/browser-variants.spec.ts under `variant-webgl-unavailable`,
-        # `variant-reduced-motion` and `variant-mobile`. Five tests, serially, on
-        # a workstation exactly as they run here, with one difference:
+        # `variant-reduced-motion` and `variant-mobile`. Five tests, serially.
         # PLAYWRIGHT_PREVIEW_ONLY makes playwright.config.ts's web server preview
-        # the dist/ the step above just built instead of building a second time.
-        # A workstation run leaves the variable unset and builds, so the script
-        # stays self-contained there. Only the recording project captures video,
-        # so the upload below still finds exactly the R11 artifact. DL-PW-04,
-        # DL-PW-06, DL-PW-07.
+        # the dist/ the step above just built instead of building a second time;
+        # a run that leaves the variable unset builds for itself. Only the
+        # `gameplay-recording` project captures video, so the upload below finds
+        # exactly the R11 artifact. DL-PW-04, DL-PW-06, DL-PW-07.
         env:
           PLAYWRIGHT_PREVIEW_ONLY: '1'
         run: npm run test:e2e
@@ -174,7 +178,8 @@ jobs:
         with:
           name: recorded-gameplay
           # playwright.config.ts writes one directory per test under its
-          # outputDir, each holding that test's video.webm.
+          # outputDir. Only the `gameplay-recording` project sets `video`, so
+          # this glob matches that project's video.webm alone.
           path: test-results/**/*.webm
           # A run that reaches this step without a recording fails: the video
           # is the evidence the gate asks for.

@@ -57,12 +57,13 @@
 //   js/application.js  L3                the board dimension as a literal
 //                                        argument, one of its three vanilla
 //                                        declaration sites, the other two being
-//                                        style/main.scss L6 and the sixteen
-//                                        cells of index.html L43-L68
-//                                        -> src/config/**
+//                                        the `$grid-row-cells` of the retired
+//                                        stylesheet and the sixteen static
+//                                        `.grid-cell` elements of the retired
+//                                        markup -> src/config/**
 //
-// CONTRIBUTING.md used to list a change to the grid size among the changes that
-// might not be accepted; the supersession entry is DL-DOC-02 of
+// CONTRIBUTING.md's list of changes that might not be accepted named a change
+// to the grid size; the supersession entry is DL-DOC-02 of
 // docs/DECISION_LOG.md.
 //
 // Named figures, both delivered in docs/architecture/data-flow.md: Figure 4,
@@ -1779,7 +1780,7 @@ describe('the verdict a collapse publishes and a reload reads', () => {
     expect(loaded.state?.board.grid.size).toBe(COLLAPSED_SIZE);
 
     // The flag survived the round trip, and the probe at the reconciled size
-    // agrees with it — which is the pair the stale verdict used to break.
+    // agrees with it — the pair a stale verdict would break.
     expect(loaded.state?.board.over).toBe(true);
     expect(
       movesAvailable(

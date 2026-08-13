@@ -92,6 +92,7 @@ import {
 import type {
   BoundaryTracing,
   EngineTracingSubscription,
+  FinalMoveResult,
   SpanName,
   SpanRecord,
   Tracer,
@@ -184,6 +185,7 @@ const clearPerformanceEntries = (): void => {
 beforeEach(() => {
   hookErrors = [];
   listenerErrors = [];
+  tracing = null;
   logger = createLogger({
     correlationId: CORRELATION_ID,
     consoleOutput: false,
@@ -300,6 +302,64 @@ const commitEvent = (
 });
 
 /**
+ * The tracing subscription in force, recorded by `traceEngine` so `commitTurn`
+ * can settle the attempt the way the composition root does. `null` before any
+ * subscription and reset per case.
+ */
+let tracing: EngineTracingSubscription | null = null;
+
+/**
+ * Attaches engine tracing and records the subscription.
+ *
+ * ADDED so a case can emit a commit and then SETTLE, which is the order
+ * production produces: the engine commits inside `attemptMove()`, and the caller
+ * holding the outcome settles in a `finally` — so `settleMove` is what closes
+ * every turn span. A case that emitted a commit and stopped was measuring a
+ * caller that does not exist. DL-TRACE-17.
+ *
+ * @param source Emitter to trace. The suite's own by default.
+ * @returns The subscription, exactly as `attachEngineTracing` returns it.
+ */
+const traceEngine = (
+  source: EngineEvents = events,
+): EngineTracingSubscription => {
+  tracing = attachEngineTracing(source, tracer);
+
+  return tracing;
+};
+
+/** The outcome an ordinary committed turn reports. */
+const MOVED_AND_COMMITTED: FinalMoveResult = Object.freeze({
+  resolution: 'moved',
+  committed: true,
+});
+
+/** The outcome an idle turn that committed a reseated board reports. */
+const IDLE_AND_COMMITTED: FinalMoveResult = Object.freeze({
+  resolution: 'idle',
+  committed: true,
+});
+
+/**
+ * Emits `state:commit` and then settles the attempt, in that order.
+ *
+ * @param score Score the commit reports.
+ * @param stageIndex Stage the commit reports, defaulting to the first.
+ * @param result The attempt's outcome. An ordinary committed turn by default.
+ */
+const commitTurn = (
+  score: number,
+  stageIndex?: number,
+  result: FinalMoveResult = MOVED_AND_COMMITTED,
+): void => {
+  events.emit(
+    'state:commit',
+    stageIndex === undefined ? commitEvent(score) : commitEvent(score, stageIndex),
+  );
+  tracing?.settleMove(result);
+};
+
+/**
  * One emitter per event name, keyed by a mapped type over `EngineEventName`.
  */
 const ENGINE_EVENT_EMITTERS: {
@@ -344,6 +404,12 @@ const driveOneTurn = (target: EngineEvents): void => {
   for (const name of TURN_SEQUENCE) {
     ENGINE_EVENT_EMITTERS[name](target);
   }
+
+  // And the caller settles, which is what closes the turn span. The
+  // engine commits inside `attemptMove()` and src/main.ts settles in a
+  // `finally`, so a sequence that stopped at the commit was driving half a turn.
+  // DL-TRACE-17.
+  tracing?.settleMove(MOVED_AND_COMMITTED);
 };
 
 /**
@@ -362,6 +428,18 @@ const engineOn = (board: SerializedGameState): Engine => {
 
 /** An engine whose every move is a no-op. */
 const blockedEngine = (): Engine => engineOn(BLOCKED_BOARD);
+
+/**
+ * Settles the attempt just driven through a real engine.
+ *
+ * The pair src/main.ts performs — `Engine.attemptMove()` returns and the
+ * caller settles in a `finally`. `settleTurn()`'s default derives the outcome
+ * from whether a `state:commit` reached the span, so a real no-op move closes as
+ * `unmoved` and a real slide as `committed`. DL-TRACE-17.
+ */
+const settleDrivenTurn = (): void => {
+  tracing?.settleTurn();
+};
 
 const recordsFor = (name: SpanName): readonly SpanRecord[] =>
   tracer.recent().filter((record) => record.name === name);
@@ -1048,7 +1126,7 @@ describe('Tracer parent and child linkage', () => {
 
 describe('Module-boundary span coverage for validation gate V8', () => {
   it('records a span for every boundary the module declares, driving each one synchronously', () => {
-    const detach = attachEngineTracing(events, tracer);
+    const detach = traceEngine();
 
     registerSpawnRelic('boundary-relic', (): void => undefined);
 
@@ -1077,7 +1155,7 @@ describe('Module-boundary span coverage for validation gate V8', () => {
   });
 
   it('nests the hook-dispatch span under the engine turn span and the relic-handler span under the dispatch', () => {
-    const detach = attachEngineTracing(events, tracer);
+    const detach = traceEngine();
 
     registerSpawnRelic('nested-relic', (): void => undefined);
 
@@ -1172,7 +1250,7 @@ describe('Module-boundary span coverage for validation gate V8', () => {
 
   it('carries the error of a throwing handler on its own span, completes the turn, and reports the failure under the run correlation identifier', () => {
     const failure = new Error('relic handler failed');
-    const detach = attachEngineTracing(events, tracer);
+    const detach = traceEngine();
 
     registerSpawnRelic(
       'cursed-relic',
@@ -1191,7 +1269,7 @@ describe('Module-boundary span coverage for validation gate V8', () => {
 
     const result = dispatchSpawn();
 
-    events.emit('state:commit', commitEvent(16));
+    commitTurn(16);
     detach();
 
     const handlers = recordsFor(SPAN_NAMES.relicHandler);
@@ -1286,7 +1364,7 @@ describe('Module-boundary span coverage for validation gate V8', () => {
   });
 
   it('reads and writes no owned storage key while tracing the whole chain', () => {
-    const detach = attachEngineTracing(events, tracer);
+    const detach = traceEngine();
 
     registerSpawnRelic('storage-free-relic', (): void => undefined);
 
@@ -1525,10 +1603,10 @@ describe('attachEngineTracing over the append-only emitter', () => {
       scores.push(payload.score);
     });
 
-    attachEngineTracing(events, tracer);
+    traceEngine();
 
     events.emit('move:before', beforeEvent(false));
-    events.emit('state:commit', commitEvent(48));
+    commitTurn(48);
 
     expect(directions).toEqual([DIRECTION_LEFT]);
     expect(scores).toEqual([48]);
@@ -1541,7 +1619,7 @@ describe('attachEngineTracing over the append-only emitter', () => {
   it('opens the turn span at move:before and closes it at state:commit, recording one turn latency for the pair', () => {
     const latency = registry.histogram(METRIC_NAMES.turnLatencyMilliseconds);
 
-    attachEngineTracing(events, tracer);
+    traceEngine();
 
     events.emit('move:before', beforeEvent(false));
 
@@ -1549,7 +1627,7 @@ describe('attachEngineTracing over the append-only emitter', () => {
     expect(tracer.recent()).toHaveLength(0);
     expect(latency.count).toBe(0);
 
-    events.emit('state:commit', commitEvent(48));
+    commitTurn(48);
 
     const turn = oneRecordFor(SPAN_NAMES.engineTurn);
 
@@ -1581,7 +1659,7 @@ describe('attachEngineTracing over the append-only emitter', () => {
     expect(registry.histogram(METRIC_NAMES.turnLatencyMilliseconds).count)
       .toBe(0);
 
-    const detach = attachEngineTracing(events, tracer);
+    const detach = traceEngine();
 
     driveOneTurn(events);
     detach();
@@ -1594,7 +1672,7 @@ describe('attachEngineTracing over the append-only emitter', () => {
   it('closes the turn span of a withdrawn move and leaves the turn after it correct', () => {
     const latency = registry.histogram(METRIC_NAMES.turnLatencyMilliseconds);
 
-    attachEngineTracing(events, tracer);
+    traceEngine();
 
     events.emit('move:before', beforeEvent(true));
 
@@ -1608,7 +1686,7 @@ describe('attachEngineTracing over the append-only emitter', () => {
     expect(latency.count).toBe(0);
 
     events.emit('move:before', beforeEvent(false));
-    events.emit('state:commit', commitEvent(96));
+    commitTurn(96);
 
     const turns = recordsFor(SPAN_NAMES.engineTurn);
 
@@ -1626,9 +1704,10 @@ describe('attachEngineTracing over the append-only emitter', () => {
     const latency = registry.histogram(METRIC_NAMES.turnLatencyMilliseconds);
     const engine = blockedEngine();
 
-    attachEngineTracing(engine.events, tracer);
+    traceEngine(engine.events);
 
     expect(engine.move(DIRECTION_LEFT)).toBe(false);
+    settleDrivenTurn();
 
     const turn = oneRecordFor(SPAN_NAMES.engineTurn);
 
@@ -1650,10 +1729,12 @@ describe('attachEngineTracing over the append-only emitter', () => {
     // caller passing an unusable one opens nothing here.
     const engine = blockedEngine();
 
-    attachEngineTracing(engine.events, tracer);
+    traceEngine(engine.events);
 
     expect(engine.move(4 as never)).toBe(false);
+    settleDrivenTurn();
     expect(engine.move('3' as never)).toBe(false);
+    settleDrivenTurn();
 
     const snapshot = tracer.snapshot();
 
@@ -1664,6 +1745,7 @@ describe('attachEngineTracing over the append-only emitter', () => {
 
     // And a legitimate move afterwards still opens and closes its own span.
     expect(engine.move(DIRECTION_LEFT)).toBe(false);
+    settleDrivenTurn();
 
     expect(recordsFor(SPAN_NAMES.engineTurn)).toHaveLength(1);
     expect(tracer.snapshot().open).toBe(0);
@@ -1676,10 +1758,12 @@ describe('attachEngineTracing over the append-only emitter', () => {
     // superseded.
     const engine = blockedEngine();
 
-    attachEngineTracing(engine.events, tracer);
+    traceEngine(engine.events);
 
     expect(engine.move(DIRECTION_LEFT)).toBe(false);
+    settleDrivenTurn();
     expect(engine.move(DIRECTION_LEFT)).toBe(false);
+    settleDrivenTurn();
 
     const turns = recordsFor(SPAN_NAMES.engineTurn);
 
@@ -1696,11 +1780,11 @@ describe('attachEngineTracing over the append-only emitter', () => {
   });
 
   it('supersedes a turn span still open when the next move begins', () => {
-    attachEngineTracing(events, tracer);
+    traceEngine();
 
     events.emit('move:before', beforeEvent(false));
     events.emit('move:before', beforeEvent(false));
-    events.emit('state:commit', commitEvent(12));
+    commitTurn(12);
 
     const turns = recordsFor(SPAN_NAMES.engineTurn);
 
@@ -1721,12 +1805,12 @@ describe('attachEngineTracing over the append-only emitter', () => {
   });
 
   it('gives two consecutive turns two distinct spans rather than one merged span', () => {
-    attachEngineTracing(events, tracer);
+    traceEngine();
 
     events.emit('move:before', beforeEvent(false));
-    events.emit('state:commit', commitEvent(4));
+    commitTurn(4);
     events.emit('move:before', beforeEvent(false));
-    events.emit('state:commit', commitEvent(8));
+    commitTurn(8);
 
     const turns = recordsFor(SPAN_NAMES.engineTurn);
 
@@ -1739,13 +1823,13 @@ describe('attachEngineTracing over the append-only emitter', () => {
   });
 
   it('records one span event per tile:merge emission, so two merges in one move carry two', () => {
-    attachEngineTracing(events, tracer);
+    traceEngine();
 
     events.emit('move:before', beforeEvent(false));
     events.emit('tile:merge', mergeEvent(4));
     events.emit('tile:merge', mergeEvent(8));
     events.emit('tile:spawn', spawnEvent(2));
-    events.emit('state:commit', commitEvent(12));
+    commitTurn(12);
 
     const turn = oneRecordFor(SPAN_NAMES.engineTurn);
     const merges = turn.events.filter(
@@ -1767,13 +1851,13 @@ describe('attachEngineTracing over the append-only emitter', () => {
   });
 
   it('resets the per-turn merge and spawn tallies for the turn that follows', () => {
-    attachEngineTracing(events, tracer);
+    traceEngine();
 
     events.emit('move:before', beforeEvent(false));
     events.emit('tile:merge', mergeEvent(4));
-    events.emit('state:commit', commitEvent(4));
+    commitTurn(4);
     events.emit('move:before', beforeEvent(false));
-    events.emit('state:commit', commitEvent(6));
+    commitTurn(6);
 
     const turns = recordsFor(SPAN_NAMES.engineTurn);
 
@@ -1783,7 +1867,7 @@ describe('attachEngineTracing over the append-only emitter', () => {
   });
 
   it('opens a stage span at stage:start and closes it at stage:end', () => {
-    attachEngineTracing(events, tracer);
+    traceEngine();
 
     events.emit('stage:start', stageStartEvent(3));
 
@@ -1810,7 +1894,7 @@ describe('attachEngineTracing over the append-only emitter', () => {
       [...ENGINE_EVENT_NAMES].sort(),
     );
 
-    const detach = attachEngineTracing(events, tracer);
+    const detach = traceEngine();
 
     driveOneTurn(events);
     detach();
@@ -1850,7 +1934,7 @@ describe('attachEngineTracing over the append-only emitter', () => {
     // `setup` emits `stage:start` and then commits.
     const engine = new Engine({ streams: createRngStreams(RUN_SEED) });
 
-    attachEngineTracing(engine.events, tracer);
+    traceEngine(engine.events);
     engine.setup(null);
 
     const snapshot = tracer.snapshot();
@@ -1870,7 +1954,7 @@ describe('attachEngineTracing over the append-only emitter', () => {
   it("accounts the real engine's restart commit as a lifecycle commit", () => {
     const engine = engineOn(BLOCKED_BOARD);
 
-    attachEngineTracing(engine.events, tracer);
+    traceEngine(engine.events);
     engine.restart();
 
     const snapshot = tracer.snapshot();
@@ -1890,7 +1974,7 @@ describe('attachEngineTracing over the append-only emitter', () => {
 
     // Attached BEFORE `setup`, so the stage span the stage-end closes was
     // opened by the same engine's own `stage:start`.
-    attachEngineTracing(engine.events, tracer);
+    traceEngine(engine.events);
     engine.setup(createNearWinBoard(BOARD_SIZE, 32));
 
     expect(engine.move(DIRECTION_LEFT)).toBe(true);
@@ -1908,18 +1992,18 @@ describe('attachEngineTracing over the append-only emitter', () => {
     ]).toBe(SPAN_OUTCOMES.committed);
   });
 
-  it("accounts continuePlaying's commit as a lifecycle commit when it is reached through the input boundary", () => {
+  it("accounts continueAfterWin's commit as a lifecycle commit when it is reached through the input boundary", () => {
     // js/keyboard_input_manager.js L11 bound `keepPlaying` to this method, and
     // src/main.ts wraps that subscription in an input-dispatch span.
     const engine = engineOn(NEAR_WIN_BOARD);
 
-    attachEngineTracing(engine.events, tracer);
+    traceEngine(engine.events);
 
     expect(engine.move(DIRECTION_LEFT)).toBe(true);
     expect(engine.isGameTerminated()).toBe(true);
 
     boundary.traceInput('keepPlaying', (): void => {
-      engine.continuePlaying();
+      engine.continueAfterWin();
     });
 
     const snapshot = tracer.snapshot();
@@ -1935,7 +2019,7 @@ describe('attachEngineTracing over the append-only emitter', () => {
     // js/game_manager.js L59 actuated from `setup` before any move, so the
     // first commit of a run arrives with no turn span and opens the span for
     // the stage it reports — and THAT is what accounts for it.
-    attachEngineTracing(events, tracer);
+    traceEngine();
 
     events.emit('state:commit', commitEvent(4));
 
@@ -1954,7 +2038,7 @@ describe('attachEngineTracing over the append-only emitter', () => {
     // The genuinely orphaned case: a SECOND commit for a stage already
     // spanned, with no turn span, no preceding lifecycle emission and no stage
     // opened by it.
-    attachEngineTracing(events, tracer);
+    traceEngine();
 
     events.emit('state:commit', commitEvent(4));
     events.emit('state:commit', commitEvent(8));
@@ -1972,7 +2056,7 @@ describe('attachEngineTracing over the append-only emitter', () => {
   });
 
   it('accounts a committed turn as a turn commit', () => {
-    attachEngineTracing(events, tracer);
+    traceEngine();
 
     events.emit('move:before', beforeEvent(false));
     events.emit('state:commit', commitEvent(8));
@@ -1987,12 +2071,12 @@ describe('attachEngineTracing over the append-only emitter', () => {
   it('discards a pending lifecycle attribution once a move begins', () => {
     // A stage start followed by a turn: the turn's commit is the turn's own,
     // and the stage start does not lend it an attribution.
-    attachEngineTracing(events, tracer);
+    traceEngine();
 
     events.emit('stage:start', stageStartEvent(0));
     events.emit('move:before', beforeEvent(false));
-    events.emit('state:commit', commitEvent(8));
-    events.emit('state:commit', commitEvent(8));
+    commitTurn(8);
+    commitTurn(8);
 
     expect(tracer.snapshot().commits).toEqual({
       turn: 1,
@@ -2002,7 +2086,7 @@ describe('attachEngineTracing over the append-only emitter', () => {
   });
 
   it('returns the commit counts to zero on reset', () => {
-    attachEngineTracing(events, tracer);
+    traceEngine();
 
     events.emit('state:commit', commitEvent(4));
     tracer.reset();
@@ -2015,7 +2099,7 @@ describe('attachEngineTracing over the append-only emitter', () => {
   });
 
   it('reports a stage end that arrives with no stage span open', () => {
-    attachEngineTracing(events, tracer);
+    traceEngine();
 
     events.emit('stage:end', stageEndEvent(0));
 
@@ -2025,7 +2109,7 @@ describe('attachEngineTracing over the append-only emitter', () => {
 
   // Two engine paths commit outside a turn by design.
   it('accounts for the commit that closes a stage start', () => {
-    attachEngineTracing(events, tracer);
+    traceEngine();
 
     events.emit('stage:start', stageStartEvent(0));
     events.emit('state:commit', commitEvent(0));
@@ -2035,18 +2119,18 @@ describe('attachEngineTracing over the append-only emitter', () => {
   });
 
   it('accounts for the commit that follows a stage end', () => {
-    attachEngineTracing(events, tracer);
+    traceEngine();
 
     events.emit('stage:start', stageStartEvent(0));
-    events.emit('state:commit', commitEvent(0));
+    commitTurn(0);
 
     // The turn that cleared the goal: it commits and closes its own span, and
     // the stage-end commit arrives after it.
     events.emit('move:before', beforeEvent(false));
-    events.emit('state:commit', commitEvent(56));
+    commitTurn(56);
 
     events.emit('stage:end', stageEndEvent(0));
-    events.emit('state:commit', commitEvent(56));
+    commitTurn(56);
 
     expect(tracer.snapshot().anomalies).toBe(0);
     expect(oneRecordFor(SPAN_NAMES.engineTurn).attributes[
@@ -2062,7 +2146,7 @@ describe('attachEngineTracing over the append-only emitter', () => {
       records.push({ message: record.message, fields: record.fields });
     });
 
-    attachEngineTracing(events, tracer);
+    traceEngine();
 
     events.emit('stage:start', stageStartEvent(2));
     events.emit('state:commit', commitEvent(12));
@@ -2083,7 +2167,7 @@ describe('attachEngineTracing over the append-only emitter', () => {
       records.push(record.message);
     });
 
-    attachEngineTracing(events, tracer);
+    traceEngine();
 
     events.emit('stage:start', stageStartEvent(0));
     events.emit('state:commit', commitEvent(0));
@@ -2093,7 +2177,7 @@ describe('attachEngineTracing over the append-only emitter', () => {
   });
 
   it('spends the account on one commit and no more', () => {
-    attachEngineTracing(events, tracer);
+    traceEngine();
 
     events.emit('stage:start', stageStartEvent(0));
     events.emit('state:commit', commitEvent(0));
@@ -2106,25 +2190,25 @@ describe('attachEngineTracing over the append-only emitter', () => {
   // A stage is spanned for as long as it is in force, and `stage:start` is not
   // enough to know that.
   it('spans each cleared stage in turn without a stage:start for each', () => {
-    attachEngineTracing(events, tracer);
+    traceEngine();
 
     // Stage 0 opens the way a boot opens it.
     events.emit('stage:start', stageStartEvent(0));
-    events.emit('state:commit', commitEvent(0, 0));
+    commitTurn(0, 0);
 
     // The turn that clears stage 0, then the stage resolving and the commit
     // that reports stage 1 — which is the whole of what the engine emits.
     events.emit('move:before', beforeEvent(false));
-    events.emit('state:commit', commitEvent(56, 0));
+    commitTurn(56, 0);
     events.emit('stage:end', stageEndEvent(0));
-    events.emit('state:commit', commitEvent(56, 1));
+    commitTurn(56, 1);
 
     // The turn that clears stage 1, with NO `stage:start` for stage 1
     // anywhere.
     events.emit('move:before', beforeEvent(false));
-    events.emit('state:commit', commitEvent(176, 1));
+    commitTurn(176, 1);
     events.emit('stage:end', stageEndEvent(1));
-    events.emit('state:commit', commitEvent(176, 2));
+    commitTurn(176, 2);
 
     const stages = recordsFor(SPAN_NAMES.engineStage);
 
@@ -2147,19 +2231,19 @@ describe('attachEngineTracing over the append-only emitter', () => {
   });
 
   it('records each turn against the stage in force at the time', () => {
-    attachEngineTracing(events, tracer);
+    traceEngine();
 
     events.emit('stage:start', stageStartEvent(0));
-    events.emit('state:commit', commitEvent(0, 0));
+    commitTurn(0, 0);
 
     events.emit('move:before', beforeEvent(false));
-    events.emit('state:commit', commitEvent(56, 0));
+    commitTurn(56, 0);
     events.emit('stage:end', stageEndEvent(0));
-    events.emit('state:commit', commitEvent(56, 1));
+    commitTurn(56, 1);
 
     // A turn played entirely inside stage 1.
     events.emit('move:before', beforeEvent(false));
-    events.emit('state:commit', commitEvent(64, 1));
+    commitTurn(64, 1);
 
     const turns = recordsFor(SPAN_NAMES.engineTurn);
 
@@ -2169,7 +2253,7 @@ describe('attachEngineTracing over the append-only emitter', () => {
   });
 
   it('replaces a stage span when a commit reports a stage it left', () => {
-    attachEngineTracing(events, tracer);
+    traceEngine();
 
     events.emit('stage:start', stageStartEvent(3));
     events.emit('state:commit', commitEvent(0, 3));
@@ -2189,13 +2273,13 @@ describe('attachEngineTracing over the append-only emitter', () => {
   });
 
   it('opens one stage span across many commits of the same stage', () => {
-    attachEngineTracing(events, tracer);
+    traceEngine();
 
     events.emit('stage:start', stageStartEvent(0));
 
     for (let index = 0; index < 5; index += 1) {
       events.emit('move:before', beforeEvent(false));
-      events.emit('state:commit', commitEvent(index * 4, 0));
+      commitTurn(index * 4, 0);
     }
 
     expect(recordsFor(SPAN_NAMES.engineStage)).toHaveLength(0);
@@ -2204,15 +2288,15 @@ describe('attachEngineTracing over the append-only emitter', () => {
   });
 
   it('does not let a stage arm outlive the turn that commits', () => {
-    attachEngineTracing(events, tracer);
+    traceEngine();
 
     events.emit('stage:start', stageStartEvent(0));
 
     // The turn commits FIRST, so it — not the stage start — is what this
     // commit belongs to, and the arm must not survive it.
     events.emit('move:before', beforeEvent(false));
-    events.emit('state:commit', commitEvent(8));
-    events.emit('state:commit', commitEvent(8));
+    commitTurn(8);
+    commitTurn(8);
 
     expect(tracer.snapshot().anomalies).toBe(1);
   });
@@ -2225,10 +2309,10 @@ describe('attachEngineTracing over the append-only emitter', () => {
       throw new Error('unrelated listener failed');
     });
 
-    attachEngineTracing(events, tracer);
+    traceEngine();
 
     events.emit('move:before', beforeEvent(false));
-    events.emit('state:commit', commitEvent(8));
+    commitTurn(8);
 
     expect(listenerErrors).toHaveLength(1);
     expect(listenerErrors[0].correlationId).toBe(CORRELATION_ID);
@@ -2243,7 +2327,7 @@ describe('attachEngineTracing over the append-only emitter', () => {
     // the listeners this function registers.
     const seen: string[] = [];
 
-    attachEngineTracing(events, tracer);
+    traceEngine();
 
     // Registered after the tracing listeners, so its arrival proves the
     // emission continued past the failure.
@@ -2286,7 +2370,7 @@ describe('attachEngineTracing over the append-only emitter', () => {
   });
 
   it('contains a throw from a tracer method called inside the stage listener', () => {
-    attachEngineTracing(events, tracer);
+    traceEngine();
 
     const spy = vi
       .spyOn(tracer, 'reportAnomaly')
@@ -2313,10 +2397,10 @@ describe('attachEngineTracing over the append-only emitter', () => {
       scores.push(payload.score);
     });
 
-    const detach = attachEngineTracing(events, tracer);
+    const detach = traceEngine();
 
     events.emit('move:before', beforeEvent(false));
-    events.emit('state:commit', commitEvent(4));
+    commitTurn(4);
 
     const produced = tracer.recent().length;
 
@@ -2332,7 +2416,7 @@ describe('attachEngineTracing over the append-only emitter', () => {
     expect(afterDetach).toBeGreaterThanOrEqual(produced);
 
     events.emit('move:before', beforeEvent(false));
-    events.emit('state:commit', commitEvent(8));
+    commitTurn(8);
 
     expect(tracer.recent()).toHaveLength(afterDetach);
     expect(scores).toEqual([4, 8]);
@@ -2340,7 +2424,7 @@ describe('attachEngineTracing over the append-only emitter', () => {
   });
 
   it('closes a turn and a stage span left open when tracing detaches', () => {
-    const detach = attachEngineTracing(events, tracer);
+    const detach = traceEngine();
 
     events.emit('stage:start', stageStartEvent(1));
     events.emit('move:before', beforeEvent(false));
@@ -2362,7 +2446,7 @@ describe('attachEngineTracing over the append-only emitter', () => {
 
   it('takes the emitter and the tracer alone, and lets two tracers observe one emitter', () => {
     const second = createTracer({ logger, metrics: registry });
-    const detachFirst = attachEngineTracing(events, tracer);
+    const detachFirst = traceEngine();
     const detachSecond = attachEngineTracing(events, second);
 
     events.emit('move:before', beforeEvent(false));
@@ -2400,21 +2484,21 @@ describe('the effect-only turn: a turn that committed without moving', () => {
     const records = accountedRecords();
     const latency = registry.histogram(METRIC_NAMES.turnLatencyMilliseconds);
 
-    attachEngineTracing(events, tracer);
+    traceEngine();
 
-    // The sequence src/engine/engine.ts L1383-L1424 emits when an
+    // The sequence the cancelled branch of `Engine.attemptMove` emits when an
     // `onBeforeMove` effect reseated the board and the slide then moved
     // nothing: the completion signal carries `moved: false` and the turn
     // number the commit that follows carries.
     events.emit('move:before', beforeEvent(false));
     events.emit('move:after', afterEvent(false));
-    events.emit('state:commit', commitEvent(64));
+    commitTurn(64, undefined, IDLE_AND_COMMITTED);
 
     const snapshot = tracer.snapshot();
 
-    // NOT AN ANOMALY. Before this was classified, every effect-only turn raised
-    // one, so the anomaly count measured how many undo, shuffle and excise
-    // charges had been spent.
+    // NOT AN ANOMALY. An effect-only turn is classified, so the anomaly count
+    // measures anomalies rather than how many undo, shuffle and excise charges
+    // have been spent.
     expect(snapshot.anomalies).toBe(0);
 
     // Attributed to the TURN, not to the unattributed bucket.
@@ -2422,43 +2506,50 @@ describe('the effect-only turn: a turn that committed without moving', () => {
     expect(snapshot.commits.unattributed).toBe(0);
     expect(snapshot.commits.lifecycle).toBe(0);
 
+    // The commit now REACHES the open span, so the account is the one
+    // `settleMove` files rather than the commit-outside-a-turn record — and it
+    // is filed for the same reason, to say that the move this turn committed for
+    // never resolved. DL-TRACE-17.
     const accounted = records.filter(
-      (record) => record.message === 'commit outside a turn',
+      (record) => record.message === 'turn committed without a move',
     );
 
     expect(accounted).toHaveLength(1);
     expect(accounted[0].fields?.path).toBe(UNTRACED_COMMIT_PATHS.effectOnly);
 
-    // The turn moved nothing, so its span still closes as `unmoved` and takes
-    // no latency sample.
+    // The turn closes as `effect`, the outcome docs/OBSERVABILITY.md
+    // documents for a turn that changed the board without sliding a tile, and
+    // it still takes no latency sample. It closed as `unmoved` — the outcome of
+    // a turn that changed NOTHING — because `move:after` closed the span before
+    // the commit that proved otherwise arrived. DL-TRACE-17.
     expect(oneRecordFor(SPAN_NAMES.engineTurn).attributes[
       SPAN_ATTRIBUTES.outcome
-    ]).toBe(SPAN_OUTCOMES.unmoved);
+    ]).toBe(SPAN_OUTCOMES.effect);
     expect(latency.count).toBe(0);
   });
 
   it('spends the idle turn account on one commit and no more', () => {
-    attachEngineTracing(events, tracer);
+    traceEngine();
 
     events.emit('move:before', beforeEvent(false));
     events.emit('move:after', afterEvent(false));
-    events.emit('state:commit', commitEvent(64));
+    commitTurn(64);
 
     // A second commit with nothing to explain it is still an anomaly: the
     // account belongs to one commit.
-    events.emit('state:commit', commitEvent(64));
+    commitTurn(64);
 
     expect(tracer.snapshot().anomalies).toBe(1);
   });
 
-  it('records the idle commit on the stage span under the effect phase', () => {
-    const subscription = attachEngineTracing(events, tracer);
+  it('records the idle commit on its own turn span, not on the stage span', () => {
+    const subscription = traceEngine();
 
     events.emit('stage:start', stageStartEvent(0));
-    events.emit('state:commit', commitEvent(0));
+    commitTurn(0);
     events.emit('move:before', beforeEvent(false));
     events.emit('move:after', afterEvent(false));
-    events.emit('state:commit', commitEvent(8));
+    commitTurn(8, undefined, IDLE_AND_COMMITTED);
 
     // The stage span is detached and stays open, so it is settled here to file
     // its record and the events it collected.
@@ -2468,14 +2559,20 @@ describe('the effect-only turn: a turn that committed without moving', () => {
       .events.filter((event) => event.name === SPAN_EVENT_NAMES.stageCommit)
       .map((event) => event.attributes?.[SPAN_ATTRIBUTES.phase]);
 
-    // KEPT WHERE IT HAPPENED: the setup commit that opened the stage, then the
-    // effect-only commit of the idle turn.
-    expect(phases).toEqual([COMMIT_PHASES.setup, COMMIT_PHASES.effect]);
+    // The stage span records the commits that landed OUTSIDE a turn,
+    // which is now the setup commit alone. The idle turn's own commit reaches
+    // its open turn span, so it is recorded there — as the `effect` outcome the
+    // span closes under — rather than as a stage event under the `effect` phase.
+    // The information moved to the span that owns it. DL-TRACE-17.
+    expect(phases).toEqual([COMMIT_PHASES.setup]);
+    expect(oneRecordFor(SPAN_NAMES.engineTurn).attributes[
+      SPAN_ATTRIBUTES.outcome
+    ]).toBe(SPAN_OUTCOMES.effect);
   });
 
   it('closes the span of a withdrawn attempt that committed under the effect outcome', () => {
     const latency = registry.histogram(METRIC_NAMES.turnLatencyMilliseconds);
-    const subscription = attachEngineTracing(events, tracer);
+    const subscription = traceEngine();
 
     // A withdrawn move emits `move:before` and nothing further, so the span is
     // still open when the caller reports the attempt.
@@ -2495,7 +2592,7 @@ describe('the effect-only turn: a turn that committed without moving', () => {
   });
 
   it('closes an idle attempt that committed under the effect outcome too', () => {
-    const subscription = attachEngineTracing(events, tracer);
+    const subscription = traceEngine();
 
     events.emit('move:before', beforeEvent(false));
 
@@ -2507,8 +2604,52 @@ describe('the effect-only turn: a turn that committed without moving', () => {
     ]).toBe(SPAN_OUTCOMES.effect);
   });
 
+  it('closes BOTH effect-only production orders as effect, with no latency', () => {
+    // THE TWO ORDERS, side by side, driven exactly as the engine produces them.
+    // They used to close differently and neither closed as documented: the idle
+    // one closed at `move:after` as `unmoved`, and the cancelled one closed at
+    // `state:commit` as `committed` AND took a turn-latency sample — so one
+    // charge path inflated `turn_latency_milliseconds` without incrementing the
+    // turn counter beside it and the other did not. DL-TRACE-06, DL-TRACE-17.
+    const latency = registry.histogram(METRIC_NAMES.turnLatencyMilliseconds);
+    const subscription = traceEngine();
+
+    // ORDER ONE — the idle effect-only turn: an `onBeforeMove` effect reseated
+    // the board, the slide resolved to nothing, the engine announced the
+    // completion and then committed what the effect left.
+    events.emit('move:before', beforeEvent(false));
+    events.emit('move:after', afterEvent(false));
+    events.emit('state:commit', commitEvent(64));
+
+    expect(subscription.settleMove(IDLE_AND_COMMITTED)).toBe(true);
+
+    // ORDER TWO — the cancelled effect-only turn: the same effect reseated the
+    // board and then WITHDREW the move, so no completion signal is emitted at
+    // all and the commit is the only thing between the announcement and the
+    // caller.
+    events.emit('move:before', beforeEvent(false));
+    events.emit('state:commit', commitEvent(96));
+
+    expect(
+      subscription.settleMove({ resolution: 'cancelled', committed: true }),
+    ).toBe(true);
+
+    const outcomes = recordsFor(SPAN_NAMES.engineTurn).map(
+      (record) => record.attributes[SPAN_ATTRIBUTES.outcome],
+    );
+
+    expect(outcomes).toEqual([SPAN_OUTCOMES.effect, SPAN_OUTCOMES.effect]);
+
+    // NEITHER samples the histogram, which measures resolved slides, and both
+    // are attributed to their turn rather than to the unattributed bucket.
+    expect(latency.count).toBe(0);
+    expect(tracer.snapshot().commits.turn).toBe(2);
+    expect(tracer.snapshot().commits.unattributed).toBe(0);
+    expect(tracer.snapshot().anomalies).toBe(0);
+  });
+
   it('leaves an attempt that committed nothing classified by its resolution', () => {
-    const subscription = attachEngineTracing(events, tracer);
+    const subscription = traceEngine();
 
     events.emit('move:before', beforeEvent(false));
 
@@ -2520,21 +2661,31 @@ describe('the effect-only turn: a turn that committed without moving', () => {
     ]).toBe(SPAN_OUTCOMES.cancelled);
   });
 
-  it('accounts for a withdrawn attempt whose commit had already closed its span', () => {
+  it('closes and accounts for a withdrawn attempt whose commit reached its span', () => {
     logger.setLevel('debug');
 
     const records = accountedRecords();
-    const subscription = attachEngineTracing(events, tracer);
+    const subscription = traceEngine();
+    const latency = registry.histogram(METRIC_NAMES.turnLatencyMilliseconds);
 
-    // The production order for a withdrawn move that reseated the board: the
-    // engine commits inside `attemptMove`, so the commit closes the span
-    // before the caller can report the withdrawal.
+    // THE PRODUCTION ORDER for a withdrawn move that reseated the board: the
+    // engine commits inside `attemptMove()` and the caller reports the
+    // withdrawal afterwards.
     events.emit('move:before', beforeEvent(false));
     events.emit('state:commit', commitEvent(32));
 
+    // The settle CLOSES the span rather than finding it already gone.
+    // The commit used to close it as `committed` and take a turn-latency
+    // sample — a sample for a move that never resolved — because the commit
+    // arrived before the resolution was knowable. DL-TRACE-17.
     expect(
       subscription.settleMove({ resolution: 'cancelled', committed: true }),
-    ).toBe(false);
+    ).toBe(true);
+
+    expect(oneRecordFor(SPAN_NAMES.engineTurn).attributes[
+      SPAN_ATTRIBUTES.outcome
+    ]).toBe(SPAN_OUTCOMES.effect);
+    expect(latency.count).toBe(0);
 
     const accounted = records.filter(
       (record) => record.message === 'turn committed without a move',
@@ -2548,14 +2699,16 @@ describe('the effect-only turn: a turn that committed without moving', () => {
 
   it('accounts for nothing where an ordinary turn resolved', () => {
     const records = accountedRecords();
-    const subscription = attachEngineTracing(events, tracer);
+    const subscription = traceEngine();
 
     events.emit('move:before', beforeEvent(false));
     events.emit('move:after', afterEvent(true));
     events.emit('state:commit', commitEvent(32));
 
+    // The settle closes the span, because the commit no longer does.
+    // DL-TRACE-17.
     expect(subscription.settleMove({ resolution: 'moved', committed: true }))
-      .toBe(false);
+      .toBe(true);
     expect(
       records.filter(
         (record) => record.message === 'turn committed without a move',
@@ -2566,7 +2719,7 @@ describe('the effect-only turn: a turn that committed without moving', () => {
 
 describe('settleStage: the stage span of a run that ended', () => {
   it('closes an open stage span under the unwound outcome, carrying the run outcome', () => {
-    const subscription = attachEngineTracing(events, tracer);
+    const subscription = traceEngine();
 
     events.emit('stage:start', stageStartEvent(3));
     events.emit('state:commit', commitEvent(4, 3));
@@ -2588,7 +2741,7 @@ describe('settleStage: the stage span of a run that ended', () => {
   });
 
   it('unwinds by default and is idempotent', () => {
-    const subscription = attachEngineTracing(events, tracer);
+    const subscription = traceEngine();
 
     events.emit('stage:start', stageStartEvent(0));
 
@@ -2600,7 +2753,7 @@ describe('settleStage: the stage span of a run that ended', () => {
   });
 
   it('reports no span where no stage is open, and after detaching', () => {
-    const subscription = attachEngineTracing(events, tracer);
+    const subscription = traceEngine();
 
     expect(subscription.settleStage()).toBe(false);
 
@@ -2611,7 +2764,7 @@ describe('settleStage: the stage span of a run that ended', () => {
   });
 
   it('leaves a stage that RESOLVED closed as committed', () => {
-    const subscription = attachEngineTracing(events, tracer);
+    const subscription = traceEngine();
 
     events.emit('stage:start', stageStartEvent(0));
     events.emit('stage:end', stageEndEvent(0));
@@ -2676,10 +2829,10 @@ describe('Span durations in the metrics histograms', () => {
 
   it('observes one turn latency per committed turn and none for a turn that never commits', () => {
     const latency = registry.histogram(METRIC_NAMES.turnLatencyMilliseconds);
-    const detach = attachEngineTracing(events, tracer);
+    const detach = traceEngine();
 
     events.emit('move:before', beforeEvent(false));
-    events.emit('state:commit', commitEvent(4));
+    commitTurn(4);
 
     expect(latency.count).toBe(1);
 
@@ -2973,7 +3126,7 @@ describe('Disabled tracing', () => {
   });
 
   it('records no span from an engine emitter while disabled and resumes when re-enabled', () => {
-    const detach = attachEngineTracing(events, tracer);
+    const detach = traceEngine();
 
     tracer.setEnabled(false);
     driveOneTurn(events);
@@ -3002,7 +3155,7 @@ describe('Disabled tracing', () => {
       scores.push(payload.score);
     });
 
-    const detach = attachEngineTracing(events, tracer);
+    const detach = traceEngine();
 
     tracer.setEnabled(false);
 
@@ -3024,17 +3177,17 @@ describe('Disabled tracing', () => {
 
   it('resumes observing the turn latency once re-enabled', () => {
     const latency = registry.histogram(METRIC_NAMES.turnLatencyMilliseconds);
-    const detach = attachEngineTracing(events, tracer);
+    const detach = traceEngine();
 
     tracer.setEnabled(false);
     events.emit('move:before', beforeEvent(false));
-    events.emit('state:commit', commitEvent(8));
+    commitTurn(8);
 
     expect(latency.count).toBe(0);
 
     tracer.setEnabled(true);
     events.emit('move:before', beforeEvent(false));
-    events.emit('state:commit', commitEvent(16));
+    commitTurn(16);
     detach();
 
     expect(latency.count).toBe(1);
@@ -3610,7 +3763,7 @@ describe('turn-span settlement across every unresolved path', () => {
   it('leaves a hook-withdrawn turn open, and settleMove closes it', () => {
     const latency = registry.histogram(METRIC_NAMES.turnLatencyMilliseconds);
     const engine = engineOn(BLOCKED_BOARD);
-    const subscription = attachEngineTracing(engine.events, tracer);
+    const subscription = traceEngine(engine.events);
 
     withdrawEveryMove(engine);
 
@@ -3649,7 +3802,7 @@ describe('turn-span settlement across every unresolved path', () => {
   it('keeps think time out of the latency histogram when nothing settles', () => {
     const latency = registry.histogram(METRIC_NAMES.turnLatencyMilliseconds);
     const engine = engineOn(NEAR_WIN_BOARD);
-    const subscription = attachEngineTracing(engine.events, tracer);
+    const subscription = traceEngine(engine.events);
 
     withdrawEveryMove(engine);
 
@@ -3659,6 +3812,7 @@ describe('turn-span settlement across every unresolved path', () => {
     // Nothing is settled. The next move supersedes the stale span.
     expect(engine.hooks.unregister('withdraws-every-move')).toBe(true);
     expect(engine.move(DIRECTION_LEFT)).toBe(true);
+    settleDrivenTurn();
 
     const turns = recordsFor(SPAN_NAMES.engineTurn);
 
@@ -3692,7 +3846,7 @@ describe('turn-span settlement across every unresolved path', () => {
         engine.events.on('move:before', veto);
       }
 
-      const subscription = attachEngineTracing(engine.events, tracer);
+      const subscription = traceEngine(engine.events);
 
       if (!vetoFirst) {
         engine.events.on('move:before', veto);
@@ -3714,7 +3868,7 @@ describe('turn-span settlement across every unresolved path', () => {
 
       outcomes.push(closed.attributes[SPAN_ATTRIBUTES.outcome]);
 
-      // ADDED: the attribute agrees with the outcome on BOTH orders. Registered
+      // The attribute agrees with the outcome on BOTH orders. Registered
       // second, the veto arrived after this listener had already written
       // `cancelled: false`, so the span said the turn was not cancelled while
       // closing as cancelled — a span contradicting itself. DL-TRACE-16.
@@ -3735,17 +3889,21 @@ describe('turn-span settlement across every unresolved path', () => {
     expect(tracer.snapshot().open).toBe(0);
   });
 
-  it('settles an idle turn the engine has already closed as a no-op', () => {
+  it('settles an idle turn once, and every later settle is a no-op', () => {
     const engine = engineOn(BLOCKED_BOARD);
-    const subscription = attachEngineTracing(engine.events, tracer);
+    const subscription = traceEngine(engine.events);
     const attempt = engine.attemptMove(DIRECTION_LEFT);
 
     expect(attempt.resolution).toBe('idle');
 
-    // The engine's `move:after` completion signal closed it already, so the
-    // caller's settle finds nothing to close and reports so.
-    expect(subscription.currentTurnSpan()).toBeUndefined();
-    expect(subscription.settleMove(attempt)).toBe(false);
+    // The engine's `move:after` completion signal no longer closes the
+    // span — it records the turn number and leaves the close to the caller — so
+    // the settle finds it OPEN and closes it as `unmoved`, and the two settles
+    // after it find nothing. Closing at `move:after` was what left an idle
+    // EFFECT-ONLY turn classified as a turn that changed nothing.
+    // DL-TRACE-17.
+    expect(subscription.currentTurnSpan()).toBeDefined();
+    expect(subscription.settleMove(attempt)).toBe(true);
     expect(subscription.settleTurn()).toBe(false);
     subscription.closeIdleTurn();
 
@@ -3780,7 +3938,7 @@ describe('a turn span counts its own merges and spawns', () => {
     readonly subscription: EngineTracingSubscription;
   } => {
     const engine = new Engine({ streams: createRngStreams(RUN_SEED) });
-    const subscription = attachEngineTracing(engine.events, tracer);
+    const subscription = traceEngine(engine.events);
 
     // TWO START TILES, emitted as two `tile:spawn` events outside any turn.
     engine.setup(null);
@@ -3822,7 +3980,7 @@ describe('a turn span counts its own merges and spawns', () => {
 
   it('leaves every lifecycle spawn emitted, so nothing is lost', () => {
     const engine = new Engine({ streams: createRngStreams(RUN_SEED) });
-    const subscription = attachEngineTracing(engine.events, tracer);
+    const subscription = traceEngine(engine.events);
     let emitted = 0;
 
     engine.events.on('tile:spawn', (): void => {
@@ -3899,7 +4057,7 @@ describe('a redirected turn names the direction it resolved in', () => {
 
   it('reports the resolved direction on the turn the caller settles', () => {
     const engine = engineOn(NEAR_WIN_BOARD);
-    const subscription = attachEngineTracing(engine.events, tracer);
+    const subscription = traceEngine(engine.events);
 
     redirectEveryMove(engine, DIRECTION_UP, true);
 
@@ -3919,32 +4077,39 @@ describe('a redirected turn names the direction it resolved in', () => {
     expect(turn.attributes[SPAN_ATTRIBUTES.cancelled]).toBe(true);
   });
 
-  it('leaves the requested direction standing on a turn that committed', () => {
+  it('names the resolved direction on a turn that COMMITTED, not the requested one', () => {
+    const latency = registry.histogram(METRIC_NAMES.turnLatencyMilliseconds);
     const engine = engineOn(NEAR_WIN_BOARD);
-    const subscription = attachEngineTracing(engine.events, tracer);
+    const subscription = traceEngine(engine.events);
 
     // Downward RESOLVES on this board — the two near-win tiles sit on row 0 —
-    // so this attempt commits, which is the case the boundary below is about.
+    // so this attempt commits, which is the case this is about.
     redirectEveryMove(engine, DIRECTION_DOWN, false);
 
     const attempt = engine.attemptMove(DIRECTION_LEFT);
 
+    expect(attempt.direction).toBe(DIRECTION_LEFT);
     expect(attempt.resolvedDirection).toBe(DIRECTION_DOWN);
     expect(attempt.committed).toBe(true);
 
-    // THE BOUNDARY OF THE RECONCILIATION, stated rather than implied. A turn
-    // that committed closed its own span at `state:commit`, which is the close
-    // that measures the turn, so the caller's settle finds nothing left to
-    // write and the span keeps the direction it was opened with. Only a turn the
-    // caller has to close — the withdrawn one above — can be reconciled.
-    expect(subscription.currentTurnSpan()).toBeUndefined();
-    expect(subscription.settleMove(attempt)).toBe(false);
+    // The reconciliation reaches a COMMITTED turn too. `state:commit`
+    // used to close the span, so a redirected move that resolved was filed under
+    // the direction the player pressed and the caller's settle had nothing left
+    // to write — the span said the player moved left on a turn the board moved
+    // down. The commit now records itself and the caller closes.
+    // DL-TRACE-16, DL-TRACE-17.
+    expect(subscription.currentTurnSpan()).toBeDefined();
+    expect(subscription.settleMove(attempt)).toBe(true);
 
     const turn = recordsFor(SPAN_NAMES.engineTurn).slice(-1)[0];
 
-    expect(turn.attributes[SPAN_ATTRIBUTES.direction]).toBe(DIRECTION_LEFT);
+    expect(turn.attributes[SPAN_ATTRIBUTES.direction]).toBe(DIRECTION_DOWN);
+    expect(turn.attributes[SPAN_ATTRIBUTES.cancelled]).toBe(false);
     expect(turn.attributes[SPAN_ATTRIBUTES.outcome]).toBe(
       SPAN_OUTCOMES.committed,
     );
+
+    // And it is still the ONE outcome that samples the turn-latency histogram.
+    expect(latency.count).toBe(1);
   });
 });

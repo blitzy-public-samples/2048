@@ -33,7 +33,8 @@
 //                               visual vocabulary this screen composes from
 //   style/_a11y.scss            the focus ring, the interaction states and the
 //                               reduced-motion layer every control here takes
-//   index.html L77              the movement modalities the help copy names
+//   index.html                  the movement modalities `.game-explanation`
+//                               names
 //
 // Traceability rows in docs/TRACEABILITY_MATRIX.md. Every row is target-only:
 // the retired sources carried exactly one screen and no navigation model, so
@@ -232,9 +233,9 @@ function describeRelicCount(relics: number): string {
  * localise the screen without editing this module.
  *
  * `controls` names the four movement modalities and the remapping surface that
- * index.html L77 names, so the two do not disagree about what a player can
- * press. The authenticity notice and the third-party attributions of
- * index.html are not restated here in any form.
+ * `.game-explanation` of index.html names, so the two do not disagree about
+ * what a player can press. The authenticity notice and the third-party
+ * attributions of index.html are not restated here in any form.
  */
 export const runStartCopy = Object.freeze({
   /** Heading of the screen. */
@@ -501,6 +502,11 @@ interface RunStartElements {
  *
  * @param owner Document the elements are created in.
  * @param copy The copy in force.
+ * @param withSettings Whether the settings control is built. True builds the
+ *   `<button>`; false leaves `RunStartElements.settings` `null` and the screen
+ *   renders without it. The caller passes whether `onOpenSettings` was
+ *   supplied, so a composition that opens no settings dialog offers no control
+ *   for it.
  * @returns The elements a write addresses.
  */
 function buildSubtree(

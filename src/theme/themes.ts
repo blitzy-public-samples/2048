@@ -16,23 +16,21 @@
  * One traceability row of docs/TRACEABILITY_MATRIX.md apiece. THEME is one area
  * across both halves of the mirror, so these ordinals are unique across this
  * module and style/_themes.scss:
- *   TR-THEME-01  style/main.scss L4-L22   the existing palette, carried as the
- *                                         default theme
- *   TR-THEME-02  target-only row          the additive high-contrast palette
- *   TR-THEME-03  target-only row          the additive colourblind-safe palette
- *   TR-THEME-04  target-only row          `THEME_ATTRIBUTE`,
- *                                         `themeAttributeValues` and
- *                                         `applyTheme`
- *   TR-THEME-05  target-only row          `resolveTileTheme`, the per-theme
- *                                         resolver a renderer calls
- *   TR-THEME-06  target-only row          `subscribeToThemeChange` and
- *                                         `getActiveTheme`
- *   TR-THEME-11  target-only row          `ThemePalette.neutralLight`, the
- *                                         lighting white point each palette
- *                                         states; decision DL-TOKEN-07
+ *   TR-THEME-01  style/main.scss  the existing palette, carried as the default
+ *                token block      theme
+ *   TR-THEME-02  target-only row  the additive high-contrast palette
+ *   TR-THEME-03  target-only row  the additive colourblind-safe palette
+ *   TR-THEME-04  target-only row  `THEME_ATTRIBUTE`, `themeAttributeValues` and
+ *                                 `applyTheme`
+ *   TR-THEME-05  target-only row  `resolveTileTheme`, the per-theme resolver a
+ *                                 renderer calls
+ *   TR-THEME-06  target-only row  `subscribeToThemeChange` and `getActiveTheme`
+ *   TR-THEME-11  target-only row  `ThemePalette.neutralLight`, the lighting
+ *                                 white point each palette states; decision
+ *                                 DL-TOKEN-07
  *
- * Decisions: DL-TOKEN-07, DL-THEME-01, DL-THEME-02, DL-THEME-03, DL-THEME-04
- * (docs/DECISION_LOG.md).
+ * Decisions: DL-TOKEN-07, DL-THEME-01, DL-THEME-02, DL-THEME-03, DL-THEME-04,
+ * DL-THEME-11 (docs/DECISION_LOG.md).
  */
 
 import {
@@ -51,6 +49,7 @@ import {
   defaultTileRampPalette,
   formatHexColor,
   parseHexColor,
+  quantiseColor,
   rampValue,
   sassMix,
   tileRampConstants,
@@ -796,6 +795,242 @@ export function resolveRarityColors(
   );
   return Object.freeze(
     Object.fromEntries(entries) as Record<RarityTier, RarityColor>,
+  );
+}
+
+/* --------------------------------------------------------------------------
+ * The rarity vocabulary the reward CARD carries.
+ *
+ * The mirror of `rarity-card-lift` and `ramp-rarity-card` in style/_themes.scss,
+ * which is what actually paints. Both halves derive the colour from a ratio
+ * rather than declaring it, so a palette edit moves them together.
+ *
+ * The card's surface is the palette's own tile-super, and its rarity chip renders
+ * the tier name in the tier's accent at the 13px label step. Both additive
+ * palettes run their ramp down to a near-black high anchor BY DESIGN, so the top
+ * tier's accent measured 1.29:1 there: the tier name was unreadable in exactly
+ * the two palettes chosen for legibility. Decisions DL-THEME-11, DL-REWARD-17.
+ * ------------------------------------------------------------------------ */
+
+/** Suffix of the custom property the card variant is published under. */
+export const THEME_RARITY_CARD_SUFFIX = '-card';
+
+/** The ratio a chip label must clear: WCAG 2.1 AA for normal-size text. */
+export const rarityCardContrastTarget = 4.5;
+
+/** The search grid the lift is taken from, and its upper bound. */
+export const rarityCardLiftStep = 0.05;
+
+/** The lift past which no palette is accepted. */
+export const rarityCardLiftLimit = 1;
+
+/** Constants of WCAG 2.1's relative-luminance and contrast formulae. */
+const WCAG_CHANNEL_MAX = 255;
+const WCAG_TRANSFER_THRESHOLD = 0.03928;
+const WCAG_TRANSFER_DIVISOR = 12.92;
+const WCAG_TRANSFER_OFFSET = 0.055;
+const WCAG_TRANSFER_SCALE = 1.055;
+const WCAG_TRANSFER_EXPONENT = 2.4;
+const WCAG_RED_COEFFICIENT = 0.2126;
+const WCAG_GREEN_COEFFICIENT = 0.7152;
+const WCAG_BLUE_COEFFICIENT = 0.0722;
+const WCAG_CONTRAST_OFFSET = 0.05;
+
+/**
+ * One sRGB channel linearised, WCAG 2.1 relative-luminance step 1.
+ *
+ * @param channel Channel on the 0-255 scale `RampColor` carries.
+ * @returns The linear value, 0 to 1.
+ */
+function lineariseChannel(channel: number): number {
+  const scaled = channel / WCAG_CHANNEL_MAX;
+  return scaled <= WCAG_TRANSFER_THRESHOLD
+    ? scaled / WCAG_TRANSFER_DIVISOR
+    : Math.pow(
+        (scaled + WCAG_TRANSFER_OFFSET) / WCAG_TRANSFER_SCALE,
+        WCAG_TRANSFER_EXPONENT,
+      );
+}
+
+/**
+ * Relative luminance of an opaque colour, WCAG 2.1.
+ *
+ * @param color Colour to measure.
+ * @returns Its luminance, 0 to 1.
+ */
+export function relativeLuminance(color: RampColor): number {
+  return (
+    WCAG_RED_COEFFICIENT * lineariseChannel(color.r) +
+    WCAG_GREEN_COEFFICIENT * lineariseChannel(color.g) +
+    WCAG_BLUE_COEFFICIENT * lineariseChannel(color.b)
+  );
+}
+
+/**
+ * Contrast ratio between two opaque colours, WCAG 2.1. Symmetric in its
+ * arguments, as the formula is.
+ *
+ * @param front Foreground colour.
+ * @param back Background colour.
+ * @returns The ratio, 1 to 21.
+ */
+export function contrastRatio(front: RampColor, back: RampColor): number {
+  const first = relativeLuminance(front) + WCAG_CONTRAST_OFFSET;
+  const second = relativeLuminance(back) + WCAG_CONTRAST_OFFSET;
+  return first > second ? first / second : second / first;
+}
+
+/**
+ * The card surface one palette paints, `--theme-tile-super`: the palette's super
+ * tint mixed over its high anchor at the palette's own super weight, which is
+ * the `tile-super` entry of style/_themes.scss.
+ *
+ * @param palette Palette to resolve against.
+ * @returns The surface colour.
+ * @throws RangeError when an anchor is not a hex colour.
+ */
+function resolveCardSurface(palette: ThemePalette): RampColor {
+  return sassMix(
+    parseHexColor(palette.tileSuperTint),
+    parseHexColor(palette.tileHigh),
+    palette.tileSuperWeight,
+  );
+}
+
+/**
+ * One tier's accent lifted a stated amount toward a palette's bright text.
+ *
+ * @param tier Tier to resolve.
+ * @param palette Palette to resolve against.
+ * @param lift Share of the bright text in the result, 0 to 1.
+ * @returns The lifted accent.
+ * @throws RangeError when the tier is unknown or an anchor is not a hex colour.
+ */
+function rarityCardAt(
+  tier: RarityTier,
+  palette: ThemePalette,
+  lift: number,
+): RampColor {
+  const accent = sassMix(
+    parseHexColor(palette.tileHigh),
+    parseHexColor(palette.tileLow),
+    rarityRampWeight(tier),
+  );
+  return sassMix(parseHexColor(palette.brightText), accent, lift);
+}
+
+/**
+ * The lift one theme's card vocabulary takes: the smallest multiple of
+ * `rarityCardLiftStep` at which EVERY tier clears `rarityCardContrastTarget`
+ * against that theme's card surface.
+ *
+ * Uniform across the tiers of one palette rather than minimal per tier, so the
+ * ladder keeps its spacing instead of collapsing the passing tiers onto the
+ * failing one. The default palette takes 0: it already clears the floor, so its
+ * frozen values are published unchanged.
+ *
+ * @param theme Theme, or its id. Defaults to the active theme.
+ * @returns The lift, 0 to `rarityCardLiftLimit`.
+ * @throws RangeError when an id is unknown, when an anchor is not a hex colour,
+ *   or when no lift within the limit clears the floor for every tier.
+ */
+export function rarityCardLift(theme?: Theme | ThemeId): number {
+  const resolved = resolveTheme(theme);
+  const palette = resolved.palette;
+  const named = resolved.id;
+  const surface = resolveCardSurface(palette);
+  const steps = Math.floor(rarityCardLiftLimit / rarityCardLiftStep);
+
+  for (let step = 0; step <= steps; step += 1) {
+    const lift = step * rarityCardLiftStep;
+    const clears = rarityTiers.every(
+      (tier) =>
+        contrastRatio(rarityCardAt(tier, palette, lift), surface) >=
+        rarityCardContrastTarget,
+    );
+    if (clears) {
+      return lift;
+    }
+  }
+
+  throw new RangeError(
+    `themes: palette \`${named}\` cannot carry a rarity chip at ` +
+      `${rarityCardContrastTarget}:1 on its own card surface at any lift up ` +
+      `to ${rarityCardLiftLimit}`,
+  );
+}
+
+/** One tier's card accent under one theme, with the ratio it renders at. */
+export interface RarityCardColor extends RarityColor {
+  /** The lift applied, shared by every tier of the palette. */
+  readonly lift: number;
+
+  /** The surface it is measured against, as 6-digit hex. */
+  readonly surfaceHex: string;
+
+  /** Its measured ratio against that surface. */
+  readonly contrast: number;
+}
+
+/**
+ * The custom property one tier's card accent is published under,
+ * `--theme-rarity-<tier>-card`.
+ *
+ * @param tier Tier to name.
+ * @returns The property name.
+ * @throws RangeError when `tier` is not one of the four tiers.
+ */
+export function rarityCardCustomProperty(tier: RarityTier): string {
+  return `${rarityCustomProperty(tier)}${THEME_RARITY_CARD_SUFFIX}`;
+}
+
+/**
+ * One tier's accent as the reward card carries it.
+ *
+ * @param tier Tier to resolve.
+ * @param theme Theme, or its id. Defaults to the active theme.
+ * @returns The card accent, its lift and the ratio it renders at.
+ * @throws RangeError when the tier is unknown, when an id is unknown, when an
+ *   anchor is not a hex colour, or when no lift clears the floor.
+ */
+export function resolveRarityCardColor(
+  tier: RarityTier,
+  theme?: Theme | ThemeId,
+): RarityCardColor {
+  const resolved = resolveTheme(theme);
+  const palette = resolved.palette;
+  const lift = rarityCardLift(resolved);
+  const surface = resolveCardSurface(palette);
+  const color = rarityCardAt(tier, palette, lift);
+  return Object.freeze({
+    tier,
+    ordinal: rarityTierOrdinal(tier),
+    weight: rarityRampWeight(tier),
+    color,
+    colorHex: formatHexColor(color),
+    lift,
+    surfaceHex: formatHexColor(surface),
+    contrast: contrastRatio(quantiseColor(color), quantiseColor(surface)),
+  });
+}
+
+/**
+ * Every tier's card accent under one theme, keyed by tier.
+ *
+ * @param theme Theme, or its id. Defaults to the active theme.
+ * @returns One entry per tier.
+ * @throws RangeError when an id is unknown, when an anchor is not a hex colour,
+ *   or when no lift clears the floor.
+ */
+export function resolveRarityCardColors(
+  theme?: Theme | ThemeId,
+): Readonly<Record<RarityTier, RarityCardColor>> {
+  const resolved = resolveTheme(theme);
+  const entries = rarityTiers.map(
+    (tier) => [tier, resolveRarityCardColor(tier, resolved)] as const,
+  );
+  return Object.freeze(
+    Object.fromEntries(entries) as Record<RarityTier, RarityCardColor>,
   );
 }
 

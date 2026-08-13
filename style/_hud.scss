@@ -5,21 +5,19 @@
 // One traceability row of docs/TRACEABILITY_MATRIX.md apiece. HUD is one area
 // across the stylesheet and TypeScript halves, so these ordinals continue the
 // ones src/ui/screens/hud.ts carries:
-//   TR-HUD-07  style/main.scss L26-L44    the `.above-game` score row, extended
-//                                         by the stage and goal readouts
-//   TR-HUD-08  style/main.scss L334-L402  the tile ramp's two anchors, from
-//                                         which the rarity accents are
-//                                         interpolated with no compiled colour
-//                                         written out
-//   TR-HUD-09  target-only row            the active-relic tray and its
-//                                         pickup-ordered items
-//   TR-HUD-10  target-only row            `data-charges`, including the
-//                                         exhausted `0` state and the absent
-//                                         value
-//   TR-HUD-11  target-only row            the narrow-layout restatement at the
-//                                         mobile threshold
-//   TR-HUD-14  target-only row            the `.hud-degraded` notice, the
-//                                         visible half of TR-HUD-12
+//   TR-HUD-07  style/main.scss  the `.above-game` score row, extended by the
+//              .above-game      stage and goal readouts
+//   TR-HUD-08  style/main.scss  the tile ramp's two anchors, from which the
+//              ramp loop        rarity accents are interpolated with no
+//                               compiled colour written out
+//   TR-HUD-09  target-only row  the active-relic tray and its pickup-ordered
+//                               items
+//   TR-HUD-10  target-only row  `data-charges`, including the exhausted `0`
+//                               state and the absent value
+//   TR-HUD-11  target-only row  the narrow-layout restatement at the mobile
+//                               threshold
+//   TR-HUD-14  target-only row  the `.hud-degraded` notice, the visible half of
+//                               TR-HUD-12
 //
 // Decisions: DL-HUD-04, DL-HUD-05, DL-HUD-06, DL-HUD-15
 // (docs/DECISION_LOG.md).
@@ -82,7 +80,7 @@ $hud-mobile-item-max-inline:
 // The ordered rarity list the accent loop below generates one rule per.
 $hud-rarity-tiers: $rarity-tiers !default;
 
-// ADDED: the dark anchor the FALLBACK accent is composited over, and its share.
+// The dark anchor the FALLBACK accent is composited over, and its share.
 //
 // The published `--theme-rarity-<tier>-plate` carries each palette's own dark
 // tile surface, which style/_themes.scss owns; this file does not import that
@@ -96,12 +94,12 @@ $hud-rarity-plate-anchor: color.adjust(
 ) !default;
 $hud-rarity-plate-weight: 55% !default;
 
-// ADDED: the caution accent and bar width the run-not-saved notice carries.
+// The caution accent and bar width the run-not-saved notice carries.
 //
-// `--theme-tile-64` is the hottest step of the accent band style/main.scss
-// L334-L402 generates, published per palette by style/_themes.scss so each
-// palette supplies its own; $text-color is the fallback this file can derive
-// without importing that module. The bar width is the same channel
+// `--theme-tile-64` is the hottest step of the accent band the ramp loop of
+// style/main.scss generates, published per palette by style/_themes.scss so
+// each palette supplies its own; $text-color is the fallback this file can
+// derive without importing that module. The bar width is the same channel
 // `.relic-tray-item` encodes rarity in, three hairlines wide. DL-HUD-15.
 $hud-caution: var(--theme-tile-64, #{$text-color}) !default;
 $hud-caution-bar: $hud-hairline * 3 !default;
@@ -234,8 +232,8 @@ $hud-caution-bar: $hud-hairline * 3 !default;
 
   border: $hud-hairline solid $hud-rule;
 
-  // CHANGED: a caution bar on the inline-start edge, declared after the
-  // shorthand above so it takes that one edge. Two channels carry the state —
+  // A caution bar on the inline-start edge, declared after the shorthand above
+  // so it takes that one edge. Two channels carry the state —
   // the accent and the width — so neither rests on colour alone, and the text
   // keeps the page colour and its contrast. DL-HUD-15.
   border-inline-start: $hud-caution-bar solid $hud-caution;
@@ -418,16 +416,15 @@ $hud-rarity-tier-count: list.length($hud-rarity-tiers);
   .relic-tray-item[data-rarity="#{"" + $tier}"] {
     border-inline-start-width: $hud-hairline * ($ordinal + 1);
 
-    // CHANGED: the PLATED accent, `--theme-rarity-<tier>-plate`, where this
-    // read the pure `--theme-rarity-<tier>`.
+    // The PLATED accent, `--theme-rarity-<tier>-plate`, not the pure
+    // `--theme-rarity-<tier>`.
     //
-    // The pure accent is the colour of the reward card's own dark surface plus
-    // the tier, and it reads there at 6.7:1 or better — but the tray sits on the
-    // page, where the same colour measured 1.18:1 and the stripe was visible
-    // only as an absence. The plated variant is the identical tier hue composited
-    // over that dark surface, so one rarity vocabulary serves both surfaces and
-    // every tier clears the 3:1 asked of information-bearing non-text. The width
-    // channel below is unchanged and still carries the tier on its own.
+    // The pure accent is the tier over the reward card's own dark surface and
+    // reads there at 6.7:1 or better; the tray sits on the page, where that
+    // same colour reads at 1.18:1. The plated variant is the identical tier hue
+    // composited over the dark surface, so one rarity vocabulary serves both
+    // surfaces and every tier clears the 3:1 asked of information-bearing
+    // non-text. The width channel below carries the tier on its own.
     // DL-THEME-10.
     border-inline-start-color: var(
       --theme-rarity-#{"" + $tier}-plate,

@@ -230,6 +230,14 @@ export interface NumberOnlyRendererCopy {
  */
 export const numberOnlyRendererCopy: NumberOnlyRendererCopy = Object.freeze({
   boardLabel: 'Game board, numbers only',
+
+  // ROW FIRST, and the same words `formatCellCoordinates` of
+  // ../ui/a11y/focus-manager.ts states for the parallel board layer and the spawn
+  // announcement. Declared strings rather than a call into that formatter,
+  // because this is a copy table a caller may replace whole and importing
+  // behaviour into it would change what a replacement has to supply — the
+  // agreement is held instead by a test in
+  // tests/unit/ui/a11y-lifecycle.test.ts. DL-FOCUS-09.
   cellLabel: (row: number, column: number, value: number): string =>
     `Row ${row}, column ${column}, ${value}`,
 

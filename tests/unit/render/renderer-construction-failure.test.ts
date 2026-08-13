@@ -33,7 +33,7 @@ const hostileThrow = (): never => {
 };
 
 /**
- * ADDED: the canvases the composition root asked the module to release, in the
+ * The canvases the composition root asked the module to release, in the
  * order it asked.
  *
  * Hoisted, because the factory below is hoisted above every declaration in this
@@ -189,7 +189,7 @@ beforeEach(() => {
   installWebGL();
   resetWebGLSupportProbe();
 
-  // ADDED: the teardown below disposes, and disposal is what asks for the
+  // The teardown below disposes, and disposal is what asks for the
   // release, so the record is emptied per case rather than accumulated.
   releaseRequests.length = 0;
 });

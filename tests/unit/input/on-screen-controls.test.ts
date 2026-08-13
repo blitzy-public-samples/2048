@@ -732,7 +732,7 @@ describe('a focus change re-applies the layer', () => {
     field.focus();
     field.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
 
-    // CHANGED: the pass is scheduled rather than synchronous, so a transition
+    // The pass is scheduled rather than synchronous, so a transition
     // that fires `focusout` and then `focusin` is one pass rather than two.
     // DL-CONTROL-12.
     await settleFocus();

@@ -666,8 +666,8 @@ describe('the reward transaction', () => {
     press('ArrowUp', 'ArrowUp');
 
     // THE GATE. The stage-progress screen is up and the reward screen is not:
-    // both edges used to be taken on the one `stage:end`, so this state was
-    // entered and left inside a tick and no player ever saw it.
+    // taking both edges on the one `stage:end` would enter and leave this state
+    // inside a tick, and no player would ever see it.
     expect(document.getElementById('screen-stage-progress')?.hidden).toBe(false);
     expect(document.getElementById('screen-reward')?.hidden).toBe(true);
 
@@ -1132,9 +1132,9 @@ describe('the board-load authority', () => {
 
     // THE COLD LOAD OF AAP FIGURE 6. Nothing is stored, so there is nothing to
     // resume and no run has been begun: the lattice the engine's constructor
-    // allocated is empty, and the run-start screen is what the player is looking
-    // at. The board used to be opened here regardless, which superseded that
-    // screen inside the boot and made its seed field unreachable.
+    // allocated is empty, and the run-start screen is what the player is
+    // looking at. Opening the board here regardless would supersede that screen
+    // inside the boot and leave its seed field unreachable.
     let occupied = 0;
 
     application.engine.grid.eachCell((_x, _y, tile): void => {
@@ -1295,9 +1295,9 @@ describe('the screen registry', () => {
 
     expect(card?.tagName).toBe('BUTTON');
 
-    // A NATIVE BUTTON activates from Enter by synthesising a click, and the card
-    // used to listen for `keydown` as well — two activations of one press,
-    // serialised by a flag. The platform's own path is the only one now.
+    // A NATIVE BUTTON activates from Enter by synthesising a click, and the
+    // card listens for no `keydown` beside it, which would make two activations
+    // of one press. The platform's own path is the only one.
     card?.dispatchEvent(
       new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
     );
@@ -1365,11 +1365,11 @@ describe('the screen registry', () => {
 /* ==========================================================================
  * 10. Focus on the screen the boot ends on
  *
- * The boot used to blur whatever its own transitions had placed, which announced
- * a modal dialog and then left focus on the body. The rollback is gone, so the
+ * The boot blurs nothing its own transitions placed, which would announce a
+ * modal dialog and then leave focus on the body. With no rollback, the
  * placement stands: a cold load ends on `runStart`, which index.html declares
- * `aria-modal="true"` and which the router traps focus inside, and a resumed load
- * ends on `stage`, whose placement lands on the board surface the renderer
+ * `aria-modal="true"` and which the router traps focus inside, and a resumed
+ * load ends on `stage`, whose placement lands on the board surface the renderer
  * mounted. Decisions DL-MAIN-19, DL-ROUTER-26.
  * ========================================================================== */
 
@@ -1400,11 +1400,11 @@ describe('the boot focus placement', () => {
 
     expect(document.getElementById('screen-run-start')?.hidden).toBe(true);
 
-    // THE BOARD, AND NOTHING ROLLS IT BACK. The boot used to blur whatever the
-    // placement had just chosen, which left a load with no focus at all; the
-    // rollback is gone, and the placement resolves to the board surface the
-    // renderer mounted rather than to `.restart-button` — a control no player
-    // asked for. Decisions DL-MAIN-19, DL-ROUTER-26.
+    // THE BOARD, AND NOTHING ROLLS IT BACK. The boot blurs nothing the
+    // placement chose, which would leave a load with no focus at all; the
+    // placement resolves to the board surface the renderer mounted rather than
+    // to `.restart-button` — a control no player asked for. Decisions
+    // DL-MAIN-19, DL-ROUTER-26.
     const active = document.activeElement;
     const board = document.getElementById('board-number-only');
 

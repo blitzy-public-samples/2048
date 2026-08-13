@@ -1,17 +1,14 @@
 // Integration suite for the composition root's SCREEN FLOW, AAP R8.
 //
-// WHAT WAS WRONG
-//   All six screen modules shipped complete and unit tested, and the composition
-//   root built exactly one of them. `src/main.ts` constructed `createHud` and
-//   passed no `screens` registry at all, so `createScreenRouter` fell back to an
-//   empty one: the five overlay roots index.html declares stayed empty for the
-//   whole life of the page, and `createRunStartScreen`,
-//   `createStageProgressScreen`, `createRewardScreen`, `createGameOverScreen` and
-//   `createRunSummaryScreen` were unreachable from the entry point. The boot also
-//   started the machine and opened the board in the same synchronous task, so a
-//   fresh load left `runStart` for `stage` before anything could be painted, and
-//   a second reward renderer inside the router competed with the dedicated screen
-//   for the same container.
+// THE REGISTRY IS PASSED `src/main.ts` hands `createScreenRouter` a populated
+// `screens` registry. Were it to fall back to an empty one, the five overlay
+// roots index.html declares would stay empty for the whole life of the page,
+// and `createRunStartScreen`, `createStageProgressScreen`,
+// `createRewardScreen`, `createGameOverScreen` and `createRunSummaryScreen`
+// would be unreachable from the entry point. The boot also defers opening the
+// board past the task that starts the machine, so a fresh load holds `runStart`
+// long enough to be painted, and the router runs no second reward renderer
+// competing with the dedicated screen for one container.
 //
 // WHAT THIS SUITE PINS
 //   The user-visible flow of AAP Figure 6, driven through the real
@@ -285,9 +282,9 @@ describe('the screen registry', () => {
     expect(el('#hud-stage').textContent?.length ?? 0).toBeGreaterThan(0);
     // The run stored above holds no relic, so the tray carries EXACTLY the
     // empty-state row — one real `<li>` marked as the empty row — and its own
-    // accessible name. `children.length >= 0` stood here, which is true of every
-    // element there has ever been and would have passed for a tray that was
-    // never populated at all.
+    // accessible name. `children.length >= 0` would be true of every element
+    // there has ever been and would pass for a tray never populated at all, so
+    // the row is counted exactly.
     const tray = el('#relic-tray');
 
     expect(tray.getAttribute('aria-label')).toBe(
@@ -328,9 +325,9 @@ describe('the screen registry', () => {
     press('ArrowLeft', 'ArrowLeft');
     el('.stage-progress-continue').click();
 
-    // ONE OWNER. The router used to build a second card list into this same
-    // container, whose own host-level click delegation would have resolved a
-    // pressed card independently and taken the reward twice.
+    // ONE OWNER. The router builds no second card list into this container: its
+    // own host-level click delegation would resolve a pressed card
+    // independently and take the reward twice.
     expect(
       el('#screen-reward').querySelectorAll('.reward-offers').length,
     ).toBe(1);

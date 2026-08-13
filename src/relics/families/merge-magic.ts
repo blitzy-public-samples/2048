@@ -4,12 +4,11 @@
 // Provenance is the vanilla merge branch js/game_manager.js L156-L170, which
 // src/engine/move-resolver.ts ports and dispatches `onMerge` from.
 //
-// CHANGED: one frozen `RelicFamily` and one standing-rule reinstatement
-// function are exported, where the family export was the whole surface. Each
-// relic is plain
-// data carrying the members src/relics/relic-types.ts declares, and behaviour
-// lives in the handlers of its `hooks` table. The declaration order of
-// `relics` is the catalogue order src/relics/relic-registry.ts flattens.
+// The surface is one frozen `RelicFamily` and one standing-rule reinstatement
+// function. Each relic is plain data carrying the members
+// src/relics/relic-types.ts declares, and behaviour lives in the handlers of
+// its `hooks` table. The declaration order of `relics` is the catalogue order
+// src/relics/relic-registry.ts flattens.
 //
 // This module reads no DOM, performs no I/O, consumes no randomness, reads no
 // clock and holds no mutable module state.
@@ -287,17 +286,14 @@ function thawCell(cells: Position[], cell: Position): boolean {
  * does not hold and thawing one it does — and re-records the frozen-cell merge
  * rule over the ledger those two steps produced.
  *
- * ADDED: the thaw of `payload.source`. The only thaw the relic had was the
- * destination toggle below, and the rule it installs refuses precisely the merge
- * that would reach it — a merge INTO a frosted cell — so no legal move could
- * ever thaw anything and a frosted cell stayed frosted for the rest of the run.
- * The installed rule constrains the merge's DESTINATION and never its source, so
- * a frosted cell whose tile slides out and merges elsewhere is reachable by
- * ordinary play, and that is the transition the frost is released on.
+ * THE SOURCE CELL IS THAWED. The installed rule constrains the merge's
+ * DESTINATION and never its source, so the reachable transition is a frosted
+ * cell whose tile slides out and merges elsewhere, and that is the transition
+ * the frost is released on.
  *
- * The destination toggle is KEPT: it is the branch that frosts, and its thaw
- * half remains the defined answer where a merge does land on a frosted cell
- * because a later relic replaced the merge rule outright rather than wrapping it.
+ * The destination toggle is the branch that frosts, and its thaw half is the
+ * defined answer where a merge does land on a frosted cell — which happens when
+ * a later relic replaces the merge rule outright rather than wrapping it.
  *
  * DL-MERGE-04.
  *
@@ -436,13 +432,13 @@ function operandAtValue(operand: MergeTileView, value: number): MergeTileView {
 }
 
 /**
- * ADDED: reinstates `frostbind`'s frozen-cell merge rule on a set of rules
- * REHYDRATED from a persisted slot, dispatching nothing.
+ * Reinstates `frostbind`'s frozen-cell merge rule on a set of rules REHYDRATED
+ * from a persisted slot, dispatching nothing.
  *
  * A reload builds fresh rules carrying the default merge predicate, so the
- * wrapper an earlier session installed is gone while the frosted cells that
- * session persisted are not. This is the non-hook path that puts the wrapper
- * back: it is handed the slot and the live rules by
+ * wrapper a previous session installed is absent while the frosted cells that
+ * session persisted are present. This is the non-hook path that puts the
+ * wrapper back: it is handed the slot and the live rules by
  * `applyStandingRelicRules` of ../relic-registry and never sees a hook, a
  * dispatch context or a charge budget — so a budget spent long ago neither
  * withholds the reinstatement nor is charged for it, and no exhausted handler
@@ -498,15 +494,13 @@ export function reinstateFrostbindRule(
  * refuses such a target: this relic widens WHICH VALUES may merge and nothing
  * else. Without the refusal a produced tile merged a second time in one move.
  *
- * ADDED: A STRUCTURAL DENIAL THE DELEGATE MADE IS INHERITED, NOT OVERRIDDEN.
- * The ladder branch treated every refusal the delegate returned as a refusal
- * about the two face values, so wrapping a delegate that refuses on some OTHER
- * ground — `frostbind`'s wrapper refuses by destination CELL — widened past that
- * ground and admitted a merge onto a frozen cell whenever the pair happened to
- * be a ladder step apart. The two grounds are told apart by asking the delegate
- * the same question with the pair made value-COMPATIBLE: a delegate that still
- * refuses the equal-valued pair standing in the same cells with the same merge
- * history is refusing structurally, and its refusal stands. The probe reads the
+ * A STRUCTURAL DENIAL THE DELEGATE MADE IS INHERITED, NOT OVERRIDDEN. This
+ * relic widens WHICH VALUES may merge, so a delegate refusing on any other
+ * ground — `frostbind`'s wrapper refuses by destination CELL — must still be
+ * obeyed. The two grounds are told apart by asking the delegate the same
+ * question with the pair made value-COMPATIBLE: a delegate that still refuses
+ * the equal-valued pair standing in the same cells with the same merge history
+ * is refusing structurally, and its refusal stands. The probe reads the
  * delegate alone and names no relic, so it composes against any predicate a
  * later relic installs.
  *

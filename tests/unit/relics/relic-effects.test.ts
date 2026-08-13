@@ -413,7 +413,7 @@ describe('frostbind (merge-magic)', () => {
 
     // The board shrinks and the stage begins again, where (3,3) is gone.
     //
-    // CHANGED: driven through the PUBLIC board-effect path. This reached into
+    // Driven through the PUBLIC board-effect path. This reached into
     // `grid.size`, `grid.cells` and `config.boardSize` one field at a time,
     // which is a shape no relic can produce and which cannot detect a
     // divergence between the three writes `applyResize` performs together —

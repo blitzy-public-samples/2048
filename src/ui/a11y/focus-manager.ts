@@ -22,7 +22,7 @@
  *
  * One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of
  * this module's area enumerated:
- *   TR-FOCUS-01  index.html L31, L38, L39      the three hrefless `<a>`
+ *   TR-FOCUS-01  index.html `<a>` controls     the three hrefless `<a>`
  *                                              controls, now `<button>`
  *                                              elements this module orders and
  *                                              contains
@@ -40,8 +40,8 @@
  *   TR-FOCUS-07  target-only row               `ScreenName`, `SCREEN_NAMES` and
  *                                              `isScreenName`
  *
- * Decisions: DL-FOCUS-01, DL-FOCUS-02, DL-FOCUS-03, DL-FOCUS-07
- * (docs/DECISION_LOG.md).
+ * Decisions: DL-FOCUS-01, DL-FOCUS-02, DL-FOCUS-03, DL-FOCUS-06, DL-FOCUS-07,
+ * DL-FOCUS-09 (docs/DECISION_LOG.md).
  */
 
 import {
@@ -115,7 +115,7 @@ const METRIC_RESTORE_FAILED = 'ui.focus.trap.restore_failed';
 const METRIC_TRAP_NO_CONTAINER = 'ui.focus.trap.no_container';
 
 /**
- * ADDED: counter raised once per press that left focus outside the trapped
+ * Counter raised once per press that left focus outside the trapped
  * container and was pulled back — a press on the backdrop, or on any part of a
  * modal surface that takes no focus of its own. DL-FOCUS-07.
  */
@@ -1435,7 +1435,7 @@ function engageTrap(
   };
 
   /**
-   * ADDED: pulls focus back after a press that left it outside the container.
+   * Pulls focus back after a press that left it outside the container.
    *
    * A press on the backdrop — or on any part of a modal surface that takes no
    * focus of its own — moves the active element to the document body, and the
@@ -1523,7 +1523,7 @@ function engageTrap(
     doc.addEventListener('keydown', onKeyDown, true);
     doc.addEventListener('focusin', onFocusIn, true);
 
-    // ADDED: in the bubble phase, unlike the two above. DL-FOCUS-07.
+    // In the bubble phase, unlike the two above. DL-FOCUS-07.
     doc.addEventListener('click', onClick);
   } else {
     reporter.log('warn', 'focus trap has no document to listen on', fields);
@@ -2288,6 +2288,52 @@ function isBoardSize(value: unknown): value is number {
   return isSupportedBoardSize(value);
 }
 
+/** The offset from a zero-based index to the one a person is told. */
+const HUMAN_INDEX_OFFSET = 1;
+
+/**
+ * The ONE statement of how a cell's coordinates are narrated.
+ *
+ * Row first, then column, as `DL-FOCUS-06` settled for this layer: it is the
+ * reading order of the grid, it matches the `role="row"` structure the layer is
+ * built from, and it is the order ../../render/number-only-renderer.ts already
+ * used. It is exported because it was NOT the only statement of that order:
+ * `describeSpawns` of ./live-region.ts narrated the same coordinates as
+ * `column x, row y`, so a screen reader announcing a spawn read the axes in the
+ * opposite order from the board it then had to be found on. One function now
+ * holds the order, and every narration of a cell resolves through it.
+ * DL-FOCUS-09.
+ *
+ * Lowercase, for a phrase used inside a sentence.
+ * `formatCellCoordinatesLeading` is the same phrase leading one.
+ *
+ * @param x Zero-based column.
+ * @param y Zero-based row.
+ * @returns `row R, column C`, one-based.
+ */
+export function formatCellCoordinates(x: number, y: number): string {
+  return (
+    `row ${y + HUMAN_INDEX_OFFSET}, ` +
+    `column ${x + HUMAN_INDEX_OFFSET}`
+  );
+}
+
+/**
+ * `formatCellCoordinates` leading a sentence.
+ *
+ * Delegates rather than restating, so the axis ORDER is stated once and only the
+ * first letter differs between the two forms. DL-FOCUS-09.
+ *
+ * @param x Zero-based column.
+ * @param y Zero-based row.
+ * @returns `Row R, column C`, one-based.
+ */
+export function formatCellCoordinatesLeading(x: number, y: number): string {
+  const phrase = formatCellCoordinates(x, y);
+
+  return `${phrase.charAt(0).toUpperCase()}${phrase.slice(1)}`;
+}
+
 /**
  * The accessible name of one cell.
  *
@@ -2298,6 +2344,10 @@ function isBoardSize(value: unknown): value is number {
  * reading. Row-first is the order kept: it is the reading order of the grid,
  * it matches the `role="row"` structure the layer is built from, and it is the
  * order the number-only layer already used. DL-FOCUS-06.
+ *
+ * The coordinates come from `formatCellCoordinatesLeading` rather than
+ * from a template of their own, so this is no longer one of several places the
+ * axis order is written down. DL-FOCUS-09.
  *
  * @param x Zero-based column.
  * @param y Zero-based row.
@@ -2313,7 +2363,7 @@ function cellLabel(
 ): string {
   const content = value === null ? emptyLabel : String(value);
 
-  return `Row ${y + 1}, column ${x + 1}, ${content}`;
+  return `${formatCellCoordinatesLeading(x, y)}, ${content}`;
 }
 
 /**

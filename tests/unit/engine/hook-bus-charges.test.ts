@@ -141,13 +141,13 @@ describe('HookContext.spendCharge', () => {
   });
 
   it('spends nothing on a handler that returns nothing but changes the payload copy', () => {
-    // CHANGED: the handler now WRITES the transformable member the title claims
-    // it writes. It returned `undefined` and changed nothing, so the case proved
-    // only that a handler doing nothing spends nothing — which the test above it
-    // already proves. `cancelled` is transformable on `onBeforeMove`, the copy
-    // handed to a handler is the handler's own object, and a void return adopts
-    // that copy, so the write below is adopted and the budget is still untouched:
-    // a charge is spent for an ASK, never for a change.
+    // The handler now WRITES the transformable member the title claims it
+    // writes. It returned `undefined` and changed nothing, so the case proved
+    // only that a handler doing nothing spends nothing — which the test above
+    // it already proves. `cancelled` is transformable on `onBeforeMove`, the
+    // copy handed to a handler is the handler's own object, and a void return
+    // adopts that copy, so the write below is adopted and the budget is still
+    // untouched: a charge is spent for an ASK, never for a change.
     const environment = createEnvironment();
     const bus = createHookBus();
 

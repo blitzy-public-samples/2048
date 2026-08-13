@@ -587,9 +587,9 @@ describe('when the context is lost after mounting', () => {
     await waitOutGrace();
     await settleFrames();
 
-    // The defect this closes: the renderer suspends drawing on a loss and
-    // waits for a restoration that may never come, so the board simply froze
-    // for the rest of the session.
+    // What the bounded wait is for: the renderer suspends drawing on a loss and
+    // waits for a restoration that may never come, so without the fallback the
+    // board would stay frozen for the rest of the session.
     expect(application.renderer.mode).toBe('number-only');
     expect(application.renderer.fallback).toBe(true);
     expect(application.preferences.isNumberOnlyForced()).toBe(true);
@@ -846,10 +846,10 @@ describe('when the context comes back after the fallback committed', () => {
     expect(application.renderer.mode).toBe('number-only');
     expect(application.preferences.isNumberOnlyForced()).toBe(true);
 
-    // The defect this closes: the swap destroyed the renderer AND the
-    // `webglcontextrestored` listener it had installed, so a restoration
-    // arriving after the wait reached nobody — while the renderer's own parting
-    // message promised drawing resumes when the context comes back. The root's
+    // Why the root owns the listener: the swap destroys the renderer AND the
+    // `webglcontextrestored` listener it installed, so a restoration arriving
+    // after the wait would reach nobody — while the renderer's own parting
+    // message promises drawing resumes when the context comes back. The root's
     // listener is on the canvas, which outlives every swap. DL-MAIN-33.
     fireContextEvent('webglcontextrestored');
     await settleFrames();

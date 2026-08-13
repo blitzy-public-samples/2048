@@ -4,10 +4,10 @@
 // section apiece: the hooks it fires on, the effect it produces, and the charge
 // budget it carries.
 //
-// CHANGED: this opening said COLUMN and described a single `x` across every `y`,
+// This opening said COLUMN and described a single `x` across every `y`,
 // contradicting both the implementation and the AXIS paragraph fifteen lines
-// below it — a reader who stopped at the first sentence was told the opposite of
-// what the file proves. DL-TEST-14.
+// below it — a reader who stopped at the first sentence was told the opposite
+// of what the file proves. DL-TEST-14.
 //
 // Five relics of the catalogue declare a charge budget — `frostbind` of
 // `merge-magic`, and `temporal-anchor`, `tumbler`, `culling-blade` and

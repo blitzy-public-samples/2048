@@ -112,8 +112,8 @@ import type { RarityTier, ThemeId } from '../../theme/themes';
 import { rarityTiers, resolveRarityColor } from '../../theme/themes';
 
 /**
- * Container this screen renders into, as index.html L99 declares it and as
- * `SCREEN_MOUNTS` of ../screen-router routes it.
+ * Container this screen renders into, as `#screen-reward` of index.html
+ * declares it and as `SCREEN_MOUNTS` of ../screen-router routes it.
  */
 export const REWARD_SCREEN_MOUNT_SELECTOR: string = SCREEN_MOUNTS.reward;
 
@@ -147,9 +147,10 @@ export const REWARD_SCREEN_LAYER: number = zIndex.modal;
  * Entrance the cards carry, read from the `pop` vocabulary of
  * ../../theme/tokens.
  *
- * The keyframes are declared at style/main.scss L756-L768 and bound to
- * `.reward-offer .relic-card` inside style/_reward.scss's `motion-allowed`
- * block, so the stylesheet performs the animation and its suppression. No
+ * The keyframes are declared by `@include keyframes(pop)` of style/main.scss
+ * and bound to `.reward-offer .relic-card` inside style/_reward.scss's
+ * `motion-allowed` block, so the stylesheet performs the animation and its
+ * suppression. No
  * duration, delay, easing or overshoot is restated here.
  */
 export const REWARD_SCREEN_ENTRANCE = Object.freeze({
@@ -451,6 +452,11 @@ export interface RewardScreen extends Screen {
   /**
    * The rarity accents under the palette in force, sampled off the shared ramp
    * by `resolveRarityColor` of ../../theme/themes. No colour is declared here.
+   *
+   * The BARE accents. The cards paint the card-surface variant instead —
+   * `--theme-rarity-<tier>-card`, resolved by `resolveRarityCardColor` — so
+   * these are a sample of the ramp rather than a reading of the screen.
+   * DL-THEME-11.
    *
    * @returns One 6-digit hex per tier, and an empty string for a tier that
    *   could not be sampled, which is reported.
@@ -1004,9 +1010,10 @@ export function createRewardScreen(
    * Verifies the dialog semantics index.html declares on the container, and
    * supplies one only where the markup carries none.
    *
-   * index.html L99 already declares `role="dialog"`, `aria-modal="true"` and
-   * `aria-label="Choose a relic"`, so this writes nothing in the shipped
-   * markup; each value it does have to supply is reported.
+   * `#screen-reward` of index.html already declares `role="dialog"`,
+   * `aria-modal="true"` and `aria-label="Choose a relic"`, so this writes
+   * nothing in the shipped markup; each value it does have to supply is
+   * reported.
    *
    * @param host Container in force.
    */

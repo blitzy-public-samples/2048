@@ -81,14 +81,12 @@ export interface StorageErrorInfo {
   readonly quota: boolean;
 
   /**
-   * ADDED: whether this failure is the stored TEXT failing to parse as JSON.
+   * Whether this failure is the stored TEXT failing to parse as JSON.
    *
    * Tagged at the one `JSON.parse` call site and `false` on every other
    * description this module makes, so provenance is CARRIED rather than
-   * inferred. It was inferred from `name === 'SyntaxError'`, which
-   * `JSON.parse` is not the only source of: a `toJSON` member, a replacer, or
-   * an injected store method can raise one on a write, a probe or a removal,
-   * and a lost write was then described as a recovered read of a corrupt value.
+   * inferred from `name === 'SyntaxError'`: a `toJSON` member, a replacer or an
+   * injected store method can raise that name on a write, a probe or a removal.
    *
    * A consumer tiering its report on recoverability reads THIS and not the name:
    * a value that did not parse is a read the caller recovered from, while any
@@ -183,24 +181,20 @@ const UNKNOWN_ERROR_MESSAGE = 'Unknown storage error.';
 /**
  * The name a stored value that is not valid JSON is reported under.
  *
- * CHANGED: this is the name such a failure CARRIES, and no longer the way one is
- * IDENTIFIED. `JSON.parse` is not the only source of a `SyntaxError` reachable
- * from this module — a `toJSON` member, a replacer or an injected store method
- * can raise one during a write, a probe or a removal — so a consumer deciding
- * whether a value was merely unreadable reads `StorageErrorInfo.parse`, which is
- * tagged at the parse call site. Kept exported because the name is still part of
- * the reported record. DL-STORE-09.
+ * This is the name such a failure CARRIES, not the way one is IDENTIFIED.
+ * `JSON.parse` is not the only source of a `SyntaxError` reachable from this
+ * module — a `toJSON` member, a replacer or an injected store method can raise
+ * one during a write, a probe or a removal — so a consumer deciding whether a
+ * value was merely unreadable reads `StorageErrorInfo.parse`, which is tagged
+ * at the parse call site. Exported because the name is part of the reported
+ * record. DL-STORE-09.
  */
 export const PARSE_ERROR_NAME = 'SyntaxError';
 
 /**
- * ADDED: public message for a stored value that is not valid JSON.
- *
- * The parse failure used to fall through to `UNKNOWN_ERROR_NAME` and be
- * reported as "Unknown storage error." — a description that named neither the
- * cause nor the consequence for the one storage fault a corrupted origin
- * actually produces. The caught `SyntaxError` still travels unconverted as
- * `thrown`; this is the bounded description beside it.
+ * Public message for a stored value that is not valid JSON, which is the one
+ * storage fault a corrupted origin actually produces. The caught `SyntaxError`
+ * travels unconverted as `thrown`; this is the bounded description beside it.
  */
 const PARSE_ERROR_MESSAGE =
   'The stored value is not valid JSON; it was ignored.';
@@ -397,14 +391,12 @@ interface ParsedEntry {
   readonly parsed: unknown;
 
   /**
-   * ADDED: whether `raw` FAILED to parse.
+   * Whether `raw` FAILED to parse.
    *
-   * A failed parse used to drop the memo, so the same unreadable text was
-   * re-parsed and re-reported on every read — and two consumers reading one key
-   * at boot produced two records of a single corrupt value. Remembering the
-   * failure makes the record authoritative: one per distinct stored text, with
-   * the re-parse cost paid once. `raw` still gates it, so a value replaced by
-   * another tab is read afresh.
+   * The failure is remembered, not dropped, so an unreadable text is parsed and
+   * reported once per distinct stored value rather than once per read — two
+   * consumers reading one corrupt key at boot produce one record. `raw` gates
+   * it, so a value replaced by another tab is read afresh.
    */
   readonly failed: boolean;
 }
@@ -499,10 +491,9 @@ function errorMessage(name: string, quota: boolean, parse: boolean): string {
     return QUOTA_ERROR_MESSAGE;
   }
 
-  // CHANGED: the parse description is chosen from the CALLER'S tag, where it was
-  // chosen from `name === PARSE_ERROR_NAME`. A `SyntaxError` raised anywhere but
-  // the parse was described as an unreadable stored value, which is a
-  // description of a different event than the one that happened.
+  // The parse description is chosen from the CALLER'S tag, not from `name ===
+  // PARSE_ERROR_NAME`, so a `SyntaxError` raised anywhere but the parse is not
+  // described as an unreadable stored value.
   if (parse) {
     return PARSE_ERROR_MESSAGE;
   }
@@ -931,13 +922,12 @@ export class LocalStorageManager {
 
       return parsed;
     } catch (error) {
-      // CHANGED: the failure is REMEMBERED against the text that produced it,
-      // where the memo used to be dropped.
+      // The failure is REMEMBERED against the text that produced it.
       this.parsed.set(key, { raw, parsed: null, failed: true });
 
-      // ADDED: the `true` is the tag. This is the ONE place in the module where
-      // a stored text failed to parse, so it is the one place that says so, and
-      // a consumer no longer has to read the error's name to guess. DL-STORE-09.
+      // The `true` is the tag. This is the ONE place in the module where a
+      // stored text fails to parse, so it is the one place that says so and a
+      // consumer never has to read the error's name to tell. DL-STORE-09.
       this.reportFailure('read', key, error, true);
 
       return null;
@@ -1097,10 +1087,10 @@ export class LocalStorageManager {
    * @param operation Operation that failed.
    * @param key Key it targeted.
    * @param error Caught value, of any type.
-   * @param parse ADDED: whether `error` was caught at the `JSON.parse` of a
-   *   stored text. Defaults to `false`, so a call site that says nothing
-   *   describes an operation that failed rather than a value that would not
-   *   read — the one call site that passes `true` is `readJson`'s parse catch.
+   * @param parse Whether `error` was caught at the `JSON.parse` of a stored
+   * text. Defaults to `false`, so a call site that says nothing describes an
+   * operation that failed rather than a value that would not read; the one call
+   * site passing `true` is `readJson`'s parse catch.
    */
   private reportFailure(
     operation: StorageOperation,

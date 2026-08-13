@@ -8,31 +8,34 @@
 //
 // One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of
 // this module's area enumerated:
-//   TR-MATERIAL-01  style/main.scss L334-L402  the generated tile fill, read
-//                                              through src/theme/tile-ramp.ts
-//                                              and transferred by
-//                                              `resolveTileFill()`
-//   TR-MATERIAL-02  style/main.scss L334-L402  the bright-text threshold, as
-//                                              `resolveTileNumeralColor()`
-//   TR-MATERIAL-03  style/main.scss L360-L370  the outer halo shadow, as the
-//                                              emissive colour and intensity
-//   TR-MATERIAL-04  style/main.scss L360-L370  the inset white ring, as the
-//                                              roughness reduction scaled by
-//                                              `insetAlpha`
-//   TR-MATERIAL-05  style/main.scss L339-L349  the accent overlay's suppressed
-//                                              shadow, as the flat material
-//                                              `glowSuppressed` gates
+//   TR-MATERIAL-01  style/main.scss               the generated tile fill, read
+//                   ramp loop                     through
+//                                                 src/theme/tile-ramp.ts and
+//                                                 transferred by
+//                                                 `resolveTileFill()`
+//   TR-MATERIAL-02  style/main.scss               the bright-text threshold, as
+//                   ramp loop                     `resolveTileNumeralColor()`
+//   TR-MATERIAL-03  style/main.scss               the outer halo shadow, as the
+//                   $glow-opacity                 emissive colour and intensity
+//   TR-MATERIAL-04  style/main.scss               the inset white ring, as the
+//                   $glow-opacity                 roughness reduction scaled by
+//                                                 `insetAlpha`
+//   TR-MATERIAL-05  style/main.scss               the accent overlay's
+//                   $special-colors               suppressed shadow, as the
+//                                                 flat material
+//                                                 `glowSuppressed` gates
 //   TR-MATERIAL-06  style/main.scss `.grid-cell`  the empty-cell plate at 35%
-//                                              alpha, as the pre-composited or
-//                                              transparent plate material
-//   TR-MATERIAL-07  target-only row             `createTileMaterialCache()`,
-//                                              one material per distinct value
-//   TR-MATERIAL-08  target-only row             the colour conversions
-//                                              `readThemeColor()`,
-//                                              `compositeOver()`,
-//                                              `toThreeColor()`,
-//                                              `fromThreeColor()` and
-//                                              `formatThreeColor()`
+//                                                 alpha, as the pre-composited
+//                                                 or transparent plate material
+//   TR-MATERIAL-07  target-only row               `createTileMaterialCache()`,
+//                                                 one material per distinct
+//                                                 value
+//   TR-MATERIAL-08  target-only row               the colour conversions
+//                                                 `readThemeColor()`,
+//                                                 `compositeOver()`,
+//                                                 `toThreeColor()`,
+//                                                 `fromThreeColor()` and
+//                                                 `formatThreeColor()`
 //
 // Decisions: DL-MATERIAL-01, DL-MATERIAL-02, DL-MATERIAL-03, DL-MATERIAL-04,
 // DL-RAMP-02, DL-RAMP-04 (docs/DECISION_LOG.md).
@@ -639,8 +642,8 @@ function readTileRoughness(
 }
 
 /**
- * ADDED: the largest emissive intensity that leaves every channel of the lit
- * fill unsaturated — the headroom the fill itself leaves.
+ * The largest emissive intensity that leaves every channel of the lit fill
+ * unsaturated — the headroom the fill itself leaves.
  *
  * Both colours are read in the linear working space Three.js holds them in, so
  * the sum this bounds is the sum the renderer performs. A channel the emissive
@@ -713,18 +716,13 @@ function applyTileMaterial(
     material.emissive,
   );
 
-  // CHANGED: the halo alpha now selects a SHARE OF THE HEADROOM the fill leaves,
-  // where it was the intensity itself.
-  //
-  // Every fill from 128 up carries the ramp's shared red anchor, so an intensity
-  // taken from the halo alpha alone drove red past its ceiling for all five of
-  // them: the five faces rendered with an identical saturated red, the last two
-  // steps separated by less than one just-noticeable difference, and the numeral
-  // ratio on 2048 fell to 1.05:1 where the fill's own is 1.58:1. Bounding the
-  // term by the headroom keeps the progression — the share still rises with the
-  // exponent — while the fill the ramp states survives the addition, which is
-  // what style/main.scss L334-L402 describes: an OUTER halo and an inset
-  // highlight, neither of which tints the fill. DL-MATERIAL-04.
+  // The halo alpha selects a SHARE OF THE HEADROOM the fill leaves, not the
+  // intensity itself. Every fill from 128 up carries the ramp's shared red
+  // anchor, so bounding the term by the headroom keeps the progression — the
+  // share still rises with the exponent — while leaving the fill the ramp
+  // states intact. That is what the ramp loop of style/main.scss describes: an
+  // OUTER halo and an inset highlight, neither of which tints the fill.
+  // DL-MATERIAL-04.
   material.emissiveIntensity =
     confineAlpha(confineAlpha(tileTheme.haloAlpha) * response.emissiveScale) *
     emissiveHeadroom(material.color, material.emissive);

@@ -5,6 +5,21 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>2048 Roguelike — Executive Summary</title>
 
+    <!-- A Content Security Policy, declared ahead of every element it
+         governs, so what the pinned third-party code in this file is ABLE to
+         reach is bounded by the document rather than by that code's own good
+         behaviour. Scripts may come from the one pinned CDN origin and from
+         this file; stylesheets from that origin, Google Fonts and this file;
+         fonts from Google's font host; and nothing may open a network
+         connection, a frame, a plugin, a form target or a new base URL.
+         `'unsafe-inline'` is stated for scripts and styles because a single
+         self-contained no-build file IS inline code, and because Mermaid
+         injects a `<style>` element per figure. DL-DOC-11. -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src https://cdn.jsdelivr.net 'unsafe-inline'; style-src https://cdn.jsdelivr.net https://fonts.googleapis.com 'unsafe-inline'; font-src https://fonts.gstatic.com; img-src data:; connect-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'none'; object-src 'none'"
+    />
+
     <!-- Single self-contained artifact. Every external reference below is an
          absolute, version-pinned CDN URL; the Blitzy theme is inlined rather
          than linked, so this file carries no local dependency and stays
@@ -25,8 +40,8 @@
 
          and prefix the result with `sha384-`. Take it from TWO independent
          mirrors of the same package — jsdelivr and unpkg both serve npm — and
-         use the value only if they agree; a hash read from one host alone is
-         that host's word for it. The four below were taken that way and agreed.
+         use the value only if they agree. The four below were taken that way
+         and agreed.
 
          The Google Fonts stylesheet below is deliberately NOT hashed: it is
          generated per user agent, so its bytes differ between browsers and no
@@ -36,14 +51,11 @@
          transitions. No bundled reveal theme is loaded, so nothing competes
          with the inlined Blitzy identity below.
 
-         Every jsdelivr resource in this file carries a sha384 Subresource
-         Integrity hash of the exact pinned bytes, with `crossorigin` and
-         `referrerpolicy`, so a version-pinned URL that ever served different
-         bytes is refused rather than executed. The pins themselves are the ones
-         the executive-presentation rule states; the Mermaid pin, its published
-         advisories and the escalation that owns them are DL-DOC-09 in
-         docs/DECISION_LOG.md. Google Fonts is deliberately not integrity-pinned:
-         it negotiates its CSS per user agent, so a fixed hash would block it. -->
+         The integrity contract every subresource here follows is stated once,
+         above. The pins themselves are the ones the executive-presentation rule
+         states; the Mermaid pin, its published advisories, the conditions the
+         exposure is accepted under and the owner who holds the decision to move
+         it are DL-DOC-09 in docs/DECISION_LOG.md. -->
     <link
       rel="stylesheet"
       href="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reveal.css"
@@ -589,8 +601,8 @@
         min-height: 0;
       }
 
-      /* In the side column the legend and its note stack, because the column is
-         narrow: only a full-width figure puts them side by side. */
+      /* In the side column the legend and its note STACK; a full-width figure
+         puts them side by side. Decision `DL-DOC-12`. */
       .figure-split .figure-foot {
         display: block;
       }
@@ -869,7 +881,7 @@
                 <span class="kpi-icon" aria-hidden="true"
                   ><i data-lucide="list-checks"></i
                 ></span>
-                <span class="kpi-value">5</span>
+                <span class="kpi-value">7</span>
                 <p class="kpi-label">Automated gates</p>
                 <p class="kpi-note">review by eye was the only one</p>
               </div>
@@ -1042,12 +1054,11 @@ graph TD
           </div>
         </section>
 
-        <!-- 6. Content — the replacement map.
+        <!-- 6. Content — the replacement map and the delivery sequence.
              Figure 8 is reproduced verbatim from docs/TRACEABILITY_MATRIX.md,
-             which is its canonical home. The two dense tables this slide used
-             to carry are the figure and slide 7 respectively; the row-level
-             detail they summarised was never the deck's to hold.
-             Decision `DL-DOC-09`. -->
+             which is its canonical home. The phase table beside it is this
+             deck's own summary of the delivery order. One slide carries both;
+             the deck holds sixteen sections. Decision `DL-DOC-12`. -->
         <section>
           <div class="slide-inner">
             <div class="slide-head">
@@ -1057,92 +1068,96 @@ graph TD
               </p>
               <h2>Figure 8 — File Transformation Map</h2>
             </div>
-            <div class="kpi-grid">
-              <div class="kpi-card">
-                <span class="kpi-icon" aria-hidden="true"
-                  ><i data-lucide="archive"></i
-                ></span>
-                <span class="kpi-value">13</span>
-                <p class="kpi-label">Files retired</p>
-                <p class="kpi-note">successor sets documented</p>
-              </div>
-              <div class="kpi-card">
-                <span class="kpi-icon" aria-hidden="true"
-                  ><i data-lucide="boxes"></i
-                ></span>
-                <span class="kpi-value">68</span>
-                <p class="kpi-label">Typed modules now</p>
-                <p class="kpi-note">engine, render, run, screens</p>
-              </div>
-              <div class="kpi-card">
-                <span class="kpi-icon" aria-hidden="true"
-                  ><i data-lucide="milestone"></i
-                ></span>
-                <span class="kpi-value">4</span>
-                <p class="kpi-label">Phases shipped</p>
-                <p class="kpi-note">each shipped playable</p>
-              </div>
-              <div class="kpi-card">
-                <span class="kpi-icon" aria-hidden="true"
-                  ><i data-lucide="pause"></i
-                ></span>
-                <span class="kpi-value">0</span>
-                <p class="kpi-label">Stretch items built</p>
-                <p class="kpi-note">deferred by decision</p>
-              </div>
-            </div>
-            <p class="source-note">
-              Mapped in docs/TRACEABILITY_MATRIX.md
-            </p>
-          </div>
-        </section>
-
-        <!-- 7. Content — the delivery sequence.
-             This diagram is authored for the deck rather than reproduced: no
-             documentation figure carries the phase order. Decision
-             `DL-DOC-09`. -->
-        <section>
-          <div class="slide-inner">
-            <div class="slide-head">
-              <p class="eyebrow">
-                <i data-lucide="git-commit-horizontal" aria-hidden="true"></i>
-                Sequence
-              </p>
-              <h2>
-                Delivery Sequence — Four Phases, Each Leaving A Game That Ran
-              </h2>
-            </div>
+            <div class="figure-split">
+              <div class="figure-pane">
 <pre class="mermaid">
 graph LR
-  P1["Foundation<br/>typed engine split from the screen,<br/>rules moved into configuration,<br/>replay from a seed, first test suites"]
-  P2["2.5D<br/>subscribing renderer,<br/>animated block merges,<br/>camera and lighting"]
-  P3["Roguelike<br/>relic system, stage goals,<br/>reward screen, run summary"]
-  P4["Polish<br/>full screen flow, themes,<br/>sound and accessibility"]
-  P5["Stretch<br/>deferred by decision"]
-  P1 --> P2 --> P3 --> P4
-  P4 -.-> P5
-  P1 --> G1(["Plays identically<br/>to the original"])
-  P2 --> G2(["The same game,<br/>rendered as blocks"])
-  P3 --> G3(["Run-based,<br/>with relics"])
-  P4 --> G4(["Shippable"])
+    subgraph Before["Existing js/ - all deleted"]
+        A1["application.js"]
+        A2["game_manager.js"]
+        A3["grid.js"]
+        A4["tile.js"]
+        A5["html_actuator.js"]
+        A6["keyboard_input_manager.js"]
+        A7["local_storage_manager.js"]
+        A8["3 polyfills"]
+    end
+    subgraph After["New src/ targets"]
+        B1["main.ts"]
+        B2["engine/engine.ts + move-resolver.ts<br/>+ terminal-state.ts + engine-events.ts"]
+        B3["engine/grid.ts"]
+        B4["engine/tile.ts"]
+        B5["render/* - 10 modules"]
+        B6["input/* - 4 modules"]
+        B7["storage/* - 3 modules"]
+        B8["removed - modern baseline"]
+        B9["engine/hook-bus.ts + hooks.ts"]
+        B10["config/* + rng/* + run/*"]
+    end
+    A1 --> B1
+    A2 --> B2
+    A2 -.->|"extracted literals"| B10
+    A2 -.->|"bus semantics extended"| B9
+    A3 --> B3
+    A4 --> B4
+    A5 --> B5
+    A6 --> B6
+    A6 -.->|"pub/sub pattern"| B9
+    A7 --> B7
+    A8 --> B8
+    STYLE1["style/main.css - deleted"] --> STYLE2["generated by build"]
+    STYLE3["style/main.scss - updated"] --> STYLE4["_tokens.scss + theme/tokens.ts<br/>+ theme/tile-ramp.ts"]
+%% Legend
+%% Solid arrow: primary one-to-one or one-to-many port target
+%% Dotted arrow: pattern or value extracted into a different module
 </pre>
-            <div class="figure-foot">
-              <div class="diagram-legend">
-                <span class="legend-title">Legend for Delivery Sequence</span>
-                <p>
-                  Solid arrow · the phase that followed. Dotted arrow · deferred.
-                  Rounded node · what the phase left running.
-                </p>
               </div>
-              <p class="figure-note">
-                Delivery Sequence reads left to right; no phase left the game
-                broken.
-              </p>
+              <div class="figure-side">
+                <table class="styled-table compact">
+                  <caption>Four phases, each playable</caption>
+                  <thead>
+                    <tr>
+                      <th scope="col">Phase</th>
+                      <th scope="col">Left running</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr>
+                      <td>Foundation</td>
+                      <td class="now">As before</td>
+                    </tr>
+                    <tr>
+                      <td>2.5D</td>
+                      <td class="now">Animated blocks</td>
+                    </tr>
+                    <tr>
+                      <td>Roguelike</td>
+                      <td class="now">Relics per run</td>
+                    </tr>
+                    <tr>
+                      <td>Polish</td>
+                      <td class="now">Shippable</td>
+                    </tr>
+                  </tbody>
+                </table>
+                <div class="figure-foot">
+                  <div class="diagram-legend">
+                    <span class="legend-title">Legend for Figure 8</span>
+                    <p>
+                      Solid arrow · principal successor. Dotted arrow ·
+                      extracted pattern.
+                    </p>
+                  </div>
+                  <p class="figure-note">
+                    Figure 8 maps every retired file.
+                  </p>
+                </div>
+              </div>
             </div>
           </div>
         </section>
 
-        <!-- 8. Section divider -->
+        <!-- 7. Section divider -->
         <section class="slide-divider">
           <div class="slide-inner">
             <span class="divider-icon" aria-hidden="true"
@@ -1157,10 +1172,9 @@ graph LR
           </div>
         </section>
 
-        <!-- 9. Content — business value.
-             The five before-and-after rows this slide carried as a table are
-             the diagram below; the table copy was what put the slide over the
-             body-word limit. Decision `DL-DOC-09`. -->
+        <!-- 8. Content — business value.
+             Four claims, one per outcome — replay, gates, reach, hosting — and
+             an icon row naming each. Decision `DL-DOC-12`. -->
         <section>
           <div class="slide-inner">
             <div class="slide-head">
@@ -1172,7 +1186,7 @@ graph LR
             </div>
             <ul>
               <li>A run replays from its seed and ordered moves.</li>
-              <li>Five automated gates replace review by eye.</li>
+              <li>Seven automated gates replace review by eye.</li>
               <li>The board is keyboard and screen-reader reachable.</li>
               <li>Hosting stays free and static.</li>
             </ul>
@@ -1205,7 +1219,7 @@ graph LR
           </div>
         </section>
 
-        <!-- 10. Section divider -->
+        <!-- 9. Section divider -->
         <section class="slide-divider">
           <div class="slide-inner">
             <span class="divider-icon" aria-hidden="true"
@@ -1220,7 +1234,7 @@ graph LR
           </div>
         </section>
 
-        <!-- 11. Content — component interaction.
+        <!-- 10. Content — component interaction.
              Figure 3 is reproduced verbatim from
              docs/architecture/component-interaction.md, its canonical home. -->
         <section>
@@ -1280,7 +1294,7 @@ graph LR
           </div>
         </section>
 
-        <!-- 12. Content — turn data flow.
+        <!-- 11. Content — turn data flow.
              Figure 4 is reproduced verbatim from
              docs/architecture/data-flow.md, its canonical home. -->
         <section>
@@ -1352,7 +1366,7 @@ flowchart TD
           </div>
         </section>
 
-        <!-- 13. Section divider -->
+        <!-- 12. Section divider -->
         <section class="slide-divider">
           <div class="slide-inner">
             <span class="divider-icon" aria-hidden="true"
@@ -1367,11 +1381,9 @@ flowchart TD
           </div>
         </section>
 
-        <!-- 14. Content — risks and mitigations.
-             The five risk-and-mitigation pairs were a table whose cells were
-             whole sentences, which is what put this slide furthest over the
-             body-word limit; they are the diagram below, paired one to one.
-             Decision `DL-DOC-09`. -->
+        <!-- 13. Content — risks and mitigations.
+             FIVE risk-and-mitigation pairs, one `.step` each, paired one to
+             one, and counted by the divider before it. Decision `DL-DOC-12`. -->
         <section>
           <div class="slide-inner">
             <div class="slide-head">
@@ -1410,6 +1422,13 @@ flowchart TD
                 <span class="step-title">Design freeze superseded</span>
                 <p class="step-body">Original theme stays default</p>
               </div>
+              <div class="step">
+                <span class="step-icon" aria-hidden="true"
+                  ><i data-lucide="video-off"></i
+                ></span>
+                <span class="step-title">Black recording</span>
+                <p class="step-body">Pinned flags, decoded frames</p>
+              </div>
             </div>
             <p class="source-note">
               Recorded in docs/DECISION_LOG.md
@@ -1417,7 +1436,7 @@ flowchart TD
           </div>
         </section>
 
-        <!-- 15. Section divider -->
+        <!-- 14. Section divider -->
         <section class="slide-divider">
           <div class="slide-inner">
             <span class="divider-icon" aria-hidden="true"
@@ -1432,11 +1451,9 @@ flowchart TD
           </div>
         </section>
 
-        <!-- 16. Content — operational readiness and onboarding.
-             The readiness rows are stated at reading length rather than at
-             sentence length, which is what brought this slide inside the
-             body-word limit; docs/OBSERVABILITY.md carries the account.
-             Decision `DL-DOC-09`. -->
+        <!-- 15. Content — operational readiness and onboarding.
+             Three commands — install, build, deploy — and the three claims
+             docs/OBSERVABILITY.md carries in full. Decision `DL-DOC-12`. -->
         <section>
           <div class="slide-inner">
             <div class="slide-head">
@@ -1477,7 +1494,7 @@ flowchart TD
           </div>
         </section>
 
-        <!-- 17. Closing -->
+        <!-- 16. Closing -->
         <section class="slide-closing">
           <div class="slide-inner">
             <p class="eyebrow">
@@ -1486,7 +1503,7 @@ flowchart TD
             </p>
             <h2>Shipped, Observable, Ready To Extend</h2>
             <ul>
-              <li>Take the recorded run as the acceptance artifact.</li>
+              <li>Watch the recorded run beside the gates that read it.</li>
               <li>Quote the seed and ordered moves in defect reports.</li>
               <li>Stretch scope stays deferred until it is prioritised.</li>
             </ul>
@@ -1517,9 +1534,13 @@ flowchart TD
       crossorigin="anonymous"
       referrerpolicy="no-referrer"
     ></script>
+    <!-- Mermaid 11.16.1, not the 11.4.0 the executive-presentation rule pins:
+         11.4.0 sits inside published advisory ranges and 11.16.1 is the patched
+         release. The hash below is of 11.16.1's bytes, taken from jsdelivr and
+         unpkg and agreeing. Decision `DL-DOC-09`. -->
     <script
-      src="https://cdn.jsdelivr.net/npm/mermaid@11.4.0/dist/mermaid.min.js"
-      integrity="sha384-Wm9qzEgq4j1jEnuFK2FxKTlwuhbV2QqtGhcchvjDoKxeJ7WWAW7fysBq+1s6myfX"
+      src="https://cdn.jsdelivr.net/npm/mermaid@11.16.1/dist/mermaid.min.js"
+      integrity="sha384-aBQXj4hK6Jm05i7aQAsUV3bLdSUrHX1BGYfMB0166TtWt/RRaw+h0Eelme9OCOvy"
       crossorigin="anonymous"
       referrerpolicy="no-referrer"
     ></script>
@@ -1534,18 +1555,30 @@ flowchart TD
       (function () {
         'use strict';
 
-        // Mermaid renders on demand rather than on load, so reveal.js decides
-        // when a figure is drawn: `mermaid.run()` over the hosts belonging to
-        // the current slide, marked by Mermaid's own `data-processed`.
-        // DL-DOC-07.
+        // `startOnLoad: false`, so reveal.js decides when a figure is drawn:
+        // `mermaid.run()` over the current slide's hosts, marked by Mermaid's
+        // own `data-processed`. DL-DOC-07.
         //
         // `securityLevel` is stated rather than left to the default: every
         // diagram source in this file is authored here, and the strict level is
         // what keeps that true if a later default ever loosened. DL-DOC-09.
+        //
+        // The configuration below is the ONLY configuration this deck ever
+        // hands the library, it is a literal authored in this file, and it is
+        // passed exactly once. Nothing here reads a query string, a hash, a
+        // storage value or any other outside source into it, so the advisory
+        // class that turns a caller-supplied configuration into a prototype
+        // write has no input to work with. DL-DOC-11.
+        //
+        // `htmlLabels: false` is stated for the same reason. The strict level
+        // already implies it, so this changes no rendering; what it does is close
+        // the label-injection half of the pinned release's advisories at the call
+        // site rather than by a default. DL-DOC-09, DL-TEST-18.
         if (window.mermaid) {
           window.mermaid.initialize({
             startOnLoad: false,
             securityLevel: 'strict',
+            htmlLabels: false,
             theme: 'base',
             themeVariables: {
               primaryColor: '#F2F0FE',
@@ -1594,6 +1627,35 @@ flowchart TD
           return null;
         }
 
+        /**
+         * Whether `host` is one of the figure hosts THIS FILE authored, with its
+         * authored source put back when the node no longer carries it.
+         *
+         * The registry above was a recovery aid; it is now the gate. A
+         * host is drawn only if it was present when this script first ran — the
+         * capture happens before reveal.js is initialised — and its text is
+         * reset to the captured source whenever the two differ. So the only
+         * diagram source the library is ever handed is source authored here,
+         * whatever else reaches the document afterwards. DL-DOC-11.
+         *
+         * @param host A candidate figure host.
+         * @returns `true` when the host is authored and now carries its
+         *   authored source.
+         */
+        function authored(host) {
+          var source = sourceOf(host);
+
+          if (source === null) {
+            return false;
+          }
+
+          if (host.innerHTML !== source) {
+            host.innerHTML = source;
+          }
+
+          return true;
+        }
+
         /** Re-measures the stage once a figure has changed size. */
         function relayout() {
           try {
@@ -1606,13 +1668,22 @@ flowchart TD
         }
 
         /**
-         * Figures on the slide currently on screen that have not been drawn.
+         * Authored figures on the slide currently on screen that have not been
+         * drawn.
          *
-         * Scoping the batch this way is load-bearing rather than an
-         * optimisation: Mermaid measures edge geometry in the live document, and
-         * a host inside a hidden slide measures zero, which makes label
-         * placement fail. Only a slide that is actually displayed can be
-         * measured, so only its figures are handed over.
+             * Scoping the batch this way is load-bearing rather than an
+             * optimisation: ONLY A DISPLAYED SLIDE CAN BE MEASURED. reveal.js holds
+             * every other slide at `display: none`, and Mermaid reads edge geometry
+             * from the live document, so a host in a hidden slide measures zero and
+             * label placement fails. The batch is therefore the current slide's
+             * undrawn hosts and nothing else. Decision `DL-DOC-07`.
+             *
+             * The batch is filtered through `authored`, so a host this file did not
+             * author — or an authored host whose text has been replaced — is never
+             * handed to the library as diagram source. A node that fails the filter
+             * is never drawn, and stays invisible under the
+             * `:not([data-processed])` rule above rather than showing its own text.
+             * DL-DOC-11.
          */
         function pendingFigures() {
           var slide = null;
@@ -1627,15 +1698,16 @@ flowchart TD
             return [];
           }
 
-          return Array.prototype.slice.call(
-            slide.querySelectorAll(MERMAID_SELECTOR + ':not([data-processed])'),
-          );
+          return Array.prototype.slice
+            .call(slide.querySelectorAll(MERMAID_SELECTOR + ':not([data-processed])'))
+            .filter(authored);
         }
 
         /**
          * Returns a host to its undrawn state when Mermaid left an error graphic
-         * behind, so the next visit to that slide can draw it again instead of
-         * being skipped forever by the processed marker.
+         * behind: the processed marker is removed and the authored source
+         * restored, so the next visit to that slide draws it again.
+         * Decision `DL-DOC-07`.
          */
         function recover(hosts) {
           var index = 0;
@@ -1779,9 +1851,14 @@ flowchart TD
           hosts = pendingFigures();
 
           if (hosts.length === 0) {
-            // The call still happens on every event, so a figure added to the
-            // slide later is picked up without any other change.
-            window.mermaid.run({ nodes: hosts }).then(relayout, relayout);
+            // The library is no longer called at all when this slide
+            // has no authored figure left to draw. The call it replaces passed
+            // an empty batch on every event so that a figure added to the slide
+            // LATER would be picked up — which is precisely the door the
+            // authored-figure gate closes, and the empty batch drew nothing in
+            // any case. The layout pass it existed to chain is taken directly.
+            // DL-DOC-11.
+            relayout();
 
             return;
           }

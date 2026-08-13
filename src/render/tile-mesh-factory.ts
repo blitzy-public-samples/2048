@@ -8,23 +8,23 @@
 //
 // One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of
 // this module's area enumerated:
-//   TR-MESH-01  index.html L43-L68            the sixteen static `.grid-cell`
-//                                             elements, replaced by the
+//   TR-MESH-01  index.html                    the sixteen static `.grid-cell`
+//               .grid-cell                    elements, replaced by the
 //                                             generated board
-//   TR-MESH-02  index.html L70-L72            the empty `.tile-container`,
-//                                             replaced by the tile layer of
+//   TR-MESH-02  index.html                    the empty `.tile-container`,
+//               .tile-container               replaced by the tile layer of
 //                                             `BoardMeshes`
 //   TR-MESH-03  js/html_actuator.js L97-L104  `normalizePosition` and
 //                                             `positionClass`, ported as
 //                                             `cellToWorld()` and
 //                                             `cellToWorldIn()`
-//   TR-MESH-04  style/main.scss L171-L194     the field geometry, as
-//                                             `resolveBoardGeometry()`
-//   TR-MESH-05  style/main.scss L475-L548     the mobile scale, selected once
-//                                             per factory through
+//   TR-MESH-04  style/main.scss               the field geometry, as
+//               game-field mixin              `resolveBoardGeometry()`
+//   TR-MESH-05  style/main.scss               the mobile scale, selected once
+//               mobile block                  per factory through
 //                                             `geometryScales`
-//   TR-MESH-06  style/main.scss L404-L430     the tile numeral sizes, as
-//                                             `resolveNumeralLayout()` and
+//   TR-MESH-06  style/main.scss               the tile numeral sizes, as
+//               numeral rules                 `resolveNumeralLayout()` and
 //                                             `NumeralLayout`
 //   TR-MESH-07  target-only row               the extruded block geometry and
 //                                             `tileOutlineSize()`

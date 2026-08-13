@@ -383,8 +383,8 @@ describe('a tween group follows the preference while it is alive', () => {
 
     expect(group.clear()).toBe(1);
 
-    // The defect: `clear` released without completing, leaving the surface the
-    // tween drove frozen part-way through its interval.
+    // `clear` COMPLETES as it releases, so the surface the tween drove is not
+    // left frozen part-way through its interval.
     expect(tween.isComplete()).toBe(true);
     expect(tween.value()).toBe(100);
 

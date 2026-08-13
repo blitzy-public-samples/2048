@@ -215,7 +215,7 @@ describe('a run interrupted and resumed from storage', () => {
       composition.stop();
     }
 
-    // CHANGED: this read `expect(formatBoard(uninterrupted.engine.serialize()))
+    // This read `expect(formatBoard(uninterrupted.engine.serialize()))
     // .toBe(expected)`, and `expected` had just been read from that same engine
     // — the assertion compared a value with itself and held for every possible
     // implementation. An INDEPENDENT composition over its own backing store is
@@ -233,7 +233,7 @@ describe('a run interrupted and resumed from storage', () => {
 
     expect(formatBoard(rebuilt.engine.serialize())).toBe(expected);
 
-    // ADDED: the board alone is half the V2 guarantee. A resume that recovered
+    // The board alone is half the V2 guarantee. A resume that recovered
     // the lattice while losing the draw counts would satisfy every assertion
     // above and silently break reproducibility from that point on, so the
     // cursors, the stage and the persisted envelope are compared too.

@@ -9,7 +9,7 @@
 // each row a traceability row of docs/TRACEABILITY_MATRIX.md:
 //   TR-ENGINE-01  L1-L14    constructor        -> constructor
 //   TR-ENGINE-02  L17-L21   restart()          -> restart()
-//   TR-ENGINE-03  L24-L27   keepPlaying()      -> continuePlaying()
+//   TR-ENGINE-03  L24-L27   keepPlaying()      -> continueAfterWin()
 //   TR-ENGINE-04  L30-L32   isGameTerminated() -> isGameTerminated()
 //   TR-ENGINE-05  L35-L59   setup()            -> setup()
 //   TR-ENGINE-06  L62-L66   addStartTiles()    -> addStartTiles()
@@ -406,9 +406,9 @@ export interface EngineOptions {
 
   /**
    * Correlation identifier of the run, carried into every report and into
-   * every hook context. Injected, never derived here: the one authority is
-   * `deriveCorrelationId` in src/observability/logger.ts, and src/main.ts
-   * supplies the value it derives from the run seed.
+   * every hook context. Injected, never derived here: this module reaches no
+   * observability module. src/main.ts supplies the value, derived from the run
+   * seed and the run identifier.
    */
   readonly correlationId?: CorrelationSource;
 
@@ -659,7 +659,7 @@ export class Engine {
   private stageEnded: boolean;
 
   /**
-   * ADDED: whether the last `onStageStart` dispatch reseated the lattice.
+   * Whether the last `onStageStart` dispatch reseated the lattice.
    *
    * Written by `beginStage()` and read by both of its callers, which take the
    * terminal re-derivation at different points: `setup()` after its start tiles
@@ -869,14 +869,14 @@ export class Engine {
    * Raises one counter through the injected report sink, containing a throw
    * from the sink itself.
    *
-   * Has no vanilla source. THE ONE PATH EVERY COUNTER THIS FILE RAISES TAKES:
-   * each of the counter sites called `this.reporter.onCount?.()` directly,
-   * and an `EngineReporter` — whose three members are all optional and which
-   * src/engine/types.ts exports for an implementation of a caller's own —
-   * that threw from `onCount` took `setup()`, `move()` and `restart()` down
-   * with it. The two sibling ports at this layer already contain such a throw
-   * and count it: src/engine/hook-bus.ts `deliver` and
-   * src/storage/local-storage-manager.ts's reporter delivery.
+   * Has no vanilla source. THE ONE PATH EVERY COUNTER THIS FILE RAISES TAKES,
+   * so a sink that throws from `onCount` cannot take `setup()`, `move()` or
+   * `restart()` down with it. `EngineReporter` carries three optional members
+   * and src/engine/types.ts exports it for an implementation of a caller's own,
+   * so the sink is never assumed well behaved. The two sibling ports at this
+   * layer contain such a throw the same way: `deliver` of
+   * src/engine/hook-bus.ts and the reporter delivery of
+   * src/storage/local-storage-manager.ts.
    *
    * The report is built inside the sink's own guard and the correlation
    * identifier is read there too, so neither a hostile identifier source nor a
@@ -1046,11 +1046,11 @@ export class Engine {
       this.addStartTiles();
     }
 
-    // ADDED: the same re-derivation `endStage()` takes, on the board the start
-    // tiles were placed on. Silent unless a stage-start handler reseated the
-    // lattice, so a board opened without relic effects carries exactly the
-    // verdict the snapshot or the fresh grid gave it — which keeps the vanilla
-    // `setup()` of js/game_manager.js L35-L59 unchanged. DL-ENGINE-15.
+    // The same re-derivation `endStage()` takes, on the board the start tiles
+    // were placed on. Silent unless a stage-start handler reseated the lattice,
+    // so a board opened without relic effects carries exactly the verdict the
+    // snapshot or the fresh grid gave it, which is the vanilla `setup()` of
+    // js/game_manager.js L35-L59 unchanged. DL-ENGINE-15.
     if (this.latticeChangedOnStageStart) {
       this.deriveTerminalState();
     }
@@ -1092,11 +1092,11 @@ export class Engine {
     // resized or reseated the board for the opening position has those tiles
     // placed on the board it asked for. Accounted for here.
     //
-    // ADDED: the verdict of that accounting is RECORDED rather than discarded,
-    // so the two callers can re-derive the terminal state against the board the
+    // The verdict of that accounting is RECORDED rather than discarded, so the
+    // two callers can re-derive the terminal state against the board the
     // effects left. `setup()` takes the measurement after its start tiles are
-    // placed and `startStage()` takes it at once, which is why the flag is held
-    // here instead of the measurement being taken here. DL-ENGINE-15.
+    // placed and `startStage()` takes it at once, so the flag is held here and
+    // the measurement is not taken here. DL-ENGINE-15.
     this.latticeChangedOnStageStart = this.accountEffects(
       started.effects,
       started.effectsRefused,
@@ -1133,7 +1133,7 @@ export class Engine {
    * THE CARRY-OVER PATH REFUSES A BOARD TERMINATED BY AN UNRESOLVED WIN, the
    * state js/game_manager.js L30-L32 held between the win value being reached
    * and `keepPlaying()`: the win outranks a stage transition, so a caller
-   * resolves it — `continuePlaying()`, or ending the run — before the next
+   * resolves it — `continueAfterWin()`, or ending the run — before the next
    * stage opens. Refused rather than cleared here. The REBUILDING path is not
    * guarded: it installs a board of its own, and a restored snapshot carries
    * its own terminal status. Decision DL-ENGINE-11.
@@ -1166,8 +1166,8 @@ export class Engine {
 
     const started = this.beginStage();
 
-    // ADDED: the same re-derivation `setup()` and `endStage()` take. This path
-    // inserts no start tiles, so the measurement follows the dispatch directly.
+    // The same re-derivation `setup()` and `endStage()` take. This path inserts
+    // no start tiles, so the measurement follows the dispatch directly.
     // DL-ENGINE-15.
     if (this.latticeChangedOnStageStart) {
       this.deriveTerminalState();
@@ -1217,7 +1217,7 @@ export class Engine {
    * method name is `continuedPlay`, and the actuator call at L26 becomes a
    * commit whose `terminated` is now `false`.
    */
-  continuePlaying(): void {
+  continueAfterWin(): void {
     this.continuedPlay = true;
 
     this.commit();
@@ -1306,25 +1306,20 @@ export class Engine {
    * The same turn `move()` resolves — that member is this one's boolean
    * projection and every existing caller is unaffected — reported in the
    * terms the four counters this method raises already distinguish: a move
-   * refused because the game is over, a move a listener or an `onBeforeMove`
+   * refused while the game is over, a move a listener or an `onBeforeMove`
    * handler withdrew, a move the resolver found changed nothing, and a move
    * that resolved. A boolean collapses the first three onto one value, so a
-   * caller holding it cannot tell a withdrawn move from an idle one, and an
-   * observer settling on the boolean alone labelled every one of them the
-   * same way.
+   * caller holding it cannot tell a withdrawn move from an idle one.
    *
    * No new event is emitted and no emission is reordered: AAP Contract 1 fixes
    * the seven events, so the outcome is RETURNED rather than announced.
    *
    * A DIRECTION OUTSIDE THE FOUR IS REFUSED AS `'blocked'`, before anything is
-   * emitted or dispatched. `Direction` is a compile-time claim and the value
-   * arrives from an input adapter, from a structural port that widens it to
-   * `number`, and from callers holding strings — so an unusable one used to
-   * reach the vector lookup and raise a bare `TypeError` from inside the
-   * pipeline, after `move:before` had been emitted and `onBeforeMove`
-   * dispatched, leaving the turn with no `move:after` to close it and a
-   * subscriber's turn span open. A numeric string was worse: the lookup coerced
-   * it into a real, committed move.
+   * emitted or dispatched, so no turn opens that cannot be closed. `Direction`
+   * is a compile-time claim only: the value arrives from an input adapter, from
+   * a structural port that widens it to `number`, and from callers holding
+   * strings, and a numeric string would otherwise be coerced into a real
+   * committed move by the vector lookup.
    *
    * @param direction Direction to move in: 0 up, 1 right, 2 down, 3 left.
    * @returns The frozen outcome of the attempt.
@@ -1586,31 +1581,25 @@ export class Engine {
    * THE WORK RUNS ONCE WHATEVER THE WRAPPER DOES, and the outcome the turn
    * adopts is the work's own. `EngineTracing.traceMoveResolution` declares that
    * a wrapper must run the function it is handed exactly once and return its
-   * value, but a wrapper is composition-root code and nothing enforced it here,
-   * while the sibling port `HookBusTracing.traceHookDispatch` of
-   * src/engine/hook-bus.ts has held its work to one run all along. Two of the
-   * four ways a wrapper can break the contract were SILENT at this boundary,
-   * and both are contained here:
+   * value; a wrapper is composition-root code, so the two SILENT ways it can
+   * break that contract are contained here, exactly as the sibling port
+   * `HookBusTracing.traceHookDispatch` of src/engine/hook-bus.ts holds its work
+   * to one run:
    *
    *   the wrapper calls the
    *   work more than once    the first outcome is replayed, the held value or
    *                          the held throw, and the walk is NOT re-entered. A
-   *                          second walk of an already-resolved board reports
-   *                          `moved: false` with no score delta, and the turn
-   *                          adopted it: the board merged, the score was not
-   *                          credited and no tile spawned.
+   *                          second walk of an already-resolved board would
+   *                          report `moved: false` with no score delta.
    *   the wrapper returns
    *   something else         a completed walk's own outcome is returned, so a
    *                          wrapper is a measurement and never a
    *                          transformation.
    *
-   * The two LOUD ways are left exactly as they were, because a broken tracer
-   * that announces itself is better than one this quietly repairs: a wrapper
-   * that throws on its own account still propagates — the behaviour
-   * tests/unit/engine/engine-tracing.test.ts pins deliberately, since
-   * swallowing it would hide a broken tracer behind a game that stopped
-   * resolving moves — and a wrapper that never runs the work at all still
-   * fails on the value it substituted.
+   * The two LOUD ways are left to propagate: a wrapper that throws on its own
+   * account still throws, which tests/unit/engine/engine-tracing.test.ts pins,
+   * and a wrapper that never runs the work at all still fails on the value it
+   * substituted.
    *
    * Every contained violation raises `TRACING_FAULT_METRIC`.
    *
@@ -1832,15 +1821,14 @@ export class Engine {
       dispatched.effectsRefused,
     );
 
-    // ADDED: THE VERDICT IS RE-DERIVED AGAINST THE BOARD THE EFFECTS LEFT. The
-    // return of `accountEffects` was discarded here, so a stage-end handler that
-    // reseated the lattice committed the verdict the board carried BEFORE it: a
-    // collapse onto a smaller board with no empty cell and no adjacent match
-    // published `over: false`, and the next turn re-derived only if that turn's
-    // own pre-move dispatch reseated the board again. Taken before the emission,
-    // so `stage:end`, the commit below it and any reward or advance that follows
-    // all read one verdict. The measurement is `deriveTerminalState()`, the same
-    // one the resolved turn and the two effect-only turns take. DL-ENGINE-15.
+    // THE VERDICT IS RE-DERIVED AGAINST THE BOARD THE EFFECTS LEFT, so a
+    // stage-end handler that reseated the lattice — a collapse onto a smaller
+    // board with no empty cell and no adjacent match, for instance — commits
+    // the verdict of the board it left. Taken before the emission, so
+    // `stage:end`, the commit below it and any reward or advance that follows
+    // all read one verdict. The measurement is `deriveTerminalState()`, the
+    // same one the resolved turn and the two effect-only turns take.
+    // DL-ENGINE-15.
     if (reseated) {
       this.deriveTerminalState();
     }

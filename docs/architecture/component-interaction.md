@@ -203,7 +203,7 @@ nothing from `src/run` (`DL-RUNCTL-17`). The arrow's direction in Figure 3 is
 the direction the events travel, and it is not a compile-time dependency.
 
 **Three similar names are three different things.** The engine's
-continue-after-win method is `continuePlaying()` and its flag is
+continue-after-win method is `continueAfterWin()` and its flag is
 `continuedPlay`; the input event a player's press emits is `keepPlaying`; and
 the persisted property is also `keepPlaying`. The method and the flag were
 renamed, and both frozen names stayed as they were (`DL-ENGINE-04`).

@@ -103,30 +103,30 @@ function renderHash(hash: number): string {
 }
 
 /**
- * Derives the correlation identifier every log record carries. The one
- * authority: no other module in src/ derives a value of this type.
+ * Derives the correlation identifier every log record carries.
  *
- * ONE CONTRACT, in two forms, and the RUN-INSTANCE form is the one the
- * composition root uses. Passing `runId` derives every segment of the
- * identifier from the run instance AND the seed together, so no part of the
- * returned value is a function of the seed alone. The seed-grouping form,
- * derived when `runId` is absent or empty, is the opt-in exception described
- * below.
+ * TWO DERIVERS, ONE ALGORITHM. `runCorrelationId` of src/run/run-state.ts is a
+ * separate implementation of this same derivation, held byte-equal to this one
+ * by tests/unit/run/run-state.test.ts. src/run/ reaches no observability
+ * module, so neither can import the other; src/main.ts calls this one.
+ *
+ * TWO FORMS, and the RUN-INSTANCE form is the one the composition root uses.
+ * Passing `runId` derives every segment of the identifier from the run instance
+ * AND the seed together, so no part of the returned value is a function of the
+ * seed alone. The SEED-ONLY form, derived when `runId` is absent or empty,
+ * groups every run of one seed under one identifier.
  *
  * KEYED, NOT UNSALTED. The instance form's key is `runId`, which
  * `createRunToken` of src/main.ts originates from `crypto.getRandomValues`, and
- * which is deliberately carried in NO report: the identifier travels, the key
- * does not. A party holding an export therefore cannot hash candidate seeds and
- * match them against it. Every segment carrying the key is what closes that
- * search; a segment derived from the seed alone reopened it, because a
- * low-entropy seed — a word, a date, a short phrase — falls to a dictionary in
- * moments. Decision DL-LOG-09.
+ * which is carried in NO report: the identifier travels, the key does not. A
+ * party holding an export therefore cannot hash candidate seeds and match them
+ * against it. Decision DL-LOG-09.
  *
- * THE SEED-GROUPING FORM IS RECOVERABLE, and is offered for a caller that
- * deliberately wants every run of one seed under one identifier — a fixture, a
- * replay harness. It is unsalted and deterministic, so anyone can compute it,
- * and it must not be attached to a logger whose records leave the machine. What
- * both forms do give is that the seed TEXT is carried in neither.
+ * THE SEED-ONLY FORM IS RECOVERABLE. It is unsalted and deterministic, so
+ * anyone can compute it, and it must not be attached to a logger whose records
+ * leave the machine; it is for a caller that deliberately wants one identifier
+ * per seed — a fixture, a replay harness. The seed TEXT is carried in neither
+ * form.
  *
  * A seed is PUBLIC either way: the run summary shows it and copies it, and a
  * replay is the point of it. Nothing in the product may put personal data in
@@ -144,11 +144,11 @@ function renderHash(hash: number): string {
  * `LoggerOptions.correlationId`, which is carried verbatim and takes precedence
  * over `runSeed`.
  *
- * @param runSeed Seed of the run. Coerced with `String`, so any value is
- *   accepted and none throws.
+ * @param runSeed Seed of the run. Re-coerced with `String` before hashing, so
+ *   no input throws.
  * @param runId Run instance identifier, and the key of the instance form. Omit
- *   it, or pass an empty value, for the seed-grouping form.
- * @returns An 18-character identifier for the seed-grouping form and a
+ *   it, or pass an empty value, for the seed-only form.
+ * @returns An 18-character identifier for the seed-only form and a
  *   26-character one for the run-instance form, non-empty for every input, the
  *   empty string included.
  */
@@ -921,9 +921,8 @@ const DEFAULT_SUBSYSTEM = 'app';
 /** Settings `createLogger` accepts. */
 export interface LoggerOptions {
   /**
-   * Run seed the seed-grouping correlation identifier is derived from.
-   * Defaults to the empty string, which derives a stable identifier of its
-   * own.
+   * Run seed the seed-only correlation identifier is derived from. Defaults to
+   * the empty string, which derives a stable identifier of its own.
    */
   readonly runSeed?: string;
 
@@ -2003,14 +2002,11 @@ function toLogLevel(level: InputReportLevel): LogLevel {
  * are implemented, `onListenerError` included, so an error the emitter contains
  * is reported rather than swallowed.
  *
- * `reportedCorrelationId` carries the identifier the engine was injected
- * with, beside the record's own `correlationId`, so a mismatch between the
- * two is visible in the log stream rather than silent.
- *
- * Each record carries both identifiers of its report: `correlationId`, which
- * is the same value `LogRecord.correlationId` holds when the logger was built
- * with the run's canonical identifier, and `runId`, which is the run-instance
- * identifier the two are distinguished by.
+ * Every record carries TWO correlation fields and NO `runId`:
+ * `reportedCorrelationId`, which is the identifier the engine was injected
+ * with, and the record's own `correlationId` from `LogRecord`, so a mismatch
+ * between the two is visible in the log stream rather than silent. `runId` is
+ * the key of the run-instance derivation and reaches no record.
  *
  * @returns A frozen reporter tagged `'engine'`.
  */

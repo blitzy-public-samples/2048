@@ -1516,8 +1516,8 @@ describe('the randomness a brittle-crown stage cycle consumes', () => {
       expect(skewedBand).toBe(0.9 / 1.3);
       expect(skewedBand).toBeLessThan(vanillaBand);
 
-      // Every draw in the band the skew gave up now yields the HIGHEST value
-      // where it used to yield the lowest, and no draw moves the other way.
+      // Every draw in the band the skew gave up yields the HIGHEST value rather
+      // than the lowest, and no draw moves the other way.
       const values = bench.config.spawn.values;
 
       expect(resolveDraw(values, VANILLA_SPAWN_WEIGHTS, skewedBand)).toBe(2);

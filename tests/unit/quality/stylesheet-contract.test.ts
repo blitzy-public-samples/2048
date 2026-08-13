@@ -7,7 +7,12 @@ import { describe, expect, it } from 'vitest';
 import { compile } from 'sass';
 
 import { fieldWidth } from '../../../src/theme/tokens';
-import { defaultTheme, rarityTiers } from '../../../src/theme/themes';
+import {
+  defaultTheme,
+  rarityCardLift,
+  rarityCardLiftStep,
+  rarityTiers,
+} from '../../../src/theme/themes';
 
 const ROOT = resolve(import.meta.dirname, '..', '..', '..');
 
@@ -25,7 +30,7 @@ interface CompileWarning {
 /**
  * Every warning the compile raised, in order.
  *
- * ADDED: the compile took `.css` and discarded everything else, so Dart Sass
+ * The compile took `.css` and discarded everything else, so Dart Sass
  * deprecation warnings were invisible to the suite AND to `npm test`. V8 of the
  * AAP requires the Sass build to be free of deprecation warnings once the nine
  * division sites are migrated, and nothing held that: the migration could
@@ -283,7 +288,7 @@ describe('the relic tray is styled as the reading it is', () => {
   });
 });
 
-// ADDED: the two run-failure notices are told apart by more than a border
+// The two run-failure notices are told apart by more than a border
 // style, because one is settled and the other merely unconfirmed. DL-HUD-15.
 describe('the run-not-saved notice reads as the more urgent of the two', () => {
   it('carries a caution bar on one edge, from the palette accent', () => {
@@ -439,7 +444,7 @@ describe('the on-screen controls are a pad that clears the target floor', () => 
     const rule =
       /\.on-screen-control\s*\{([^}]*)\}/u.exec(compiled)?.[1] ?? '';
 
-    // CHANGED: the floor is in the PAINTED box, so it measures 44px by
+    // The floor is in the PAINTED box, so it measures 44px by
     // `getBoundingClientRect()` and not only by hit test. `min-block-size`
     // rather than `block-size`, so the 40px `@mixin screen-control` declares is
     // outranked without being restated. DL-A11Y-12.
@@ -564,6 +569,9 @@ describe('a rarity reads against the surface it is painted on', () => {
   /** The WCAG 2.1 AA minimum for a non-text graphical distinction. */
   const GRAPHICAL_MINIMUM = 3;
 
+  /** The WCAG 2.1 AA minimum for normal-size text, which the chip label is. */
+  const TEXT_MINIMUM = 4.5;
+
   /**
    * Relative luminance of a 6-digit hex colour, by WCAG 2.1's own formula. The
    * canonical statement of it lives in tests/unit/theme/palette-contrast.test.ts,
@@ -611,17 +619,155 @@ describe('a rarity reads against the surface it is painted on', () => {
     expect(contrast('#bbada0', '#bbada0')).toBeCloseTo(1, 5);
   });
 
-  it('publishes an accent and a plated variant per tier, in every palette', () => {
-    // Four tiers across three palettes, for each of the two vocabularies.
+  /**
+   * The declarations of one palette, so a per-palette property can be read
+   * rather than only the default palette's first occurrence.
+   *
+   * @param theme Palette id. `'default'` reads the `:root` block.
+   * @returns The block's text.
+   */
+  const paletteBlock = (theme: string): string => {
+    const pattern =
+      theme === 'default'
+        ? /:root\s*\{([^}]*)\}/u
+        : new RegExp(`\\[data-theme=${theme}\\]\\s*\\{([^}]*)\\}`, 'u');
+    const block = pattern.exec(compiled)?.[1];
+
+    if (block === undefined) {
+      throw new Error(`the compiled sheet declares no ${theme} palette block`);
+    }
+
+    return block;
+  };
+
+  /** Every palette the sheet publishes, the default one first. */
+  const palettes = ['default', 'high-contrast', 'colorblind-safe'] as const;
+
+  it('publishes an accent, a plated variant and a card variant per tier, in every palette', () => {
+    // Four tiers across three palettes, for each of the three vocabularies.
     expect(compiled.match(/--theme-rarity-[a-z]+:/gu) ?? []).toHaveLength(12);
     expect(
       compiled.match(/--theme-rarity-[a-z]+-plate:/gu) ?? [],
     ).toHaveLength(12);
+    expect(compiled.match(/--theme-rarity-[a-z]+-card:/gu) ?? []).toHaveLength(
+      12,
+    );
 
     for (const tier of rarityTiers) {
       expect(compiled).toContain(`--theme-rarity-${tier}:`);
       expect(compiled).toContain(`--theme-rarity-${tier}-plate:`);
+      expect(compiled).toContain(`--theme-rarity-${tier}-card:`);
     }
+  });
+
+  it('clears the text floor on the card, in every palette', () => {
+    // DL-THEME-11. The chip renders the tier NAME in the tier's colour on the
+    // card, so the ratio it must clear is the one WCAG 2.1 asks of text. The bare
+    // accent cleared it in the default palette only: both additive palettes run
+    // their ramp to a near-black high anchor by design, and the top tier measured
+    // 1.29:1 on their near-black card.
+    for (const theme of palettes) {
+      const block = paletteBlock(theme);
+      const surface = compiledColor('theme-tile-super', block);
+
+      for (const tier of rarityTiers) {
+        const card = compiledColor(`theme-rarity-${tier}-card`, block);
+
+        expect(
+          contrast(card, surface),
+          `${theme}/${tier} card accent on the card surface`,
+        ).toBeGreaterThanOrEqual(TEXT_MINIMUM);
+      }
+    }
+  });
+
+  it('names the tier it fixed, so the premise cannot go stale', () => {
+    // The bare accent still fails on the additive card surfaces, which is what
+    // the card variant exists for. Asserted so a future palette edit that made
+    // the bare accent readable would surface here rather than leaving a lift
+    // nothing needs.
+    let failures = 0;
+
+    for (const theme of ['high-contrast', 'colorblind-safe'] as const) {
+      const block = paletteBlock(theme);
+      const surface = compiledColor('theme-tile-super', block);
+
+      for (const tier of rarityTiers) {
+        if (
+          contrast(compiledColor(`theme-rarity-${tier}`, block), surface) <
+          TEXT_MINIMUM
+        ) {
+          failures += 1;
+        }
+      }
+    }
+
+    // Three of four tiers, in each of the two additive palettes.
+    expect(failures).toBe(6);
+  });
+
+  it('leaves the frozen default palette card vocabulary untouched', () => {
+    // AAP 0.5.6 keeps the established palette as the DEFAULT theme, and it
+    // already clears the floor on its own card, so its lift is zero and each card
+    // value is the bare accent itself. The additive palettes are where the lift
+    // lands, which is what makes this fix additive.
+    const block = paletteBlock('default');
+
+    for (const tier of rarityTiers) {
+      expect(compiledColor(`theme-rarity-${tier}-card`, block)).toBe(
+        compiledColor(`theme-rarity-${tier}`, block),
+      );
+    }
+  });
+
+  it('keeps the card tiers distinguishable from each other, in ladder order', () => {
+    // A lift that cleared the floor by collapsing the four tiers onto one another
+    // would destroy the distinction the chip exists to carry, so the ladder is
+    // asserted as an ordering. One uniform lift per palette is what preserves it.
+    for (const theme of palettes) {
+      const block = paletteBlock(theme);
+      const surface = compiledColor('theme-tile-super', block);
+      const ratios = rarityTiers.map((tier): number =>
+        contrast(compiledColor(`theme-rarity-${tier}-card`, block), surface),
+      );
+
+      expect(new Set(ratios).size, theme).toBe(rarityTiers.length);
+
+      for (let at = 1; at < ratios.length; at += 1) {
+        expect(ratios[at], `${theme} tier ${at}`).toBeLessThan(
+          ratios[at - 1] ?? 0,
+        );
+      }
+    }
+  });
+
+  it('agrees with the TypeScript mirror on the lift each palette takes', () => {
+    // src/theme/themes.ts carries the same derivation for the renderer and the
+    // diagnostics surface. The lift is compared rather than the hex, because the
+    // TypeScript half floors each channel while a browser rounds the percentages
+    // the sheet emits — the same one-unit difference the tile ramp already
+    // documents. DL-THEME-11.
+    for (const theme of palettes) {
+      const block = paletteBlock(theme);
+      const surface = compiledColor('theme-tile-super', block);
+      const lift = rarityCardLift(theme);
+      const lowest = rarityTiers[rarityTiers.length - 1] ?? 'legendary';
+
+      // The lift is the SMALLEST passing one, so one step less must fail for at
+      // least one tier — which is the property that ties the two halves together
+      // without comparing quantised channels.
+      expect(
+        contrast(compiledColor(`theme-rarity-${lowest}-card`, block), surface),
+      ).toBeGreaterThanOrEqual(TEXT_MINIMUM);
+
+      expect(lift).toBeGreaterThanOrEqual(0);
+      expect(lift % rarityCardLiftStep).toBeCloseTo(0, 10);
+    }
+
+    // And the two additive palettes take a lift where the default takes none.
+    expect(rarityCardLift('default')).toBe(0);
+    expect(rarityCardLift('high-contrast')).toBeGreaterThan(0);
+    expect(rarityCardLift('colorblind-safe')).toBeGreaterThan(0);
   });
 
   it('clears the graphical floor on the page, which the bare accent did not', () => {
@@ -661,9 +807,14 @@ describe('a rarity reads against the surface it is painted on', () => {
     }
   });
 
-  it('reads the plated variant on the tray stripe and the accent on the chip', () => {
+  it('reads the plated variant on the tray stripe and the card variant on the chip', () => {
     // The two surfaces differ, so they read different properties: the stripe
     // sits on the page and the chip sits on the card.
+    //
+    // The chip read the BARE accent, which is the colour of neither
+    // surface. It now reads the card variant, and the card's block-start edge
+    // reads it too so the edge and the chip that names the tier still carry one
+    // colour. DL-THEME-11, DL-REWARD-17.
     expect(compiled).toMatch(/--theme-rarity-[^;)]*-plate/u);
 
     const stripe = /\.relic-tray-item\[data-rarity[^{]*\{[^}]*\}/gu;
@@ -671,6 +822,28 @@ describe('a rarity reads against the surface it is painted on', () => {
 
     expect(stripes.length).toBeGreaterThan(0);
     expect(stripes.some((rule) => rule.includes('-plate'))).toBe(true);
+
+    const chip =
+      /\.reward-offer \.relic-card\[data-rarity=[a-z]+\] \.relic-card-rarity\s*\{[^}]*\}/gu;
+    const chips = compiled.match(chip) ?? [];
+
+    expect(chips).toHaveLength(rarityTiers.length);
+
+    for (const rule of chips) {
+      expect(rule).toContain('-card');
+      expect(rule).not.toMatch(/--theme-rarity-[a-z]+,/u);
+    }
+
+    const edge =
+      /\.reward-offer \.relic-card\[data-rarity=[a-z]+\]\s*\{[^}]*\}/gu;
+    const edges = compiled.match(edge) ?? [];
+
+    expect(edges).toHaveLength(rarityTiers.length);
+
+    for (const rule of edges) {
+      expect(rule).toContain('border-block-start-color');
+      expect(rule).toContain('-card');
+    }
   });
 });
 

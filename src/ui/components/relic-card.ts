@@ -29,9 +29,9 @@
 // `charges` and `state` — and is never widened: there is no family member, no
 // icon and no display name, and a surface needing more receives it as a
 // separate option. Badges are derived by iterating `HOOK_NAMES` of
-// src/engine/hooks.ts and testing membership in `hooks`, so badge order is the
-// order one turn reaches the six hooks in and an unrecognised key never
-// renders.
+// src/engine/hooks.ts and testing membership in `hooks`, so badge order is
+// `HOOK_NAMES` order — the canonical lifecycle order over the six — and an
+// unrecognised key never renders.
 //
 // This module declares no colour, length, radius, duration or z-index. Every
 // one it relies on is declared in style/_reward.scss, style/_hud.scss,
@@ -47,21 +47,26 @@
 // module's area enumerated. All are target-only: no construct of js/ rendered a
 // relic, so the declared origin is requirements R3, R8 and R9 and AAP 0.6.2.6
 // Group 6.
-//   TR-CARD-01  index.html L31, L38, L39      the hrefless `<a>` controls,
-//               (source branch)                whose successor here is a real
+//   TR-CARD-01  index.html                    the hrefless `.restart-button`,
+//               (source branch)                `.keep-playing-button` and
+//                                              `.retry-button` anchors, whose
+//                                              successor here is a real
 //                                              `<button type="button">`
-//   TR-CARD-02  style/main.scss L159-L168     the `button` mixin the reward
+//   TR-CARD-02  style/main.scss                the `button` mixin the reward
 //               (source branch)                card's surface is compiled from
-//   TR-CARD-03  style/main.scss L109-L115     the `:after` captions, invisible
-//               (source branch)                to assistive technology, whose
-//                                              successor is the real text
-//                                              every label here carries
-//   TR-CARD-04  style/main.scss L434-L452     the `pop` vocabulary the
-//               (source branch)                entrance marker names
+//   TR-CARD-03  style/main.scss                the `.score-container:after` and
+//               (source branch)                `.best-container:after`
+//                                              captions, invisible to assistive
+//                                              technology, whose successor is
+//                                              the real text every label here
+//                                              carries
+//   TR-CARD-04  style/main.scss                the `pop` keyframes the entrance
+//               (source branch)                marker names
 //   TR-CARD-05  js/html_actuator.js L3-L4     the unchecked host lookups,
 //               (source branch)                guarded here by `resolveMount`
-//   TR-CARD-06  index.html L24-L25            the retained score surfaces the
-//               (source branch)                tray is rendered alongside
+//   TR-CARD-06  index.html                    the retained `.score-container`
+//               (source branch)                and `.best-container` surfaces
+//                                              the tray is rendered alongside
 //   TR-CARD-07  target-only row               `createRelicCard` and the three
 //                                              variant trees
 //   TR-CARD-08  target-only row               `createRelicCardGrid` and its
@@ -78,10 +83,8 @@
 //               with the tray row and the summary row left non-interactive
 //   DL-CARD-02  the accessible name carrying the relic's name and tier, with
 //               the description and the badge row associated by reference
-//   DL-CARD-03  SUPERSEDED by DL-CARD-07: keyboard activation installed with
-//               `preventDefault` and a key-activation guard
-//   DL-CARD-07  the native button's click as the whole of activation, with no
-//               key handling, no suppression and no guard
+//   DL-CARD-03  activation left to the native button's own click: one
+//               `'click'` listener, no key listener and no `preventDefault`
 //   DL-CARD-04  the entrance marker applied only where motion is permitted,
 //               beside the stylesheet's own `motion-allowed` gate
 //   DL-CARD-05  the rarity accent sampled from the shared ramp and exposed to
@@ -214,10 +217,10 @@ export const relicCardAttributes = Object.freeze({
   degraded: 'data-degraded',
 });
 
-/** Selector the reward grid's host is resolved at. index.html L99. */
+/** Selector the reward grid's host is resolved at: `#screen-reward`. */
 export const RELIC_CARD_GRID_HOST_SELECTOR = '#screen-reward';
 
-/** Selector the tray row's host is resolved at. index.html L49. */
+/** Selector the tray row's host is resolved at: `#relic-tray`. */
 export const RELIC_TRAY_HOST_SELECTOR = '#relic-tray';
 
 /** Label naming this module in every report. */
@@ -548,6 +551,11 @@ export interface RelicCard {
   /**
    * The tier's accent under the palette in force, sampled off the shared ramp
    * by `resolveRarityColor` of src/theme/themes.ts.
+   *
+   * The BARE accent, which is what this reports and has always reported. It is
+   * not the colour the card paints: style/_reward.scss reads the card-surface
+   * variant, `--theme-rarity-<tier>-card`, whose resolver is
+   * `resolveRarityCardColor`. DL-THEME-11.
    *
    * @returns The accent as 6-digit hex, or an empty string where the tier or
    *   the palette could not be resolved, which is reported.
@@ -1203,8 +1211,9 @@ export function createRelicCard(options: RelicCardOptions): RelicCard {
     if (interactive) {
       const button = owner.createElement('button');
 
-      // The successor of the hrefless `<a>` controls at index.html L31, L38 and
-      // L39. DL-CARD-01.
+      // The successor of the hrefless `.restart-button`,
+      // `.keep-playing-button` and `.retry-button` anchors the source branch
+      // carried. DL-CARD-01.
       button.type = 'button';
       button.className = relicCardClasses.card;
 

@@ -218,8 +218,8 @@ Four further details the figure itself has no room to spell out:
   `state:commit` to the run-state node, and Figure 7 is where they go.
 - The turn's entry guard, `js/game_manager.js` L134, reads the loss flag
   together with the continue-after-win flag. That flag is now `continuedPlay`
-  and the method that sets it is `continuePlaying()`, while the input event name
-  and the persisted member name both stay frozen as `keepPlaying`
+  and the method that sets it is `continueAfterWin()`, while the input event
+  name and the persisted member name both stay frozen as `keepPlaying`
   (`DL-ENGINE-04`).
 
 ## 3. The seed and its substreams

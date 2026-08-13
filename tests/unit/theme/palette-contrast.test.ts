@@ -29,11 +29,18 @@
 
 import { describe, expect, it } from 'vitest';
 
-import type { Theme } from '../../../src/theme/themes';
+import type { Theme, ThemeId } from '../../../src/theme/themes';
 import {
   colorblindSafeTheme,
   defaultTheme,
   highContrastTheme,
+  rarityCardContrastTarget,
+  rarityCardLift,
+  rarityCardLiftStep,
+  rarityTiers,
+  resolveRarityCardColor,
+  resolveRarityCardColors,
+  resolveRarityColor,
   resolveTileTheme,
 } from '../../../src/theme/themes';
 
@@ -275,8 +282,8 @@ describe.each([
     'clears its floor for %s',
     (_pairName, pair) => {
       // EVERY palette, the default included: this is the whole of M14's
-      // resolution, and a regression here means a screen this feature delivers
-      // is inaccessible until the player finds the settings panel.
+      // resolution, and a failure here means a screen this feature delivers is
+      // inaccessible until the player finds the settings panel.
       expect(contrast(pair.front, pair.back)).toBeGreaterThanOrEqual(
         pair.minimum,
       );
@@ -529,5 +536,167 @@ describe('the diagnostics surface controls, in every palette', () => {
         defaultTheme.palette.buttonSurface,
       ),
     ).toBeCloseTo(3.7896, 4);
+  });
+});
+/* ==========================================================================
+ * The reward card's rarity vocabulary, in every palette.
+ *
+ * The rarity chip renders the tier NAME in the tier's colour on the reward card,
+ * so the ratio it owes is the one this file's TEXT_MINIMUM states. The bare
+ * accent is a sample of the palette's own tile ramp, and both additive palettes
+ * run that ramp to a near-black high anchor BY DESIGN — a monotonic luminance
+ * ladder is the point of them — so on their near-black card the top tier measured
+ * 1.29:1 and the tier name was unreadable in precisely the two palettes a player
+ * chooses for legibility.
+ *
+ * The card vocabulary lifts every tier of a palette by one uniform amount, the
+ * smallest step at which all four clear the floor. style/_themes.scss carries the
+ * same derivation and is what paints; the agreement between the two halves is
+ * asserted in tests/unit/quality/stylesheet-contract.test.ts, which compiles the
+ * sheet. Decisions DL-THEME-11, DL-REWARD-17.
+ * ========================================================================== */
+
+describe('the reward card rarity vocabulary', () => {
+  /** Every palette, the frozen one first. */
+  const themes: readonly ThemeId[] = [
+    'default',
+    'high-contrast',
+    'colorblind-safe',
+  ];
+
+  /** The three palettes, by the id that activates them. */
+  const paletteOf: Readonly<Record<ThemeId, Theme>> = {
+    default: defaultTheme,
+    'high-contrast': highContrastTheme,
+    'colorblind-safe': colorblindSafeTheme,
+  };
+
+  /**
+   * Two opaque colours interpolated linearly per channel — the mix `color.mix`
+   * of Sass performs and `sassMix` of src/theme/tile-ramp.ts mirrors — with each
+   * channel floored, as `formatHexColor` floors it.
+   *
+   * Stated here rather than imported, for the same reason the contrast formula
+   * is: a gate that measured the implementation with the implementation's own
+   * arithmetic would agree with itself whatever that arithmetic became.
+   *
+   * @param front Colour whose share is `weight`.
+   * @param back Colour whose share is the remainder.
+   * @param weight Share of `front`, 0 to 1.
+   * @returns The mix as 6-digit hex.
+   */
+  const mixHex = (front: string, back: string, weight: number): string => {
+    const first = readColor(front);
+    const second = readColor(back);
+    const channels = [0, 1, 2]
+      .map((at): number =>
+        Math.floor(
+          (first[at] ?? 0) * weight + (second[at] ?? 0) * (1 - weight),
+        ),
+      )
+      .map((channel): string => channel.toString(HEX_RADIX).padStart(2, '0'))
+      .join('');
+
+    return `#${channels}`;
+  };
+
+  it.each(themes)('clears the text floor at every tier of %s', (theme) => {
+    const cards = resolveRarityCardColors(theme);
+
+    for (const tier of rarityTiers) {
+      const card = cards[tier];
+
+      expect(
+        contrast(card.colorHex, card.surfaceHex),
+        `${theme}/${tier}`,
+      ).toBeGreaterThanOrEqual(TEXT_MINIMUM);
+
+      // The resolver reports the ratio it renders at, and it agrees with the
+      // formula this file states independently.
+      expect(card.contrast).toBeCloseTo(
+        contrast(card.colorHex, card.surfaceHex),
+        6,
+      );
+    }
+  });
+
+  it.each(themes)('keeps the tiers ordered and distinct in %s', (theme) => {
+    const cards = resolveRarityCardColors(theme);
+    const ratios = rarityTiers.map((tier): number => cards[tier].contrast);
+
+    expect(new Set(ratios).size).toBe(rarityTiers.length);
+
+    for (let at = 1; at < ratios.length; at += 1) {
+      expect(ratios[at]).toBeLessThan(ratios[at - 1] ?? 0);
+    }
+  });
+
+  it('takes no lift in the frozen default palette', () => {
+    // AAP 0.5.6 keeps the established palette as the default theme and every
+    // accessibility palette additive. It already clears the floor on its own
+    // card, so its card values ARE its accents, unchanged.
+    expect(rarityCardLift('default')).toBe(0);
+
+    for (const tier of rarityTiers) {
+      expect(resolveRarityCardColor(tier, 'default').colorHex).toBe(
+        resolveRarityColor(tier, 'default').colorHex,
+      );
+    }
+  });
+
+  it('lifts both additive palettes, and no further than it must', () => {
+    for (const theme of ['high-contrast', 'colorblind-safe'] as const) {
+      const lift = rarityCardLift(theme);
+
+      expect(lift).toBeGreaterThan(0);
+
+      // MINIMAL: one step less leaves at least one tier below the floor, which is
+      // what makes the lift the smallest passing one rather than a round number
+      // someone liked.
+      const surface = resolveRarityCardColor(rarityTiers[0], theme).surfaceHex;
+      const shorter = lift - rarityCardLiftStep;
+      const failing = rarityTiers.filter((tier): boolean => {
+        const accent = resolveRarityColor(tier, theme).colorHex;
+
+        return (
+          contrast(
+            mixHex(paletteOf[theme].palette.brightText, accent, shorter),
+            surface,
+          ) < TEXT_MINIMUM
+        );
+      });
+
+      expect(failing.length).toBeGreaterThan(0);
+    }
+  });
+
+  it('states the floor WCAG 2.1 asks of text, not of graphics', () => {
+    // The plated variant of DL-THEME-10 clears 3:1 because a tray stripe is
+    // non-text. This one carries a label, so it owes 4.5:1 — the distinction the
+    // review found the chip on the wrong side of.
+    expect(rarityCardContrastTarget).toBe(TEXT_MINIMUM);
+    expect(rarityCardContrastTarget).toBeGreaterThan(LARGE_TEXT_MINIMUM);
+  });
+
+  it('leaves the bare accent unreadable on the additive cards, which is why it exists', () => {
+    // The premise, asserted so a palette edit that made the accent readable would
+    // surface here rather than leaving a lift nothing needs.
+    let failures = 0;
+
+    for (const theme of ['high-contrast', 'colorblind-safe'] as const) {
+      const surface = resolveRarityCardColor(rarityTiers[0], theme).surfaceHex;
+
+      for (const tier of rarityTiers) {
+        if (
+          contrast(resolveRarityColor(tier, theme).colorHex, surface) <
+          TEXT_MINIMUM
+        ) {
+          failures += 1;
+        }
+      }
+    }
+
+    // Three of the four tiers, in each of the two additive palettes.
+    expect(failures).toBe(6);
   });
 });

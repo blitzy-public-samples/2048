@@ -135,7 +135,7 @@ describe('a charge budget spent to zero', () => {
 
     // A board with no full ROW: the wind finds nothing to clear, so the
     // invocation asks for nothing and the declared budget stands.
-    // CHANGED: this said column. DL-TEST-14.
+    // This said column. DL-TEST-14.
     place(target.grid, 0, 0, 2);
     dispatchOn(target, 'onAfterMove', afterMovePayload(target.grid, 40));
 

@@ -87,8 +87,8 @@ const RESTORE_REJECTED_METRIC = 'relics.restore.rejected';
 const CLEARED_METRIC = 'relics.cleared';
 
 /**
- * ADDED: counter raised with the number of standing rules a restore
- * reinstated on the live rules. `DL-REGISTRY-04`.
+ * Counter raised with the number of standing rules a restore reinstated on the
+ * live rules. `DL-REGISTRY-04`.
  */
 const STANDING_RULE_METRIC = 'relics.standing_rule.reinstated';
 
@@ -643,7 +643,7 @@ export function findRelicById(id: string): Relic | undefined {
 }
 
 /**
- * ADDED: reinstates one relic's STANDING rule on a set of rehydrated rules.
+ * Reinstates one relic's STANDING rule on a set of rehydrated rules.
  *
  * Handed the relic's persisted `state` slot and the live rules, and returns
  * whether it installed anything. It is not a hook handler: it receives no
@@ -656,14 +656,14 @@ export type StandingRelicRule = (
 ) => boolean;
 
 /**
- * ADDED: the relics whose effect is a STANDING rule on the live rules, mapped
- * to the function that reinstates it from a persisted slot.
+ * The relics whose effect is a STANDING rule on the live rules, mapped to the
+ * function that reinstates it from a persisted slot.
  *
  * A standing rule is one that outlives the turn that established it and is
  * carried by the rules object rather than by the board — `frostbind`'s
  * frozen-cell merge predicate is the one such rule in the catalogue. A reload
- * builds fresh rules carrying the defaults, so without this the frost a spent
- * budget had already paid for was silently lost.
+ * builds fresh rules carrying the defaults, so this table is what carries such
+ * a rule across the reload.
  *
  * Declared HERE and keyed by identifier, so the engine and the hook bus contain
  * no knowledge of any individual relic and the 7-member `Relic` shape AAP
@@ -677,8 +677,8 @@ const STANDING_RELIC_RULES: ReadonlyMap<string, StandingRelicRule> = new Map<
 >([['frostbind', reinstateFrostbindRule]]);
 
 /**
- * ADDED: reinstates the standing rules a set of persisted relics implies, on
- * rules that were just rehydrated.
+ * Reinstates the standing rules a set of persisted relics implies, on rules
+ * that were just rehydrated.
  *
  * THE NON-HOOK REHYDRATION PATH, and the counterpart of the charge guard: the
  * bus withholds all six hooks from a relic whose budget is spent (AAP R3, V6,
@@ -984,14 +984,14 @@ export interface RelicRegistryOptions {
   readonly reporter?: EngineReporter;
 
   /**
-   * Correlation identifier of the run, carried on every report. Injected,
-   * never derived here: the one authority is `deriveCorrelationId` in
-   * src/observability/logger.ts.
+   * Correlation identifier of the run, carried on every report. Injected, never
+   * derived here: this module reaches no observability module and no run
+   * module.
    */
   readonly correlationId?: CorrelationSource;
 
   /**
-   * ADDED: the LIVE rules a restored relic's standing rule is reinstated into.
+   * The LIVE rules a restored relic's standing rule is reinstated into.
    *
    * Supplied by a composition that resumes a run, where the rules are rebuilt
    * from the defaults while the relics come back from the persisted envelope.
@@ -1016,8 +1016,8 @@ export class RelicRegistry {
   private readonly bus: HookBus | undefined;
 
   /**
-   * ADDED: the live rules `restore()` reinstates standing rules into, or
-   * `undefined` on a registry composed without them. `DL-REGISTRY-04`.
+   * The live rules `restore()` reinstates standing rules into, or `undefined`
+   * on a registry composed without them. `DL-REGISTRY-04`.
    */
   private readonly rules: RulesConfig | undefined;
 
@@ -1534,10 +1534,10 @@ export class RelicRegistry {
    * js/game_manager.js L36-L45. The array's own order becomes pickup order, so
    * a resumed run dispatches in the order the saved run dispatched in.
    *
-   * ADDED: a registry composed with live rules also reinstates the STANDING
-   * rules the restored entries imply, through `applyStandingRelicRules` and
-   * without dispatching to any handler — so a relic whose budget the saved run
-   * had already spent keeps the rule those charges bought while still being
+   * A registry composed with live rules also reinstates the STANDING rules the
+   * restored entries imply, through `applyStandingRelicRules` and without
+   * dispatching to any handler, so a relic whose budget the saved run had
+   * already spent keeps the rule those charges bought while still being
    * withheld from every one of the six hooks. `DL-REGISTRY-04`.
    *
    * @param persisted Entries to restore.
@@ -1565,8 +1565,8 @@ export class RelicRegistry {
   }
 
   /**
-   * ADDED: reinstates the standing rules the restored relics imply, reporting
-   * how many landed.
+   * Reinstates the standing rules the restored relics imply, reporting how many
+   * landed.
    *
    * A registry composed without live rules reinstates nothing and reports
    * nothing. `DL-REGISTRY-04`.

@@ -36,7 +36,7 @@ const REGISTRY_PATH = 'CONTRIBUTING.md';
 /**
  * Directories never descended into.
  *
- * CHANGED: the sweep is stated as an EXCLUSION list over the whole repository.
+ * The sweep is stated as an EXCLUSION list over the whole repository.
  * Three inclusion lists — two roots plus a hand-kept file list and a hand-kept
  * sibling-document list — left real citation sites out: `tsconfig.node.json`
  * cites `DL-BUILD-14` and the two `docs/dashboards/` artifacts cite twenty-one
@@ -92,9 +92,9 @@ const CITING_EXTENSIONS: ReadonlySet<string> = new Set([
   '.css',
   '.html',
 
-  // ADDED: the two forms the previously unswept citation sites use — the
-  // dashboard template and the tooling configs are JSON, and every document
-  // that explains itself is Markdown. DL-TEST-13.
+  // The two further forms a citation site can take: the dashboard template and
+  // the tooling configs are JSON, and every document that explains itself is
+  // Markdown. DL-TEST-13.
   '.json',
   '.md',
   '.yml',
@@ -118,7 +118,7 @@ const CITATION_PATTERN = /DL-[A-Z0-9]+-\d+/gu;
 /**
  * The shape every identifier must have: exactly two digits, nothing after.
  *
- * ADDED: `CITATION_PATTERN` and `ROW_PATTERN` both accept any number of digits,
+ * `CITATION_PATTERN` and `ROW_PATTERN` both accept any number of digits,
  * so a row written with one digit DEFINED that identifier and every citation of
  * it resolved — the malformed shape passed the gate end to end. `ordinalOf`
  * parses it too, so it could even satisfy the contiguity assertion in place of
@@ -258,7 +258,7 @@ describe('every identifier a sibling document cites resolves to a row', () => {
   });
 
   it('leaves no listed document without a citation', () => {
-    // CHANGED: EVERY listed document must carry one, rather than more than five
+    // EVERY listed document must carry one, rather than more than five
     // of them. A threshold could be met while a named document explained none
     // of itself, which is the property the list exists to hold — and it is a
     // different property from resolution, since a document that stopped citing

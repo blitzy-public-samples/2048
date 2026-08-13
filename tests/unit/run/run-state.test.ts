@@ -1,6 +1,7 @@
-// Schema suite of src/run/run-state.ts: the nine-member run-state envelope,
-// the board snapshot it wraps, its version classification, its cursor
-// normalisation and its correlation-identifier derivation. AAP Contract 5
+// Schema suite of src/run/run-state.ts: the run-state envelope — nine required
+// members plus the optional `pendingReward` — the board snapshot it wraps, its
+// version classification, its cursor normalisation and its
+// correlation-identifier derivation. AAP Contract 5
 // (0.6.1.5), requirement R6, and the schema-versioning half of implicit
 // requirement I5.
 //
@@ -172,6 +173,9 @@ const REPORTER_CHANNEL_COVERAGE = {
   onVersionMigrated: true,
   onBoardSizeReconciled: true,
   onWriteFailed: true,
+
+  // The operation-aware fault channel. DL-RUN-10.
+  onRunFaulted: true,
   onPersistenceStatusChanged: true,
   onRunStarted: true,
   onStageAdvanced: true,
@@ -1319,9 +1323,9 @@ describe('describeRunStateProblems names the offending field', () => {
     expect(MAX_PERSISTED_STAGE_INDEX).toBe(Number.MAX_SAFE_INTEGER);
   });
 
-  // The alignment where it bites: a run that advanced past the bound this module
-  // used to fix. Every one of these indices carries a derivable goal, so refusing
-  // any of them would refuse a run the curve itself admits.
+  // The alignment where it bites: a run that advanced past a fixed bound. Every
+  // one of these indices carries a derivable goal, so refusing any of them
+  // would refuse a run the curve itself admits.
   it('accepts every stage index the stage curve derives a goal for', () => {
     const reachable = [
       0,
@@ -2809,7 +2813,7 @@ describe('runCorrelationId derives the identifier from what is persisted',
       expect(runCorrelationId('timed-seed', 'timed-run')).toBe(before);
     });
 
-    it('derives the seed-grouping form when the run identifier is omitted',
+    it('derives the seed-only form when the run identifier is omitted',
       () => {
         const grouped = runCorrelationId('grouped-seed');
 
@@ -2825,7 +2829,7 @@ describe('runCorrelationId derives the identifier from what is persisted',
         expect(instance).toHaveLength(26);
         expect(instance).toMatch(/^run-[0-9a-z]{14}-[0-9a-z]{7}$/);
 
-        // NO SEED-ONLY SEGMENT. The recoverable seed-grouping form is not
+        // NO SEED-ONLY SEGMENT. The recoverable seed-only form is not
         // inside the form the composition root exports. DL-LOG-09.
         expect(
           instance.startsWith(runCorrelationId('grouped-seed'))
@@ -2924,7 +2928,7 @@ describe('runCorrelationId is byte-equal to the logger derivation', () => {
     }
   });
 
-  it('agrees on the seed-grouping form for every seed', () => {
+  it('agrees on the seed-only form for every seed', () => {
     for (const [seed] of CORRELATION_INPUTS) {
       expect(runCorrelationId(seed)).toBe(deriveCorrelationId(seed));
       expect(runCorrelationId(seed, '')).toBe(deriveCorrelationId(seed, ''));

@@ -3,15 +3,13 @@
 // One traceability row of docs/TRACEABILITY_MATRIX.md apiece. TOKEN is one area
 // across both halves of the mirror, so these ordinals do not collide with the
 // ones src/theme/tokens.ts carries:
-//   TR-TOKEN-09  style/main.scss L4-L22  the fourteen-variable token block,
-//                                        moved here unchanged in name, value
-//                                        and order
-//   TR-TOKEN-10  target-only row         `_resolve-token()`, `$projection` and
-//                                        the `@error` that holds the two sides
-//                                        together
-//   TR-TOKEN-11  target-only row         the new token families: the z-index
-//                                        ladder extension, the depth scale and
-//                                        the mobile restatements
+//   TR-TOKEN-09  style/main.scss  the fourteen-variable token block, moved here
+//                token block      unchanged in name, value and order
+//   TR-TOKEN-10  target-only row  `_resolve-token()`, `$projection` and the
+//                                 `@error` that holds the two sides together
+//   TR-TOKEN-11  target-only row  the new token families: the z-index ladder
+//                                 extension, the depth scale and the mobile
+//                                 restatements
 //
 // Decisions: DL-TOKEN-05, DL-TOKEN-06 (docs/DECISION_LOG.md).
 
@@ -23,8 +21,9 @@ $projection: () !default;
 
 // Fallback value of every projected token, keyed by the name the projection
 // uses: the eleven stated members of the established token set, the three
-// mobile-scale lengths its breakpoint restates, and the four z-index slots of
-// the ladder extension declared further down this file.
+// mobile-scale lengths its breakpoint restates, the four z-index slots of
+// the ladder extension declared further down this file, and the minimum
+// pointer-target size style/_a11y.scss resolves.
 $_token-fallbacks: (
   field-width: 500px,
   grid-spacing: 15px,
@@ -44,6 +43,7 @@ $_token-fallbacks: (
   z-index-screen-overlay: 300,
   z-index-modal: 400,
   z-index-diagnostics: 500,
+  minimum-target-size: 44px,
 );
 
 @function _resolve-token($name) {
@@ -76,10 +76,9 @@ $_token-fallbacks: (
 // src/theme/tile-ramp.ts floors, and that is the parity the compiled ramp is
 // verified against, so each channel is floored here before `rgb()` rebuilds it.
 //
-// THE ONE DECLARATION. A second, identical one once stood at the end of this
-// file and silently superseded this one — Sass takes the last, so the two
-// could drift with nothing reporting it. One declaration per stylesheet is now
-// pinned by tests/unit/quality/formatting.test.ts.
+// THE ONE DECLARATION. Sass resolves a repeated `@function` to the last
+// declaration, so one declaration per stylesheet is pinned by
+// tests/unit/quality/formatting.test.ts.
 //
 // Provenance: moved here from style/helpers.scss, whose change boundary is the
 // Dart Sass migration of the vanilla helpers alone. Decision DL-TOKEN-01.
@@ -155,6 +154,11 @@ $z-index-diagnostics: _resolve-token(z-index-diagnostics) !default;
 $depth-bevel: math.div($grid-spacing, 5) !default;
 $depth-board: $grid-spacing * 1 !default;
 $depth-tile: $grid-spacing * 2 !default;
+
+// The smallest pointer target this interface paints, resolved through
+// the projection so `minimumTargetSize` of src/theme/tokens.ts and this variable
+// cannot disagree. style/_a11y.scss is its only consumer. DL-A11Y-13.
+$minimum-target-size: _resolve-token(minimum-target-size) !default;
 
 $control-gap: $tile-border-radius * 3 !default;
 

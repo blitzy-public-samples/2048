@@ -1,9 +1,8 @@
 // Per-relic isolation suite for the `merge-magic` relic `frostbind`.
 //
-// The final section is COMPOSED rather than isolated: it drives a real engine,
-// because the thaw transition is reachable only by MOVING a tile out of a frosted
-// cell and a bus dispatch made by hand can assert the toggle without proving any
-// move produces it.
+// The final section is COMPOSED, not isolated: it drives a real engine. The thaw
+// transition is reachable only by MOVING a tile out of a frosted cell, which no
+// hand-made bus dispatch performs. DL-TEST-19.
 //
 // This suite reads no DOM, no storage and no clock, calls no `Math.random`,
 // installs no timer and no mock library, and runs under the `test` script with

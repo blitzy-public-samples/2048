@@ -702,7 +702,7 @@ const DEFAULT_BINDING_TABLE: Keymap = {
   },
 
   // `C` for continue. js/keyboard_input_manager.js bound no key to it at all —
-  // `.keep-playing-button` at index.html L51 was the only way to reach it — so
+  // the `.keep-playing-button` of index.html was the only way to reach it — so
   // this is the key the action gains, and it is remappable like every other.
   keepPlaying: {
     action: 'keepPlaying',
@@ -1267,8 +1267,8 @@ export function describeAction(action: InputAction): string {
 const MOVE_LABEL_PREFIX = 'Move ';
 
 /**
- * ADDED: renders a movement action as the direction word alone, for a surface
- * that shows the four movements as a spatial pad rather than as a list.
+ * Renders a movement action as the direction word alone, for a surface that
+ * shows the four movements as a spatial pad rather than as a list.
  *
  * DERIVED FROM `ACTION_LABELS`, not declared as a second table, so the short
  * form cannot drift from the spoken one — and so the containment WCAG 2.5.3
@@ -1834,29 +1834,23 @@ function readBinding(
   const readCodes = readStringList(entry, 'codes', action, reporter);
 
   /**
-   * CHANGED: an entry that names NO trigger at all falls back to the default's
-   * triggers instead of being kept as the empty lists it is.
+   * An entry that names NO trigger at all falls back to the default's triggers
+   * rather than being kept as the empty lists it is.
    *
-   * `readStringList` returns an explicitly empty array as such — that is its
-   * documented contract and the right one, because it distinguishes "the field
-   * was absent" from "the field was present and held nothing". But `??` only
-   * substitutes for `null`, so `{"keys":[],"codes":[]}` survived as an entry
-   * with no key and no code: the action was permanently unbound while
-   * `readContextList` had already reported "using default" for the empty
-   * `contexts` beside it. Every other modality still reached the action — swipe,
-   * the on-screen control, restore-defaults — so the state was honest but the
-   * key was dead.
+   * `readStringList` returns an explicitly empty array as such, distinguishing
+   * "the field was absent" from "the field was present and held nothing", and
+   * `??` substitutes only for `null` — so `{"keys":[],"codes":[]}` reaches here
+   * as an entry with no key and no code and is caught by this guard rather than
+   * leaving the action unbound.
    *
-   * BOTH lists must be empty, because either one alone still reaches the action:
-   * a binding with a key and no code, or a code and no key, is a legitimate
-   * binding and is left exactly as it is.
-   *
-   * The default must ALSO name a trigger. Six actions — `startRun`,
-   * `continueStage`, `endRun`, `activateRelic`, `openSettings` and
-   * `closeSettings` — declare empty `keys` and `codes` by design, being reached
-   * through their own screen's control; for those the fallback is the same empty
-   * pair, so the guard keeps them out of the report rather than substituting a
-   * value for an identical one. DL-KEYMAP-06.
+   * TWO CONDITIONS GOVERN THE FALLBACK. BOTH lists must be empty — a binding
+   * with a key and no code, or a code and no key, still reaches the action and
+   * is left exactly as it is. And the DEFAULT must itself name a trigger: six
+   * actions — `startRun`, `continueStage`, `endRun`, `activateRelic`,
+   * `openSettings` and `closeSettings` — declare empty `keys` and `codes` by
+   * design, being reached through their own screen's control, and for those the
+   * fallback would substitute a value for an identical one, so the guard keeps
+   * them out of the report. DL-KEYMAP-06.
    */
   const namesNoTrigger =
     readKeys !== null &&

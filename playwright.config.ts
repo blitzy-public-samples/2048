@@ -1,7 +1,7 @@
 // Playwright configuration for the recorded-gameplay proof.
 //
-// any kind. One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every
-// row of this file's area enumerated, all target-only:
+// One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of
+// this file's area enumerated, all target-only:
 //   TR-PW-01  the two tag-filtered projects and their shared `testMatch`
 //   TR-PW-02  the recording settings and the software-GL launch arguments
 //   TR-PW-03  the preview web server and its loopback-origin assertion
@@ -67,10 +67,11 @@ function assertPreviewPort(port: number): number {
 
 /**
  * Asserts that `origin` is an HTTP or HTTPS URL on a loopback host, and
- * returns it in parsed form.
+ * returns it in canonical form.
  *
  * @param origin Origin to check.
- * @returns The parsed form of `origin`.
+ * @returns `URL.href` for `origin`: its canonical text form, carrying an
+ *   explicit path and no surrounding whitespace.
  * @throws {Error} If `origin` is not a parseable URL, does not use HTTP or
  *   HTTPS, or names a host that is not a loopback host.
  */
@@ -100,8 +101,8 @@ function assertLoopbackOrigin(origin: string): string {
     );
   }
 
-  // The parsed form, so neither surrounding whitespace nor a missing path
-  // reaches `use.baseURL` and `webServer.url`.
+  // The canonical text form, so neither surrounding whitespace nor a missing
+  // path reaches `use.baseURL` and `webServer.url`.
   return parsed.href;
 }
 
@@ -130,7 +131,7 @@ const BASE_URL = assertLoopbackOrigin(`http://127.0.0.1:${PORT}`);
 const VIEWPORT = { width: 1280, height: 960 };
 
 // Viewport for the mobile browser variant. 400px sits below the 520px
-// `$mobile-threshold` of style/_tokens.scss L110, so the one breakpoint the
+// `$mobile-threshold` of style/_tokens.scss, so the one breakpoint the
 // stylesheet declares is in force and the board resolves to the 280px
 // `$mobile-field-width` rather than the 500px `$field-width`. DL-PW-04.
 const MOBILE_VIEWPORT = { width: 400, height: 780 };
@@ -190,11 +191,11 @@ export default defineConfig({
       reducedMotion: 'no-preference',
     },
 
-    // CHANGED from `on` for both: a screenshot and a trace are DEBUGGING
-    // artifacts, where the video is the positive proof requirement R11 asks
-    // for, so they are retained for a failure and discarded for a pass. The
-    // trace still carries the action log, DOM snapshots and sources with no
-    // screencast frames. DL-PW-07.
+    // A screenshot and a trace are retained for a failure and discarded for a
+    // pass; the video is the positive proof requirement R11 asks for and is
+    // retained unconditionally by the recording project below. The trace
+    // carries the action log, DOM snapshots and sources with no screencast
+    // frames. DL-PW-07.
     screenshot: 'only-on-failure',
     trace: {
       mode: 'retain-on-failure',
@@ -221,12 +222,10 @@ export default defineConfig({
   },
 
   // FIVE PROJECTS OVER TWO FILES. The first two run one case each of the
-  // recording spec, selected by the tag that case declares: the recording is the
-  // gate's positive proof and belongs to the run that IS the proof, while the
-  // diagnostics case is the Rule 3 observability exercise and needs no video of
-  // its own, which is one encode and one retained artifact per green run saved.
-  // Both share the viewport, so what the diagnostics case asserts is asserted at
-  // the recorded layout. DL-PW-05. The last three run the browser variants.
+  // recording spec, selected by the tag that case declares:
+  // `gameplay-recording` records video and `diagnostics-surface` does not. Both
+  // share the viewport, so what the diagnostics case asserts is asserted at the
+  // recorded layout. DL-PW-05. The last three run the browser variants.
   // DL-PW-04.
   projects: [
     {
@@ -254,8 +253,8 @@ export default defineConfig({
     // The three browser variants of tests/e2e/browser-variants.spec.ts. Each
     // declares its own `testMatch`, which overrides the top-level one for that
     // project, so the recording project above keeps collecting only its own
-    // spec. `grep` selects the one case whose environment the project builds;
-    // none of them records video, because the R11 artifact is the recording
+    // spec. `grep` selects the one case whose environment the project builds.
+    // None of the three records video: the R11 artifact is the recording
     // project's alone. DL-PW-04.
     {
       name: 'variant-webgl-unavailable',
@@ -295,19 +294,15 @@ export default defineConfig({
   webServer: {
     name: 'vite preview',
 
-    // BUILDS BY DEFAULT, so `npm run test:e2e` on a workstation is one command
-    // that needs nothing built beforehand. A caller that has already produced
-    // `dist/` in the same job sets `PLAYWRIGHT_PREVIEW_ONLY` and the build is
-    // not repeated — which is what the CI workflow does, since its own static
-    // build is the deployment-parity gate. DL-PW-06.
+    // BUILDS BY DEFAULT, so `npm run test:e2e` needs nothing built beforehand.
+    // A caller that has already produced `dist/` in the same job sets
+    // `PLAYWRIGHT_PREVIEW_ONLY`, and the build is then not repeated. DL-PW-06.
     command: previewOnlyRequested()
       ? `npm run preview -- --port ${PORT} --strictPort`
       : `npm run build && npm run preview -- --port ${PORT} --strictPort`,
     url: BASE_URL,
 
-    // The proof gate always drives a server it started itself, so the
-    // recording can never be made against a stale bundle left running by
-    // something else.
+    // The proof gate always drives a server it started itself.
     reuseExistingServer: false,
     timeout: WEB_SERVER_TIMEOUT,
     stdout: 'pipe',

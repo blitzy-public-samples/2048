@@ -1063,7 +1063,7 @@ describe('an absent run key is not a failure', () => {
 });
 
 /**
- * A raw string that cannot parse at all. The direct successor of the defect at
+ * A raw string that cannot parse at all. The direct successor of
  * js/local_storage_manager.js L54, where the stored text reached `JSON.parse`
  * with no guard and threw during startup.
  */

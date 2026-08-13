@@ -51,9 +51,14 @@ import type { Tile } from './tile';
 
 
 /**
- * Every hook name, in the order one turn reaches them. Frozen at runtime and a
+ * Every hook name, in canonical lifecycle order: the stage bracket first and
+ * last, the four a move passes through between them. Frozen at runtime and a
  * readonly tuple at compile time, and the canonical iteration order over the
  * six.
+ *
+ * `onStageStart` and `onStageEnd` bracket a STAGE and a turn reaches neither.
+ * The four a turn reaches, in the order it reaches them, are `onBeforeMove`,
+ * `onMerge`, `onSpawn` and `onAfterMove`.
  */
 export const HOOK_NAMES = Object.freeze([
   'onStageStart',
@@ -67,14 +72,13 @@ export const HOOK_NAMES = Object.freeze([
 export type HookName = (typeof HOOK_NAMES)[number];
 
 /**
- * CHANGED: no hook is exempt from the charge guard, so this module declares no
- * exemption set and src/engine/hook-bus.ts withholds every one of the six
- * hooks above from a subscriber whose budget is spent — which is the frozen
- * requirement that a limited-charge relic stops firing once exhausted (AAP R3,
- * V6). Standing rules a relic's persisted `state` slot records are reinstated
- * by `applyStandingRelicRules` of src/relics/relic-registry.ts on the
- * rehydration path, never by dispatching to an exhausted handler.
- * `DL-HOOKBUS-07`.
+ * No hook is exempt from the charge guard: this module declares no exemption
+ * set, and src/engine/hook-bus.ts withholds every one of the six hooks above
+ * from a subscriber whose budget is spent, so a limited-charge relic stops
+ * firing once exhausted (AAP R3, V6). Standing rules a relic's persisted
+ * `state` slot records are reinstated by `applyStandingRelicRules` of
+ * src/relics/relic-registry.ts on the rehydration path, never by dispatching to
+ * an exhausted handler. `DL-HOOKBUS-07`.
  */
 
 /**
@@ -469,11 +473,10 @@ export interface HookContext {
    * effect it was invoked for. Nothing in the bus is relic-specific. Decision
    * DL-HOOKBUS-01.
    *
-   * A HANDLER THAT DOES NOT ASK PAYS NOTHING, whatever else it did. A
-   * transformed payload member and a written board command are both effects
-   * whose TRIGGER only the relic can judge, and a stage-start rule installation
-   * is the clearest case — it writes a command and must cost nothing, since it
-   * prepares the rule rather than using it.
+   * A HANDLER THAT DOES NOT ASK PAYS NOTHING, whatever else it did: a
+   * transformed payload member and a written board command each cost nothing on
+   * their own. A stage-start rule installation writes a command and costs
+   * nothing.
    *
    * FULFILLED WITH THE REST OF THE TRANSACTION. The request is recorded, not
    * applied: the bus spends the charge only once the handler has returned and

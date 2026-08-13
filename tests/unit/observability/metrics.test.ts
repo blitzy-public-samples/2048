@@ -1145,10 +1145,10 @@ describe('the engine boundary agrees with the spawn families', () => {
     const snapshot = registry.snapshot();
     const counts = spawnCounts(registry);
 
-    // The defect this pins. Every one of those ten inputs emitted `move:after`
-    // as its completion signal, so a turn family fed from the emission read
-    // ten turns for a run in which nothing resolved — and every rate derived
-    // from it, merges and spawns and score per turn, was skewed with it.
+    // The invariant this pins. Every one of those ten inputs emits `move:after`
+    // as its completion signal, so a turn family fed from the emission would
+    // read ten turns for a run in which nothing resolved, skewing every rate
+    // derived from it — merges, spawns and score per turn.
     expect(counterValue(snapshot, METRIC_NAMES.turnsTotal)).toBe(0);
     expect(eventCounterValue(snapshot, 'move:after')).toBe(idle.length);
 
@@ -2959,7 +2959,7 @@ describe('a duration histogram exposes the default layout', () => {
     expect(histogram.bucketCounts[atFrameBudget + 1]).toBe(1);
 
     // The 1200 ms overlay delay lands in the 1200 ms bucket, which is the
-    // boundary style/main.scss L234 supplied.
+    // boundary the overlay's own fade-in cadence in style/main.scss supplied.
     histogram.observe(1200);
 
     expect(histogram.bucketCounts[bounds.indexOf(1200)]).toBe(2);
@@ -4181,8 +4181,9 @@ describe('a flood of one rejection kind is bounded in the log', () => {
     });
 
   it('separates two reasons that report under one message', () => {
-    // Both refusals report as `metric label rejected`, so a key of the
-    // message alone would have hidden the second behind the first.
+    // Both refusals report under the one message `metric label rejected` and
+    // carry different reasons, so they must occupy different throttle buckets.
+    // DL-METRIC-11.
     harness.registry.counter('suite_labels_a_total', { 'not a label': 'x' });
     harness.registry.counter('suite_labels_b_total', {
       suite: 'v'.repeat(400),

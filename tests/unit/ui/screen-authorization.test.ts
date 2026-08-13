@@ -1,19 +1,19 @@
 // Contract suite for action authorization, AAP R8 and R9.
 //
-// WHAT WAS WRONG
-//   `InputContext` has three members and `SCREEN_INPUT_CONTEXTS` maps six of the
-//   seven screens onto one of them, `'overlay'`, so the context could say that
-//   SOME overlay was up and never which one. Authorization was then decided once
-//   per modality and once per action: the keyboard and the gestures read the
-//   context, the reward digits read `rewardOpen` alone, and `keepPlaying` and
-//   `startRun` read nothing at all. The consequences were concrete — the default
-//   `C` continued a won game from behind the settings dialog, mutating and
-//   persisting board state the player could not see; a reward digit or a pointer
-//   press selected a relic from behind that same dialog, because the reward
-//   container is a SIBLING of the panel inside `.screen-layer` and so was not
-//   covered by the game region the dialog marks inert; and the `.retry-button`
-//   discarded the board of whatever run was in force from any state that showed
-//   it.
+// ONE AUTHORIZATION DECISION, AGAINST THE EXACT SCREEN `InputContext` has three
+// members and `SCREEN_INPUT_CONTEXTS` maps six of the seven screens onto one of
+// them, `'overlay'`, so the context can say that SOME overlay is up and never
+// which one. Authorization is therefore decided once, by `authorizes()`,
+// against the EXACT screen and the topmost modal — not once per modality and
+// once per action.
+//
+// Were it decided per modality, the default `C` would continue a won game from
+// behind the settings dialog, mutating and persisting board state the player
+// cannot see; a reward digit or a pointer press would select a relic from
+// behind that same dialog, the reward container being a SIBLING of the panel
+// inside `.screen-layer` and so not covered by the game region the dialog marks
+// inert; and the `.retry-button` would discard the board of whatever run is in
+// force from any state that shows it.
 //
 // WHAT THIS SUITE PINS
 //   `ACTION_SCREENS` agrees with `TRANSITIONS` rather than merely resembling it;
@@ -273,7 +273,7 @@ const rewardCards = (): string[] =>
 /**
  * Opens the settings dialog.
  *
- * CHANGED: through the router rather than through `#settings-button`. The
+ * Through the router rather than through `#settings-button`. The
  * control lives in the page shell, and every state this section drives from —
  * `won`, `reward` — marks that shell `inert`, so the control layer withholds it
  * and a press on it publishes nothing. `openSettings` is authorized from every

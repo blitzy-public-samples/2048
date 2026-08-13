@@ -198,8 +198,8 @@ const DECLARED_AT_IMPORT = Object.freeze({
 });
 
 /**
- * A live tile, which is the operand src/engine/move-resolver.ts L300 hands
- * `config.merge.canMerge` and L303 projects into the merge payload.
+ * A live tile, which is the operand src/engine/move-resolver.ts hands
+ * `config.merge.canMerge` and projects into the merge payload.
  *
  * @param x Column the tile occupies.
  * @param y Row the tile occupies.
@@ -591,7 +591,7 @@ function stageStartPayloadFor(
 }
 
 /**
- * A merge payload shaped as src/engine/move-resolver.ts L301-L308 dispatches
+ * A merge payload shaped as src/engine/move-resolver.ts dispatches
  * one: the two live tiles, `resultValue` the producer in force applied to the
  * MOVING tile as js/game_manager.js L157 did, and `scoreDelta` equal to it as
  * L167 accrued it.
@@ -938,7 +938,7 @@ describe('the merge predicate chain-catalyst records on stage start', () => {
       // The ladder branch is symmetric in the two face values, so the guard is
       // asserted with the recorded merge on the LARGER operand and then on the
       // smaller one. js/game_manager.js L156 held `!next.mergedFrom` beside its
-      // equality test, and src/engine/move-resolver.ts L313 writes `mergedFrom`
+      // equality test, and src/engine/move-resolver.ts writes `mergedFrom`
       // onto the tile a merge produced, so a target carrying it has already
       // merged during the traversal in progress.
       const lowMoving = tileAt(1, 0, PROBE_VALUE);
@@ -1529,17 +1529,18 @@ describe('the declaration and the shared defaults after this suite', () => {
 /* ==========================================================================
  * 7. Composed: chain-catalyst wrapping frostbind, in BOTH pickup orders
  *
- * Every section above is an isolation section. This one is not: it builds a real
- * `Engine` over a real `HookBus` and a real `RelicRegistry` holding both
- * predicate-installing relics of this family, because the defect it pins is a
- * property of the COMPOSITION and is invisible to either relic alone.
+ * Every section above is an isolation section. This one is not: it builds a
+ * real `Engine` over a real `HookBus` and a real `RelicRegistry` holding both
+ * predicate-installing relics of this family, because the property it pins
+ * belongs to the COMPOSITION and is invisible to either relic alone.
  *
- * The ladder branch used to read every refusal the delegate returned as a
- * refusal about the two face values. `frostbind`'s wrapper refuses by destination
- * CELL, so where `chain-catalyst` was picked up second — and its wrapper was
- * therefore the outer one — a ladder-step pair merged onto a frozen cell and the
- * frost was overridden. Pickup order `[chain-catalyst, frostbind]` never showed
- * it, because the frost was then the outer verdict, so both orders are asserted.
+ * The ladder branch must not read every refusal the delegate returns as a
+ * refusal about the two face values. `frostbind`'s wrapper refuses by
+ * destination CELL, so where `chain-catalyst` is picked up second — and its
+ * wrapper is therefore the outer one — a ladder-step pair merging onto a frozen
+ * cell would override the frost. Pickup order `[chain-catalyst, frostbind]`
+ * never showed it, because the frost was then the outer verdict, so both orders
+ * are asserted.
  *
  * The verdict is read three ways: off the installed predicate, through
  * `movesAvailable` — the loss probe, which asks the same predicate up to four

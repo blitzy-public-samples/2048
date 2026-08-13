@@ -433,7 +433,7 @@ describe('taking an offered relic', () => {
     expect(subject.relics.ownedIds()).not.toContain(chosen);
   });
 
-  // ADDED: the refusal above is perceivable. The transaction rolls the relic
+  // The refusal above is perceivable. The transaction rolls the relic
   // back and the same three cards come back, which on its own is a pressed card
   // that changes nothing and says nothing. DL-MAIN-37.
   it('says why a refused press left the same three cards standing', async () => {
@@ -584,5 +584,88 @@ describe('the relic commit context', () => {
     // Pickup order is dispatch order, and a HUD renders the tray in it, so the
     // order a commit carries is not cosmetic.
     expect(ids).toEqual([OPENING_OFFER[1], second]);
+  });
+});
+
+/* ==========================================================================
+ * THE STAGE TRANSITION AN ACCEPTED REWARD PERFORMS (DL-MAIN-42).
+ *
+ * `RunController` contains a `startStage` that raises, records the stage as owed
+ * an open and publishes `stageOpenPending()` and `openPendingStage()` for a
+ * caller to close the record with. Nothing called either, so an accepted reward
+ * could leave the run standing on a stage index no board had been opened for.
+ * These two cases are the production caller.
+ * ========================================================================== */
+
+describe('a stage transition the engine refuses', () => {
+  it('retries the open once and completes the transition', () => {
+    const subject = clearOpeningStage();
+    const id = OPENING_OFFER[0] ?? '';
+    const engine = subject.engine;
+    const open = engine.startStage.bind(engine);
+    let attempts = 0;
+
+    const spy = vi
+      .spyOn(engine, 'startStage')
+      .mockImplementation((board): void => {
+        attempts += 1;
+
+        if (attempts === 1) {
+          throw new Error('the stage could not be opened');
+        }
+
+        open(board);
+      });
+
+    const stageBefore = subject.run.state().stageIndex;
+
+    expect(subject.rewards.choose(id)).toBe(true);
+
+    spy.mockRestore();
+
+    // The first attempt raised, the recovery retried it, and the run is on a
+    // stage the engine actually opened.
+    expect(attempts).toBe(2);
+    expect(subject.run.stageOpenPending()).toBeNull();
+    expect(subject.run.state().stageIndex).toBe(stageBefore + 1);
+    expect(counter(subject, 'run.stageOpen.recovered')).toBe(1);
+    expect(counter(subject, 'run.stageOpen.unrecovered')).toBe(0);
+  });
+
+  it('surfaces the failure once when the retry also fails', async () => {
+    const subject = clearOpeningStage();
+    const id = OPENING_OFFER[0] ?? '';
+    const engine = subject.engine;
+
+    const spy = vi
+      .spyOn(engine, 'startStage')
+      .mockImplementation((): void => {
+        throw new Error('the stage could not be opened');
+      });
+
+    // The reward itself still commits: the relic is held and the round is
+    // closed, because the transaction the controller runs completed before the
+    // open was attempted.
+    expect(subject.rewards.choose(id)).toBe(true);
+    expect(subject.run.relics().map((relic) => relic.id)).toEqual([id]);
+
+    // Two attempts and no more: the original and the one bounded retry.
+    expect(spy).toHaveBeenCalledTimes(2);
+    expect(subject.run.stageOpenPending()).not.toBeNull();
+    expect(counter(subject, 'run.stageOpen.unrecovered')).toBe(1);
+
+    await settleAnnouncements();
+
+    // SAID, not merely counted: the board the player is on is no longer the
+    // stage the run reports.
+    expect(announced()).toContain('could not be started');
+
+    // A further commit does not retry the same stage again.
+    press('ArrowDown', 'ArrowDown');
+
+    expect(spy).toHaveBeenCalledTimes(2);
+    expect(counter(subject, 'run.stageOpen.unrecovered')).toBe(1);
+
+    spy.mockRestore();
   });
 });

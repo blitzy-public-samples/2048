@@ -17,8 +17,8 @@
 //                                                `prefers-reduced-motion`
 //                                                query, closed by the
 //                                                reduced-motion layer here
-//   TR-A11Y-03  index.html L70-L72               the empty `.tile-container`,
-//                                                whose accessible successor is
+//   TR-A11Y-03  index.html                       the empty `.tile-container`,
+//               .tile-container                  whose accessible successor is
 //                                                the parallel board layer
 //                                                styled here
 //   TR-A11Y-04  target-only row                  the visually-hidden utility
@@ -53,7 +53,7 @@ $a11y-mobile-board-extent:
 
 $a11y-instant: math.div($transition-speed, 10000) !default;
 
-// ADDED: target size.
+// Target size.
 //
 // `$a11y-control-height` restates the derivation style/_screens.scss uses for
 // `$screen-control-height` — the height every generated control paints, and the
@@ -61,12 +61,12 @@ $a11y-instant: math.div($transition-speed, 10000) !default;
 // the extension below has to know the painted height to work out how much is
 // missing.
 //
-// `$a11y-target-size` is the only length in this file that is NOT derived from a
-// design token, and deliberately so: it is the 44px floor named by WCAG 2.5.5,
-// an external requirement rather than a property of the product's scale. It is
-// stated once, here, so the number appears in exactly one place.
+// `$a11y-target-size` reads `$minimum-target-size` of
+// style/_tokens.scss, which resolves through the projection from
+// `minimumTargetSize` of src/theme/tokens.ts. It was the one length in this file
+// written as a literal; no declaration below carries one now. DL-A11Y-13.
 $a11y-control-height: math.div($grid-spacing * 8, 3) !default;
-$a11y-target-size: 44px !default;
+$a11y-target-size: $minimum-target-size !default;
 
 // The shortfall between the painted height a control's token gives it and the
 // floor above, halved. Published for a caller that needs the difference; the
@@ -153,11 +153,9 @@ $a11y-shadow-none: 0 0 transparent;
     var(--theme-focus-ring-contrast, #{$bright-text-color});
   outline-offset: 0;
 
-  // Written into the focus SLOT rather than onto `box-shadow` directly. The
-  // outer band and the selected state used to be two declarations of the same
-  // property, so whichever won erased the other — which is why the selected
-  // rules below had to be written `:not(:focus-visible)`, and why a focused
-  // control showed no selected and no pressed feedback at all. DL-A11Y-10.
+  // Written into the focus SLOT rather than onto `box-shadow` directly, so the
+  // outer band and the selected state compose on one property instead of each
+  // erasing the other. DL-A11Y-10.
   --a11y-focus-shadow: 0 0 0 #{$a11y-ring-extent}
     var(--theme-focus-ring, #{$a11y-focus-ring-fallback});
 }
@@ -185,10 +183,9 @@ $a11y-shadow-none: 0 0 transparent;
     }
   }
 
-  // `:not(:focus-visible)` REMOVED from both. Each writes the state slot now,
-  // so a control that is focused and selected carries the outer focus band and
-  // the inset selected ring together instead of one erasing the other, and a
-  // focused control gives press feedback where it previously gave none.
+  // Neither carries `:not(:focus-visible)`: each writes the state slot, so a
+  // control that is focused and selected carries the outer focus band and the
+  // inset selected ring together, and a focused control gives press feedback.
   // DL-A11Y-10.
   &:active:not(:disabled):not([aria-disabled="true"]),
   &[aria-pressed="true"] {
@@ -233,21 +230,16 @@ $a11y-shadow-none: 0 0 transparent;
   }
 }
 
-// CHANGED: the generated on-screen controls reach the WCAG 2.5.5 target floor
-// IN THEIR PAINTED BOX.
-//
-// The rule previously grew a transparent `::after` by `$a11y-target-inset` on
-// each block edge and left the box at the 40px `$a11y-control-height`, so the
-// target measured 44px by hit test and 40px by `getBoundingClientRect()`.
-// `min-block-size` puts the floor in the box itself, where it is measurable by
-// either method, and the pseudo-element extension it replaces is gone.
+// The generated on-screen controls reach the WCAG 2.5.5 target floor IN THEIR
+// PAINTED BOX: `min-block-size` puts the floor in the box itself, where it is
+// measurable by hit test and by `getBoundingClientRect()` alike, and no
+// pseudo-element extension is used.
 //
 // SCOPED TO THE GENERATED CONTROLS ALONE — `.restart-button`,
 // `.settings-button` and the retained overlay controls are not selected, so the
 // 40px the design token gives the frozen classic identity is untouched by this
-// rule. `min-inline-size` covers the other axis, which matters now that the four
-// movement controls paint the direction word alone: their widest label no longer
-// guarantees the floor on its own. DL-A11Y-12 supersedes DL-A11Y-11.
+// rule. `min-inline-size` covers the other axis, which the four movement
+// controls need because each paints the direction word alone. DL-A11Y-12.
 // The `button` qualifier is load-bearing: every generated control also carries
 // `.screen-button`, whose rule is emitted LATER in the sheet, so a bare class
 // selector here would lose `display` to `@mixin screen-control`'s

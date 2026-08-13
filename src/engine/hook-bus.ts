@@ -1,12 +1,14 @@
-// The hook bus: pickup-order dispatch of the six engine hooks.
+// The hook bus: pickup-order dispatch of the six engine hooks. It supersedes
+// the append-only subscriber registry of js/keyboard_input_manager.js and adds
+// four properties to it.
 //
 // This module reads no DOM, performs no I/O, consumes no randomness of its
 // own, reads no clock, and is synchronous throughout. Nothing it hands a
 // handler re-enters dispatch, and it branches on no subscriber identity.
 //
-// That superseded bus is row TR-HOOKBUS-01 of
-// docs/TRACEABILITY_MATRIX.md, and the four properties added to it are one
-// row each:
+// The superseded registry is row TR-HOOKBUS-01 of
+// docs/TRACEABILITY_MATRIX.md, and the four added properties are one row
+// each:
 //   TR-HOOKBUS-01  js/keyboard_input_manager.js L18-L32
 //                                the append-only `on` and the synchronous
 //                                in-order `emit` this bus supersedes
@@ -15,7 +17,8 @@
 //                                   handler is reached
 //   TR-HOOKBUS-04  target-only row  per-subscriber error isolation
 //   TR-HOOKBUS-05  target-only row  the compounding payload protocol
-// The four are described in the order below:
+//
+// The bus's properties, in the order they are described below:
 //
 //   pickup order      every subscriber carries a pickup-order index and
 //                     dispatch walks the subscribers bound to a hook in
@@ -63,17 +66,14 @@
 //                     and its return has validated, and are discarded
 //                     together when it throws or its return is refused.
 //
-// WHAT A THROWING HANDLER LEAVES BEHIND: NOTHING. That claim is enforced
-// rather than asserted, at four crossings, because each was a way for a failed
-// handler to change a run:
+// WHAT A THROWING HANDLER LEAVES BEHIND: NOTHING. The property is enforced at
+// five crossings:
 //
 //   the payload      `copyPayload` gives the handler its own object, so an
 //                    in-place write reaches that copy alone.
 //   the state slot   `copyState` copies the slot at registration, into the
 //                    context, and back out again, so a write at ANY DEPTH
-//                    reaches a copy. A slot taken over by reference — as it
-//                    was — left nested writes behind even though the
-//                    reassignment was rolled back.
+//                    reaches a copy rather than the slot the bus holds.
 //   the charge       a spend is REQUESTED during the handler and deducted
 //                    only after its return validates, so a handler that
 //                    asked and then threw, or whose return was refused,
@@ -88,10 +88,6 @@
 //                    advances the run's substreams only on commit, so a
 //                    handler that draws and then throws consumes nothing and
 //                    perturbs no later spawn.
-//
-// This module reads no DOM, performs no I/O, consumes no randomness of its own,
-// reads no clock, and is synchronous throughout. Nothing it hands a handler
-// re-enters dispatch, and it branches on no subscriber identity.
 //
 // THE SHARED CHANNEL. Besides dispatching the six hooks to relics, this bus
 // carries the seven engine events to every non-relic peer — the renderer, the
@@ -126,7 +122,7 @@ import type {
 } from './hooks';
 import { HOOK_NAMES } from './hooks';
 
-// ADDED: the goal kinds as data, so the validator below measures a returned
+// The goal kinds as data, so the validator below measures a returned
 // `goal.kind` against the declared set rather than against `typeof`.
 // DL-HOOKBUS-08.
 import { isStageGoalKind } from '../config/stage-config';
@@ -416,12 +412,17 @@ export interface HookBus {
   /**
    * Dispatches one hook to every subscriber bound to it, in pickup order.
    *
+   * @param hook Hook name to dispatch, one of `HOOK_NAMES`. It keys both the
+   *   payload type and the handler table each subscriber is read from.
    * @param payload The dispatch-input payload, carrying the live `Grid` on
    *   `onBeforeMove` and `onAfterMove` and the two live `Tile`s on `onMerge`.
    *   Handlers never see those objects: the bus substitutes the frozen
    *   capability views of `HookPayloadMap` for them before the first handler
    *   is invoked, so a handler that throws cannot leave the board or a tile
    *   mutated behind it.
+   * @param environment The live rules, the run's named RNG substreams and the
+   *   live board each handler's `HookContext` is built over, for this dispatch
+   *   only.
    * @returns The accumulated payload — carrying the views, not the live
    *   objects — and the dispatch's counts. Throws nothing that a handler or
    *   the reporter threw.
@@ -434,12 +435,17 @@ export interface HookBus {
 
   /**
    * Deducts charges from one subscriber: the path a COLLABORATOR spends a
-   * budget through, and one of the two callers of the module's single
-   * deduction rule — the other being the per-handler commit, which spends what
-   * a handler requested through `HookContext.spendCharge`.
+   * budget through. The other caller of the module's single deduction rule is
+   * the per-handler commit, which spends what a handler requested through
+   * `HookContext.spendCharge`.
    *
+   * @param id Identifier of the subscriber to deduct from. An identifier that
+   *   is not held, or one whose subscriber carries no budget, deducts nothing.
    * @param amount Charges to deduct. Rounded towards zero and clamped to
    *   zero from below; defaults to `1`.
+   * @returns The outcome: whether the identifier was held, whether its
+   *   subscriber carries a budget at all, how many charges were consumed, and
+   *   the remaining budget where there is one.
    */
   consumeCharge(id: string, amount?: number): ChargeConsumption;
 
@@ -472,6 +478,29 @@ export interface HookBus {
    * call.
    */
   metrics(): HookBusMetrics;
+
+  /**
+   * Zeroes every counter this bus keeps, leaving every capability.
+   *
+   * THE RUN BOUNDARY. `metrics()` reports LIFETIME totals, and the metrics
+   * registry folds them by their increase since the previous fold of the same
+   * key — a key namespaced by the correlation identifier. A composition root
+   * that rotates the identifier for a new run therefore folded the whole
+   * lifetime absolute as if it were the new run's first delta, so run two opened
+   * carrying every dispatch, invocation, skip, rejection, failure and degraded
+   * skip of run one.
+   *
+   * The registrations, their handlers, their charges, their pickup order and
+   * their degraded marks all SURVIVE: this discards readings, not capability.
+   * `registered` therefore still reports the subscribers held, while
+   * `acceptedRegistrations`, `rejectedRegistrations`, `removedSubscribers`,
+   * `chargesConsumed`, `reporterFaults`, `lastReporterFault`, every per-hook
+   * row, the totals row and every per-subscriber row return to zero.
+   * DL-HOOKBUS-12.
+   *
+   * @returns Whether any counter had a non-zero value to discard.
+   */
+  resetMetrics(): boolean;
 }
 
 /**
@@ -496,8 +525,9 @@ export type HookBusTracing = HookDispatchTracing;
 export interface HookBusOptions {
   /**
    * Correlation identifier of the run, carried into every report and every
-   * dispatch context. Injected, never derived here: the one authority is
-   * `deriveCorrelationId` in src/observability/logger.ts.
+   * dispatch context. Injected, never derived here: this module reaches no
+   * observability module and no run module, so it neither derives nor recovers
+   * a value. src/main.ts supplies the one the run reports under.
    */
   readonly correlationId?: CorrelationSource;
 
@@ -592,11 +622,9 @@ const MAX_STATE_MEMBERS = 256;
  *
  * THE STATE-OWNERSHIP BOUNDARY. A slot is JSON data — the run envelope
  * persists it — so a copy of it is a copy in full, and the bus holds a slot no
- * caller and no handler shares an object with. Copying at EVERY crossing —
- * registration and each hand-off to a context — is what makes a rollback total:
- * a reference held across one of them would let a handler's write into a nested
- * member survive a throw the reassignment was rolled back for. Decision
- * DL-HOOKBUS-04.
+ * caller and no handler shares an object with. The copy is taken at EVERY
+ * crossing — registration and each hand-off to a context — which is what makes
+ * a rollback total at any depth. Decision DL-HOOKBUS-04.
  *
  * A value JSON cannot carry — a function, a symbol, `undefined` inside an
  * object — is dropped exactly as `JSON.stringify` would drop it, so a slot
@@ -819,11 +847,10 @@ function isStageGoalShape(value: unknown): boolean {
   return (
     isRecord(value) &&
     hasExactMembers(value, ['kind', 'target']) &&
-    // CHANGED: measured against the declared kinds rather than `typeof value.kind
-    // === 'string'`. The engine ADOPTS the goal this payload resolves to, and
-    // `evaluateStageGoal` raises on a kind it cannot narrow, so a handler that
-    // returned `{ kind: 'anything', target: 8 }` was admitted here and threw
-    // later, on a stage that had already started. DL-HOOKBUS-08.
+    // Measured against the declared kinds, not against `typeof value.kind`.
+    // The engine ADOPTS the goal this payload resolves to and
+    // `evaluateStageGoal` raises on a kind it cannot narrow, so a kind outside
+    // the declared set is refused here rather than later. DL-HOOKBUS-08.
     isStageGoalKind(value.kind) &&
     isFiniteNumber(value.target)
   );
@@ -863,11 +890,9 @@ function isValidPayload<K extends HookName>(
           'boardSize',
         ]) &&
         isNonNegativeInteger(candidate.stageIndex) &&
-        // INVARIANT, exactly as src/engine/hooks.ts declares it: `goal` alone is
-        // transformable. CHANGED: the index is now pinned to the dispatched one,
-        // where any non-negative integer used to be admitted — so a handler
-        // could renumber the stage the engine had opened, and the stage it
-        // reported starting was not the stage it was on. DL-HOOKBUS-09.
+        // INVARIANT, exactly as src/engine/hooks.ts declares it: `goal` alone
+        // is transformable. The index is pinned to the dispatched one, so a
+        // handler cannot renumber the stage the engine opened. DL-HOOKBUS-09.
         candidate.stageIndex === original.stageIndex &&
         isStageGoalShape(candidate.goal) &&
         typeof candidate.seed === 'string' &&
@@ -946,10 +971,9 @@ function isValidPayload<K extends HookName>(
         isFiniteNumber(candidate.score) &&
         typeof candidate.over === 'boolean' &&
         typeof candidate.won === 'boolean' &&
-        // CHANGED: pinned to the dispatched value, where any boolean used to be
-        // admitted. The engine DERIVES `terminated` after the dispatch, so a
-        // handler that wrote it changed nothing the engine went on to use while
-        // every later handler in the chain read the untruthful value.
+        // Pinned to the dispatched value. The engine DERIVES `terminated`
+        // after the dispatch, so a handler's write would reach no engine
+        // decision and would only mislead the handlers after it in the chain.
         // DL-HOOKBUS-09.
         candidate.terminated === original.terminated
       );
@@ -1192,13 +1216,12 @@ interface RngTransaction {
 /**
  * Opens one handler's randomness transaction over the run's substreams.
  *
- * THE RANDOMNESS BOUNDARY. `stream` hands back a FORK of the named substream
- * rather than the substream itself, memoised so the instance-stability
- * contract holds within one dispatch: a handler that addresses one name twice
- * draws from one fork. The real substreams are advanced only by `commit()`, so
- * a handler that draws and then throws consumes no randomness and shifts no
- * later spawn — which is what keeps a failed handler unable to change a seeded
- * run. Decision DL-HOOKBUS-04.
+ * THE RANDOMNESS BOUNDARY. `stream` hands back a FORK of the named substream,
+ * memoised so the instance-stability contract holds within one dispatch: a
+ * handler that addresses one name twice draws from one fork. The real
+ * substreams advance ONLY on `commit()`. INVARIANT: a handler that draws and
+ * then throws consumes no randomness and shifts no later spawn.
+ * Decision DL-HOOKBUS-04.
  *
  * `snapshotCursors` reports the fork's position for a substream the handler
  * has drawn from and the real position for the rest, so a handler observes its
@@ -1481,7 +1504,7 @@ export function createHookBus(options: HookBusOptions = {}): HookBus {
   const pending: (() => void)[] = [];
 
   /**
-   * ADDED: registrations accepted while a dispatch is in progress, keyed by
+   * Registrations accepted while a dispatch is in progress, keyed by
    * identifier, held from the moment `register` accepts one until its deferred
    * insertion lands. `findRegistration` reads it, so an identifier is held from
    * acceptance rather than from insertion. DL-HOOKBUS-10.
@@ -1785,11 +1808,10 @@ export function createHookBus(options: HookBusOptions = {}): HookBus {
       return held;
     }
 
-    // ADDED: a registration accepted during a dispatch is held even though its
-    // insertion is still deferred. Without this the duplicate check below could
-    // not see it, so registering one new identifier twice inside a single
-    // dispatch queued two inserts and the bus dispatched to the same subscriber
-    // twice from the next hook onwards. DL-HOOKBUS-10.
+    // A registration accepted during a dispatch is held even though its
+    // insertion is still deferred, so the duplicate check below sees it and one
+    // identifier registered twice inside a single dispatch queues one insert.
+    // DL-HOOKBUS-10.
     const queued = pendingRegistrations.get(id);
 
     return queued !== undefined && !queued.removed ? queued : undefined;
@@ -1946,10 +1968,8 @@ export function createHookBus(options: HookBusOptions = {}): HookBus {
    * The channel peers subscribe to.
    *
    * Constructed with a reporter carrying the LISTENER CHANNEL ALONE: a relayed
-   * event is already counted by the emitter that emitted it, and a second count
-   * here would double every `engine.event.emit`. A peer that throws is still
-   * reported, because containment that reports nothing is indistinguishable
-   * from a peer that never ran. DL-HOOKBUS-06.
+   * event is already counted by the emitter that emitted it, so this channel
+   * counts nothing and only reports a peer that throws. DL-HOOKBUS-06.
    */
   const relayReporter: EngineReporter = Object.freeze({
     onListenerError: (report: EngineListenerErrorReport): void => {
@@ -1984,11 +2004,10 @@ export function createHookBus(options: HookBusOptions = {}): HookBus {
     // payload is passed on as it arrived: the board, the tiles and the score
     // travel by reference exactly as they do on the source.
     //
-    // CHANGED: taken one at a time inside a guard, where they used to be taken
-    // by one `map` over the names. An emitter whose `on` raised part-way through
-    // that map left every listener taken before the throw registered with no
-    // handle to release them, and left `source` marked relayed — so the relay
-    // could neither be released nor attached again. DL-HOOKBUS-11.
+    // Taken one at a time inside a guard, so an emitter whose `on` raises
+    // part-way through leaves a handle for every listener already taken and
+    // leaves `source` unmarked, and the relay can be attached again.
+    // DL-HOOKBUS-11.
     const releases: EngineEventSubscription[] = [];
 
     try {
@@ -2073,8 +2092,8 @@ export function createHookBus(options: HookBusOptions = {}): HookBus {
         removed: false,
       };
 
-      // ADDED: held under its identifier for as long as its insertion is
-      // deferred. DL-HOOKBUS-10.
+      // Held under its identifier for as long as its insertion is deferred.
+      // DL-HOOKBUS-10.
       if (dispatchDepth > 0) {
         pendingRegistrations.set(id, registration);
       }
@@ -2089,9 +2108,9 @@ export function createHookBus(options: HookBusOptions = {}): HookBus {
           pendingRegistrations.delete(id);
         }
 
-        // ADDED: an identifier unregistered while its own insertion was still
-        // deferred is not inserted at all, so the array never holds a record
-        // whose removal has already been accounted for. DL-HOOKBUS-10.
+        // An identifier unregistered while its own insertion was still deferred
+        // is not inserted at all, so the array never holds a record whose
+        // removal has already been accounted for. DL-HOOKBUS-10.
         if (registration.removed) {
           return;
         }
@@ -2204,16 +2223,12 @@ export function createHookBus(options: HookBusOptions = {}): HookBus {
             const charges = subscription.charges;
 
             // THE CHARGE GUARD, and the one place a spent budget withholds a
-            // handler.
-            //
-            // CHANGED: it withholds ALL SIX hooks, with no hook exempted, so a
+            // handler. It withholds ALL SIX hooks, with none exempted, so a
             // subscriber whose budget is spent runs no handler and applies no
-            // effect — the frozen requirement that a limited-charge relic stops
-            // firing once exhausted (AAP R3, V6). Standing rules a relic's
-            // persisted `state` slot records are reinstated on the rehydration
-            // path by `applyStandingRelicRules` of
-            // src/relics/relic-registry.ts, which dispatches nothing.
-            // DL-HOOKBUS-07.
+            // effect (AAP R3, V6). Standing rules a relic's persisted `state`
+            // slot records are reinstated on the rehydration path by
+            // `applyStandingRelicRules` of src/relics/relic-registry.ts, which
+            // dispatches nothing. DL-HOOKBUS-07.
             if (isChargeSpent(charges)) {
               skipped += 1;
               noteSkip(hook, id, 'exhausted');
@@ -2436,6 +2451,43 @@ export function createHookBus(options: HookBusOptions = {}): HookBus {
         hooks: Object.freeze(hooks),
         subscribers: Object.freeze(perSubscriber),
       });
+    },
+
+    resetMetrics(): boolean {
+      // Measured BEFORE the zeroing, so the answer describes what was
+      // discarded rather than what is there afterwards.
+      const held =
+        acceptedRegistrations > 0 ||
+        rejectedRegistrations > 0 ||
+        removedSubscribers > 0 ||
+        chargesConsumed > 0 ||
+        reporterFaults > 0 ||
+        hookRows.size > 0 ||
+        subscriberRows.size > 0 ||
+        totals.dispatched > 0;
+
+      acceptedRegistrations = 0;
+      rejectedRegistrations = 0;
+      removedSubscribers = 0;
+      chargesConsumed = 0;
+      reporterFaults = 0;
+      lastReporterFault = undefined;
+
+      // The ROWS GO, not their values: a hook or a subscriber that has not been
+      // counted since the reset is absent from the map again, and `hookRow`
+      // and `subscriberRow` build a fresh zeroed row on the next count. That
+      // is what keeps a subscriber unregistered in the previous run from
+      // reappearing in `subscribers` with the previous run's counts.
+      hookRows.clear();
+      subscriberRows.clear();
+
+      // The TOTALS row is reused rather than replaced, because `note` closes
+      // over it.
+      for (const outcome of Object.keys(totals) as (keyof HookCounterRow)[]) {
+        totals[outcome] = 0;
+      }
+
+      return held;
     },
   });
 }

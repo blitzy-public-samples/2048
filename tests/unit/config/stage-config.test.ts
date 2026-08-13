@@ -249,12 +249,13 @@ describe('stageGoalForIndex, the A3 config-driven stage target', () => {
     );
   });
 
-  // DL-STAGE-05. THIS MODULE PUBLISHES THE ONE STAGE DOMAIN, and the two
-  // consumers that used to declare their own read it here instead:
-  // `MAX_PERSISTED_STAGE_INDEX` of src/run/run-state.ts bounds a stored index by
-  // it, and `RunController.advanceStage()` refuses to leave it. The domain is
-  // pinned as the safe-integer range because a stage index is reached by repeated
-  // increment and carried through `JSON.stringify`, and above it neither is exact.
+  // DL-STAGE-05. THIS MODULE PUBLISHES THE ONE STAGE DOMAIN, and both consumers
+  // read it here rather than declaring their own: `MAX_PERSISTED_STAGE_INDEX`
+  // of src/run/run-state.ts bounds a stored index by it, and
+  // `RunController.advanceStage()` refuses to leave it. The domain is pinned as
+  // the safe-integer range because a stage index is reached by repeated
+  // increment and carried through `JSON.stringify`, and above it neither is
+  // exact.
   it('publishes the stage-index domain as the safe-integer range', () => {
     expect(MAX_STAGE_INDEX).toBe(Number.MAX_SAFE_INTEGER);
 

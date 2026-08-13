@@ -125,9 +125,9 @@
         /*
           `derivedColors.focusRingColor`:
           `color.adjust($text-color, $lightness: -22%)` — the same derivation
-          `diagnostics-surface` of style/_themes.scss L130 is written from, and
-          the surface src/observability/diagnostics-overlay.ts renders its
-          panels on.
+          the `diagnostics-surface` palette entry of style/_themes.scss is
+          written from, and the surface src/observability/diagnostics-overlay.ts
+          renders its panels on.
         */
         --diagnostics-surface: #3a3631;
 
@@ -147,7 +147,7 @@
 
         /*
           `math.div($tile-border-radius, 3)` — the derivation `$a11y-hairline`
-          of style/_a11y.scss L36 and `CONTROL_BORDER_WIDTH` of
+          of style/_a11y.scss and `CONTROL_BORDER_WIDTH` of
           src/observability/diagnostics-overlay.ts are written from.
         */
         --hairline: 1px;
@@ -157,8 +157,8 @@
 
         /*
           `mobileFieldWidth` / `$mobile-field-width`, style/_tokens.scss — the
-          length style/main.scss L814-816 rebinds `$field-width` to inside its
-          own `smaller($mobile-threshold)` block, mirrored here so this document
+          length style/main.scss rebinds `$field-width` to inside its own
+          `smaller($mobile-threshold)` block, mirrored here so this document
           rescales on the same token rather than on a literal. DL-DIAG-20.
         */
         --mobile-field-width: 280px;
@@ -205,7 +205,7 @@
 
         /* --- Motion. ------------------------------------------------------ */
 
-        /* `transitionSpeed` / `$transition-speed`, style/_tokens.scss L39. */
+        /* `transitionSpeed` / `$transition-speed`, style/_tokens.scss. */
         --transition-speed: 100ms;
       }
 
@@ -1070,7 +1070,13 @@
         declaration rather than from the loaded file; where a combined
         diagnostics snapshot carries its own `source`, that one is preferred.
       */
-      var HEALTH_CHECK_SOURCES = {
+      /*
+        CHANGED: seeded through `dictionaryOf`. This table is authored here but
+        it is READ with a check id taken from the loaded file, and an id of
+        `constructor` returned `Object` itself from the prototype — a function
+        this page then rendered as a citation. DL-DIAG-25.
+      */
+      var HEALTH_CHECK_SOURCES = dictionaryOf({
         functionBind: {
           origin: "js/bind_polyfill.js L1",
           owner: "src/observability/health.ts",
@@ -1107,22 +1113,33 @@
           performedBy: "probeWebGLSupport",
           disposition: "added"
         }
-      };
+      });
 
       /*
         `HEALTH_GAUGE_VALUES`, src/observability/health.ts, inverted: the gauge
         is the only channel a three-state verdict reaches the text form
         through. DL-HEALTH-04.
       */
-      var GAUGE_TO_STATUS = { "1": "pass", "0": "fail", "-1": "not-applicable" };
+      var GAUGE_TO_STATUS = dictionaryOf({
+        "1": "pass",
+        "0": "fail",
+        "-1": "not-applicable"
+      });
 
-      /* `STATUS_PRESENTATION` of src/observability/diagnostics-overlay.ts. */
-      var STATUS_LABELS = {
+      /*
+        `STATUS_PRESENTATION` of src/observability/diagnostics-overlay.ts.
+
+        CHANGED: both tables above are seeded through `dictionaryOf` for the same
+        reason as `HEALTH_CHECK_SOURCES` — each is read with a string from the
+        loaded file, and a status of `toString` read back a function whose source
+        this page would have written into a table cell. DL-DIAG-25.
+      */
+      var STATUS_LABELS = dictionaryOf({
         pass: "healthy",
         fail: "UNHEALTHY",
         "not-applicable": "not-applicable",
         unknown: "not reported"
-      };
+      });
 
       /*
         `DEFAULT_DURATION_BUCKETS`, src/observability/metrics.ts. Inclusive
@@ -1158,17 +1175,17 @@
         {
           value: 100,
           label: "tile movement",
-          origin: "style/_tokens.scss L39 $transition-speed, applied at style/main.scss L567"
+          origin: "$transition-speed of style/_tokens.scss, applied by the tile transition of style/main.scss"
         },
         {
           value: 200,
           label: "spawn and merge animation",
-          origin: "style/main.scss L670 appear, L690 pop"
+          origin: "the appear and pop keyframes of style/main.scss"
         },
         {
           value: 600,
           label: "score-delta rise",
-          origin: "style/main.scss L141, move-up"
+          origin: "the move-up keyframes of style/main.scss"
         }
       ];
 
@@ -1187,18 +1204,12 @@
       var LABELS_LE = "le";
 
       /*
-        Ingest limits.
+        Ingest limits. Everything parsed below arrives from outside this page.
 
-        Everything parsed below arrives from outside this page, so until it is
-        bounded the amount of work this page does is chosen by whatever was
-        handed to it: sixteen million short lines is sixteen million iterations
-        of the walk in `parsePrometheusText`, one `series` array of a million
-        entries is a million folds plus a sort plus a table, and one label block
-        of a million pairs is a million map insertions. Each limit is therefore
-        checked BEFORE the work it bounds,
-        and a payload over one is refused WHOLE rather than truncated — a
-        snapshot read in part would render totals the run never produced, which
-        is the one thing this page must not do.
+        TWO INVARIANTS HOLD FOR EVERY LIMIT. Each is checked BEFORE the work it
+        bounds — the line walk in `parsePrometheusText`, the per-family fold and
+        sort, the label-block insertions. And a payload over any limit is refused
+        WHOLE, never truncated: this page renders no partial snapshot.
 
         Each limit derives from a ceiling the PRODUCER already enforces, with
         headroom, so no export this repository can write is refused:
@@ -1222,6 +1233,129 @@
       var LIMIT_HOOK_ROWS = 64;
       var LIMIT_LOG_RECORDS = 10000;
       var LIMIT_FRAME_KEYS = 128;
+
+      /*
+        ADDED: the two length ceilings for the strings this page uses AS KEYS.
+        A family name, a label name, a label value, a health check id and a
+        health status all arrive from outside and all end up keying a dictionary
+        or heading a row, so each is bounded before it is used. Each derives from
+        the ceiling the PRODUCER enforces, with headroom, exactly as the counts
+        above do: `MAX_METRIC_NAME_LENGTH` (200), `MAX_LABEL_NAME_LENGTH` (64)
+        and `MAX_LABEL_VALUE_LENGTH` (120) of src/observability/metrics.ts, and
+        the six short camelCase `HEALTH_CHECK_IDS` of
+        src/observability/health.ts. DL-DIAG-25.
+      */
+      var LIMIT_IDENTIFIER_CHARACTERS = 512;
+      var LIMIT_VALUE_CHARACTERS = 1024;
+
+      /*
+        ADDED: prototype-safe dictionaries.
+
+        Every map below is keyed by a string this page READ from a file: a metric
+        family name, a label name, a label value, a health check id. `{}` is not a
+        dictionary for that job — it arrives carrying `Object.prototype`, so
+        `__proto__` reaches an inherited SETTER that silently discards a string
+        assignment, and `constructor`, `toString` and `prototype` READ back as
+        inherited members of it rather than as absent. Both failures are quiet:
+        a row keyed `__proto__` disappears from a panel, and a row keyed
+        `toString` renders a function where a number belongs.
+
+        `Object.create(null)` has no prototype to collide with, so a hostile key
+        is ordinary data and an absent key reads `undefined` — which is the
+        semantics every reader below already assumes. `dictionaryOf` gives the
+        same footing to the tables this page AUTHORS but reads with a key from
+        the file. DL-DIAG-25.
+      */
+
+      /** A map with no prototype, for keys that came from outside. */
+      function dictionary() {
+        return Object.create(null);
+      }
+
+      /**
+       * The same map, seeded from an authored object literal.
+       *
+       * @param entries Literal whose own properties seed the dictionary.
+       * @returns A prototype-free copy, safe to index with any string.
+       */
+      function dictionaryOf(entries) {
+        var copy = dictionary();
+
+        Object.keys(entries).forEach(function (key) {
+          copy[key] = entries[key];
+        });
+
+        return copy;
+      }
+
+      /**
+       * Reports whether `text` is a metric family name this page will read.
+       *
+       * `isValidMetricName` of src/observability/metrics.ts, restated, plus the
+       * length bound. Applied to `# HELP` and `# TYPE` lines as well as to
+       * sample lines, so a comment cannot introduce a family a sample could not.
+       */
+      function isFamilyName(text) {
+        return (
+          typeof text === "string" &&
+          text.length > 0 &&
+          text.length <= LIMIT_IDENTIFIER_CHARACTERS &&
+          /^[a-zA-Z_:][a-zA-Z0-9_:]*$/.test(text)
+        );
+      }
+
+      /**
+       * Reports whether `text` is a label name this page will read.
+       *
+       * `isValidLabelName` of src/observability/metrics.ts, restated: the
+       * exposition grammar, the `__` prefix the format reserves — which no
+       * export this repository writes can carry — and the length bound.
+       */
+      function isLabelName(text) {
+        return (
+          typeof text === "string" &&
+          text.length > 0 &&
+          text.length <= LIMIT_IDENTIFIER_CHARACTERS &&
+          /^[a-zA-Z_][a-zA-Z0-9_]*$/.test(text) &&
+          text.slice(0, 2) !== "__"
+        );
+      }
+
+      /**
+       * Reports whether `text` is a label value this page will read.
+       *
+       * Length ALONE: a label value is free text in the exposition format and
+       * the values this application writes include `state:commit` and
+       * `render.frame`, so a character class here would refuse real exports.
+       */
+      function isLabelValue(text) {
+        return typeof text === "string" && text.length <= LIMIT_VALUE_CHARACTERS;
+      }
+
+      /**
+       * Reads a bounded identifier — a health check id, a status — or `null`.
+       *
+       * @param value Candidate read from the loaded file.
+       * @returns The string when it is non-empty and within the bound, else
+       *   `null`, which every caller already treats as "this entry has no id".
+       */
+      function readIdentifier(value) {
+        return typeof value === "string" &&
+          value.length > 0 &&
+          value.length <= LIMIT_IDENTIFIER_CHARACTERS
+          ? value
+          : null;
+      }
+
+      /**
+       * Longest run-context text this file renders before it elides.
+       *
+       * The goal kind and the persistence verdict arrive as strings inside a
+       * loaded file, so both are bounded here for the same reason every other
+       * ingest path is: this document renders a file it did not write.
+       * DL-DIAG-26.
+       */
+      var LIMIT_RUN_TEXT = 48;
 
       /** Renders a byte count for a refusal, in mebibytes to one place. */
       function formatBytes(count) {
@@ -1324,13 +1458,21 @@
        * assumed: base labels are written sorted but the histogram `le` is
        * appended after them, so a positional reader would misattribute it.
        *
+       * The map is prototype-free and every name is held to
+       * `isLabelName` and every value to `isLabelValue`, so a name the producer
+       * could not have written — one carrying the reserved `__` prefix, or one
+       * longer than the bound — makes the LINE malformed rather than a key in
+       * this map. That is the same disposition the caller already gives an
+       * unparseable block. DL-DIAG-25.
+       *
        * @param block Text between the braces, exclusive.
        * @returns The labels, or `null` when the block is malformed. Throws the
        *   refusal of `guardCount` past `LIMIT_LABELS` distinct names, which a
        *   malformed line cannot be told from an attack on the map.
        */
       function parseLabels(block) {
-        var labels = {};
+
+        var labels = dictionary();
         var index = 0;
         var distinct = 0;
 
@@ -1400,7 +1542,7 @@
             index += 1;
           }
 
-          if (!closed || name.length === 0) {
+          if (!closed || !isLabelName(name) || !isLabelValue(value)) {
             return null;
           }
 
@@ -1434,9 +1576,17 @@
           .join(",");
       }
 
-      /** Every label except one, as a fresh object. */
+      /**
+       * Every label except one, as a fresh dictionary.
+       *
+       * Prototype-free. Copying into `{}` meant a label named
+       * `__proto__` was handed to an inherited setter that discards a string, so
+       * the copy came back without it — the histogram's grouping labels lost a
+       * member and nothing said so. DL-DIAG-25.
+       */
       function labelsWithout(labels, omit) {
-        var copy = {};
+
+        var copy = dictionary();
 
         Object.keys(labels).forEach(function (name) {
           if (name !== omit) {
@@ -1473,8 +1623,14 @@
        */
       function parsePrometheusText(text) {
         var lines = String(text).split(/\r?\n/);
-        var families = {};
-        var histogramFamilies = {};
+        /*
+          CHANGED: both maps are prototype-free, and `family` is reached only
+          through `isFamilyName` below. A family named `constructor` read back as
+          a function from the prototype, and one named `__proto__` could not be
+          stored at all. DL-DIAG-25.
+        */
+        var families = dictionary();
+        var histogramFamilies = dictionary();
         var samples = [];
         var recognised = 0;
         var malformed = 0;
@@ -1509,15 +1665,21 @@
           if (line.charAt(0) === "#") {
             var help = /^#\s+HELP\s+(\S+)\s*([\s\S]*)$/.exec(line);
 
+            // A metadata line declares a family only when it names one
+            // the exposition grammar allows. `\S+` alone let any word open a
+            // family, so a comment could seed the map with a key no sample line
+            // could ever have written. DL-DIAG-25.
             if (help !== null) {
-              family(help[1]).help = help[2];
+              if (isFamilyName(help[1])) {
+                family(help[1]).help = help[2];
+              }
 
               continue;
             }
 
             var type = /^#\s+TYPE\s+(\S+)\s+(\S+)\s*$/.exec(line);
 
-            if (type !== null) {
+            if (type !== null && isFamilyName(type[1])) {
               var declared = family(type[1]);
 
               declared.kind = type[2];
@@ -1532,7 +1694,9 @@
 
           var braceAt = line.indexOf("{");
           var name;
-          var labels = {};
+          // Prototype-free, so an unlabelled sample and a labelled one
+          // carry the same kind of map into the model. DL-DIAG-25.
+          var labels = dictionary();
           var remainder;
 
           if (braceAt === -1) {
@@ -1577,9 +1741,13 @@
           /*
             `isValidMetricName` of src/observability/metrics.ts, restated, and
             the value must be a number: both hold, or the line is not a sample.
+
+            CHANGED: the expression is now `isFamilyName`, which is that same
+            grammar plus the length bound, and the metadata lines above are held
+            to it too. DL-DIAG-25.
           */
           if (
-            !/^[a-zA-Z_:][a-zA-Z0-9_:]*$/.test(name) ||
+            !isFamilyName(name) ||
             !remainder ||
             !isExpositionNumber(remainder)
           ) {
@@ -1723,6 +1891,10 @@
           families: families,
           health: null,
           hooks: null,
+
+          // The exposition carries metric families and nothing else, so it
+          // carries no run context either. DL-DIAG-26.
+          run: null,
           traces: null,
           logs: null,
           malformedLines: malformed,
@@ -1740,6 +1912,35 @@
 
       function isObject(value) {
         return typeof value === "object" && value !== null;
+      }
+
+      /**
+       * Reads a JSON `labels` member as a prototype-free, validated dictionary.
+       *
+       * The JSON forms carried their `labels` object into the model AS
+       * PARSED, so the two ingest paths disagreed about what a label map is —
+       * the text path built one and this one adopted whatever the file contained,
+       * `__proto__` key and all. Copying through the same two predicates the text
+       * path uses makes one kind of map reach every panel. DL-DIAG-25.
+       *
+       * @param value Candidate `labels` member.
+       * @returns A dictionary of the names and values this page will read; names
+       *   the exposition grammar forbids and oversized values are dropped.
+       */
+      function readLabels(value) {
+        var labels = dictionary();
+
+        if (!isObject(value)) {
+          return labels;
+        }
+
+        Object.keys(value).forEach(function (name) {
+          if (isLabelName(name) && isLabelValue(value[name])) {
+            labels[name] = value[name];
+          }
+        });
+
+        return labels;
       }
 
       function readString(value) {
@@ -1764,7 +1965,10 @@
        * bucket limit.
        */
       function foldSeries(series) {
-        var families = {};
+        // Prototype-free, and each entry's name is held to
+        // `isFamilyName` below, so the JSON path bounds and validates its keys
+        // exactly as the text path does. DL-DIAG-25.
+        var families = dictionary();
         var folded = 0;
         var familyCount = 0;
 
@@ -1785,7 +1989,7 @@
 
           var name = readString(entry.name);
 
-          if (name === null) {
+          if (name === null || !isFamilyName(name)) {
             return;
           }
 
@@ -1802,13 +2006,19 @@
           family.kind = readString(entry.kind) || family.kind;
           family.help = readString(entry.help) || family.help;
 
-          var labels = isObject(entry.labels) ? entry.labels : {};
-
+          /*
+            Bounded on what the FILE carries, then read: the count is refused
+            against the whole member rather than against the subset `readLabels`
+            keeps, so a payload built to be expensive is refused rather than
+            quietly trimmed.
+          */
           guardCount(
-            Object.keys(labels).length,
+            isObject(entry.labels) ? Object.keys(entry.labels).length : 0,
             LIMIT_LABELS,
             "labels on one series"
           );
+
+          var labels = readLabels(entry.labels);
 
           if (entry.kind === "histogram") {
             var bounds = Array.isArray(entry.buckets) ? entry.buckets : [];
@@ -1885,7 +2095,10 @@
             return;
           }
 
-          var id = readString(entry.id);
+          // The id and the status are read through `readIdentifier`, so
+          // each is a bounded string before it keys a dictionary, heads a row or
+          // indexes `STATUS_LABELS`. DL-DIAG-25.
+          var id = readIdentifier(entry.id);
 
           if (id === null) {
             return;
@@ -1894,7 +2107,7 @@
           rows.push(
             healthRow(
               id,
-              readString(entry.status) || "unknown",
+              readIdentifier(entry.status) || "unknown",
               entry.detail,
               entry.source
             )
@@ -1918,6 +2131,51 @@
        *
        * Throws the refusal of `guardCount` past `LIMIT_HOOK_ROWS`.
        */
+      /**
+       * Reads the combined snapshot's `run` section.
+       *
+       * Bounded and normalised like every other section: a fabricated or partial
+       * reading yields `null` rather than a half-rendered strip, a non-finite
+       * number reads as absent, and a string of any length is elided to
+       * `LIMIT_RUN_TEXT`. Version 2 of the envelope carries this section; a
+       * version 1 file carries none and this answers `null`. DL-DIAG-26.
+       *
+       * @param {*} section The `run` member of a loaded payload.
+       * @returns {Object|null} The run context, or `null`.
+       */
+      function readRunSection(section) {
+        if (!isObject(section)) {
+          return null;
+        }
+
+        return {
+          stageIndex: readFinite(section.stageIndex),
+          goalKind: readRunText(section.goalKind),
+          goalTarget: readFinite(section.goalTarget),
+          goalProgress: readFinite(section.goalProgress),
+          relics: readFinite(section.relics),
+          persistence: readRunText(section.persistence)
+        };
+      }
+
+      /**
+       * Reads one bounded run-context string. DL-DIAG-26.
+       *
+       * @param {*} value Member to read.
+       * @returns {string|null} The bounded text, or `null`.
+       */
+      function readRunText(value) {
+        var text = readString(value);
+
+        if (text === null) {
+          return null;
+        }
+
+        return text.length <= LIMIT_RUN_TEXT
+          ? text
+          : text.slice(0, LIMIT_RUN_TEXT) + "\u2026";
+      }
+
       function readHookSection(section) {
         if (!Array.isArray(section)) {
           return null;
@@ -2031,6 +2289,9 @@
           families: folded.families,
           health: health,
           hooks: combined ? readHookSection(payload.hooks) : null,
+
+          // The run context of a version 2 combined snapshot. DL-DIAG-26.
+          run: combined ? readRunSection(payload.run) : null,
           traces: traces,
           logs: logs,
           malformedLines: 0,
@@ -2235,7 +2496,14 @@
        */
       function byLabel(model, name, label, vocabulary) {
         var family = familyOf(model, name);
-        var found = {};
+        /*
+          CHANGED: prototype-free. This is the accumulator the prototype-safety
+          finding names: a selected label value of `__proto__` was added to the
+          inherited setter and vanished from the panel, and one of `toString`
+          read back as a function that the sum then turned into text. Neither
+          reading was reported as missing. DL-DIAG-25.
+        */
+        var found = dictionary();
 
         if (family !== null) {
           family.samples.forEach(function (sample) {
@@ -2255,7 +2523,8 @@
         }
 
         var rows = [];
-        var seen = {};
+
+        var seen = dictionary();
 
         (vocabulary || []).forEach(function (key) {
           seen[key] = true;
@@ -2329,7 +2598,8 @@
       /** Every histogram of a family, keyed by one label. */
       function histogramsByLabel(model, name, label) {
         var family = familyOf(model, name);
-        var found = {};
+
+        var found = dictionary();
 
         if (family === null) {
           return found;
@@ -2695,7 +2965,9 @@
        * rather than at an interpolated position.
        */
       function distribution(histogram, thresholds) {
-        var marked = {};
+        // Keyed by a bound read from the loaded file, so prototype-free like
+        // every other map in this page. DL-DIAG-25.
+        var marked = dictionary();
 
         (thresholds || []).forEach(function (threshold) {
           marked[String(threshold.value)] = true;
@@ -3222,7 +3494,12 @@
        * rendered as `not reported`, which is distinct from all three verdicts.
        */
       function healthRows(model) {
-        var fromGauge = {};
+        // Both maps are prototype-free. Each is keyed by a check id
+        // the loaded file chose — the `check` label of a gauge sample, or the
+        // `id` of a health row — and `GAUGE_TO_STATUS` is now prototype-free
+        // too, so a gauge value that is not one of the three reads `undefined`
+        // rather than an inherited member. DL-DIAG-25.
+        var fromGauge = dictionary();
         var family = familyOf(model, NAMES.healthCheckStatus);
 
         if (family !== null) {
@@ -3235,7 +3512,8 @@
           });
         }
 
-        var fromSection = {};
+
+        var fromSection = dictionary();
 
         if (model !== null && model.health !== null) {
           model.health.checks.forEach(function (row) {
@@ -3286,7 +3564,19 @@
         );
 
         var checks = healthRows(model);
-        var counts = { pass: 0, fail: 0, "not-applicable": 0, unknown: 0 };
+        /*
+          CHANGED: seeded through `dictionaryOf` and therefore prototype-free.
+          The tally is written with a status string the loaded file chose, so
+          `counts["constructor"]` read `Object` and added one to a function —
+          producing text where a count belongs — and `counts["__proto__"]` was
+          discarded by the inherited setter. DL-DIAG-25.
+        */
+        var counts = dictionaryOf({
+          pass: 0,
+          fail: 0,
+          "not-applicable": 0,
+          unknown: 0
+        });
 
         checks.forEach(function (row) {
           counts[row.status] = (counts[row.status] || 0) + 1;
@@ -3709,6 +3999,58 @@
             value: formatMilliseconds(model.elapsedMs),
             absent: false
           });
+        }
+
+        // The run context of a version 2 combined snapshot, so a reader
+        // holding a downloaded file can tell WHICH STAGE it describes. Absent
+        // for the Prometheus form and for a version 1 file, in which case
+        // nothing is pushed rather than a row of dashes being shown. Carries no
+        // run identifier and no seed, because the file it reads carries neither.
+        // DL-DIAG-26.
+        if (model.run !== null) {
+          if (model.run.stageIndex !== null) {
+            entries.push({
+              label: "Stage",
+              value:
+                String(model.run.stageIndex + 1) +
+                " (index " +
+                String(model.run.stageIndex) +
+                ")",
+              absent: false
+            });
+          }
+
+          if (model.run.goalKind !== null && model.run.goalTarget !== null) {
+            entries.push({
+              label: "Stage goal",
+              value: model.run.goalKind + " " + String(model.run.goalTarget),
+              absent: false
+            });
+          }
+
+          if (model.run.goalProgress !== null) {
+            entries.push({
+              label: "Goal progress",
+              value: String(Math.round(model.run.goalProgress * 100)) + "%",
+              absent: false
+            });
+          }
+
+          if (model.run.relics !== null) {
+            entries.push({
+              label: "Relics held",
+              value: String(model.run.relics),
+              absent: false
+            });
+          }
+
+          if (model.run.persistence !== null) {
+            entries.push({
+              label: "Run persistence",
+              value: model.run.persistence,
+              absent: false
+            });
+          }
         }
 
         entries.forEach(function (entry) {

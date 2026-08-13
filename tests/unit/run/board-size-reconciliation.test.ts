@@ -8,7 +8,7 @@
 // construction. The prompt's edge case this discharges: a board-size-altering
 // cursed relic must not corrupt existing tile positions or the win/lose check.
 //
-// THE DEFECT THIS SUITE MEASURES
+// THE SUPERSEDED BEHAVIOUR THIS SUITE MEASURES AGAINST
 //   js/game_manager.js L40-L41 rebuilt the lattice from the size the SNAPSHOT
 //   recorded, `new Grid(previousState.grid.size, previousState.grid.cells)`,
 //   and left L2's `this.size` — the constructor argument, which

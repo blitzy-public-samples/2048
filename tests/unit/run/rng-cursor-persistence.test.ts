@@ -860,11 +860,11 @@ describe('relic offers reproduce across a reload', () => {
   /**
    * Offers drawn THROUGH THE PRODUCTION DRAW, from the production catalogue.
    *
-   * This section used to assemble offers with a private helper of its own that
-   * took one draw per selection from `relic-draw` alone, over a pool of eight
-   * invented identifiers. That helper agreed with itself across a reload no
-   * matter what `drawRelicOffers` did, and it was wrong about the accounting in
-   * the one way that matters here: the production draw is rarity-weighted, so it
+   * The offers come from the production draw rather than from a private helper
+   * taking one draw per selection from `relic-draw` alone over invented
+   * identifiers. Such a helper would agree with itself across a reload whatever
+   * `drawRelicOffers` did, and would be wrong about the accounting in the one
+   * way that matters here: the production draw is rarity-weighted, so it
    * consumes ONE `rarity-weight` draw AND ONE `relic-draw` draw per offer it
    * RETURNS. A cursor map that resumed `relic-draw` and lost `rarity-weight`
    * would have satisfied every assertion the helper could make, while giving a

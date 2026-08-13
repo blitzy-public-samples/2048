@@ -34,12 +34,15 @@
 // `recordTurnResolved`, `recordSpawnAttempt` and `recordSpawnSuppressed`. The
 // two are not interchangeable, for the same reason in both directions.
 //
-// The engine returns before emitting `tile:spawn` on a full board — the
-// boundary that keeps a full board free of draws — so an emission count
-// measures resolved spawns and attempts are only observable at the engine's own
-// `engine.spawn.attempt` counter, raised on entry to the spawn. Feeding an
-// attempt family from an emission under-reports it by exactly the full-board
-// attempts.
+// The engine emits `tile:spawn` for EVERY attempt, a full-board one included;
+// that emission carries no position, which is what AAP Contract 1 specifies for
+// it. So an emission stands on its own for neither an insertion nor an attempt:
+// `spawnsTotal` counts only an emission CARRYING A POSITION, and attempts are
+// observable solely at the engine's own `engine.spawn.attempt` counter, raised
+// once on entry to the spawn. One attempt can also emit several times — a
+// spawn-multiplying relic adds an emission per extra tile — so a raw emission
+// count over-reports attempts by those extra tiles and a position-filtered one
+// under-reports them by the suppressed attempts.
 //
 // `move:after`, symmetrically, is the completion signal of EVERY turn that
 // reached the walk and carries `moved: false` for one that moved nothing, so
@@ -68,7 +71,8 @@
 //   DL-METRIC-05  this in-page registry, its Prometheus text and its snapshot
 //                 download as the delivered form of a metrics endpoint
 //   DL-METRIC-06  a hook-dispatch snapshot folded only when its correlation
-//                 identifier is present and agrees with this registry's
+//                 identifier is a non-empty string and matches the identifier
+//                 this registry carries
 //
 // The default duration buckets take each boundary from a timing the product
 // already holds: 16 ms is the frame budget of js/animframe_polyfill.js, and
@@ -76,8 +80,8 @@
 // `pop`, `move-up` and `fade-in` timings of the stylesheet, the last being the
 // fade's delay.
 //
-// Invariants of this module. It names no package: its four imports are relative
-// paths into src/, and three of the four are erased at build time. Exported
+// Invariants of this module. It names no package: every import is a relative
+// path into src/, and the type-only ones are erased at build time. Exported
 // members report rather than throw. Memory is bounded: a histogram holds bucket
 // counts, a sum and a count and retains no observation, and the registry caps
 // the families and the series per family it will hold. The one member that
@@ -307,7 +311,7 @@ export const METRIC_NAMES = Object.freeze({
   metricsRejectedTotal: `${METRIC_PREFIX}metrics_rejected_total`,
 
   /**
-   * ADDED: the same rejections broken down by reason, one series per reason
+   * The same rejections broken down by reason, one series per reason
    * that actually occurred.
    *
    * A COMPANION to `metricsRejectedTotal` rather than a label on it: the
@@ -556,7 +560,7 @@ const MAX_HELP_LENGTH = 240;
 const MAX_METADATA_CHARS = 262144;
 
 /**
- * ADDED: distinct `reason` values the rejection breakdown will hold series
+ * Distinct `reason` values the rejection breakdown will hold series
  * for. Beyond it every further reason folds into `REJECTION_REASON_OTHER`, so
  * the family that reports a cardinality incident cannot itself become one.
  *
@@ -578,7 +582,7 @@ const REJECTION_REASON_OTHER = 'other';
 const REJECTION_REASON_PATTERN = /^[A-Za-z][A-Za-z0-9]*$/;
 
 /**
- * ADDED: distinct rejection kinds the warn throttle tracks. Beyond it every
+ * Distinct rejection kinds the warn throttle tracks. Beyond it every
  * further kind shares one bucket, so the throttle's own state is bounded.
  * DL-METRIC-09.
  */
@@ -902,7 +906,7 @@ function boundedLabel(value: unknown): string {
 }
 
 /**
- * ADDED: reads the label value a rejection is counted under.
+ * Reads the label value a rejection is counted under.
  *
  * The `reason` field of a rejection is an internal literal at every call site
  * of this module, but `reportReaderFault` is public and carries none, so the
@@ -928,7 +932,7 @@ function rejectionReasonOf(fields: LogFields): string {
 }
 
 /**
- * ADDED: whether the occurrence at this count is written to the log.
+ * Whether the occurrence at this count is written to the log.
  *
  * True for the first occurrence and then at every power of two, so a flood of
  * one rejection kind costs a logarithmic number of records — 740 identical
@@ -1338,13 +1342,13 @@ export class MetricsRegistry {
   private readonly rngStreamCounters = new Map<string, MetricSeries>();
 
   /**
-   * ADDED: per-reason rejection counters, keyed by the reason they carry.
+   * Per-reason rejection counters, keyed by the reason they carry.
    * DL-METRIC-08.
    */
   private readonly rejectionReasonCounters = new Map<string, MetricSeries>();
 
   /**
-   * ADDED: whether a per-reason series is being resolved right now.
+   * Whether a per-reason series is being resolved right now.
    *
    * Resolving one can itself be refused — the family limit, the series limit,
    * the metadata budget — and a refusal reports through this same channel, so
@@ -1357,7 +1361,7 @@ export class MetricsRegistry {
   private resolvingRejectionReason = false;
 
   /**
-   * ADDED: occurrences of each rejection kind, keyed as the warn throttle
+   * Occurrences of each rejection kind, keyed as the warn throttle
    * keys them. DL-METRIC-09.
    */
   private readonly rejectionWarnCounts = new Map<string, number>();
@@ -1377,7 +1381,7 @@ export class MetricsRegistry {
       counter.addInternal(1);
     }
 
-    // ADDED: the breakdown a consumer reading metrics alone can group by.
+    // The breakdown a consumer reading metrics alone can group by.
     // Raised before the log is written, so a logger that throws does not cost
     // the count. DL-METRIC-08.
     this.countRejectionReason(fields);
@@ -1388,7 +1392,7 @@ export class MetricsRegistry {
       return;
     }
 
-    // ADDED: repeated identical rejections are counted here and written on a
+    // Repeated identical rejections are counted here and written on a
     // logarithmic schedule, so a flood cannot evict the records that explain
     // it. DL-METRIC-09.
     const throttled = this.throttleRejectionWarn(message, fields);
@@ -1405,7 +1409,7 @@ export class MetricsRegistry {
   };
 
   /**
-   * ADDED: raises the per-reason rejection counter.
+   * Raises the per-reason rejection counter.
    *
    * The series is created on first use rather than declared up front: a clean
    * run rejects nothing, so its export carries this family with no series at
@@ -1458,7 +1462,7 @@ export class MetricsRegistry {
   }
 
   /**
-   * ADDED: decides whether this rejection is written to the log, and with what
+   * Decides whether this rejection is written to the log, and with what
    * fields.
    *
    * @param message Message the rejection reports under.
@@ -1493,13 +1497,14 @@ export class MetricsRegistry {
   }
 
   /**
-   * ADDED: keys one rejection kind for the warn throttle.
+   * Keys one rejection kind for the warn throttle.
    *
-   * Message and reason together: one message covers several reasons — every
-   * label refusal reports as `metric label rejected` — and collapsing them
-   * would hide a second kind behind the first. The metric name is deliberately
-   * NOT part of the key, because a cardinality incident is a flood of distinct
-   * names under one reason and keying by name would defeat the throttle.
+   * THE KEY IS THE MESSAGE AND THE REASON, and the metric NAME is no part of
+   * it. One message covers several reasons — every label refusal reports as
+   * `metric label rejected` — while a cardinality incident is a flood of
+   * distinct names under one reason. The message contributes at most
+   * `MAX_REJECTION_WARN_KEY_CHARS` characters, so the key is bounded whatever
+   * the caller passed. DL-METRIC-11.
    *
    * @param message Message the rejection reports under.
    * @param fields Fields the rejection was reported with.
@@ -2304,7 +2309,7 @@ export class MetricsRegistry {
       this.rejectedCalls = 0;
       this.reporterFaults = 0;
 
-      // ADDED: the rejection counts are back at zero, so the throttle starts
+      // The rejection counts are back at zero, so the throttle starts
       // over with them and the first rejection of the next run is written.
       // The per-reason SERIES survive, zeroed, exactly as every other series
       // does. DL-METRIC-09.

@@ -133,7 +133,8 @@ describe('the accessible name each outlet carries', () => {
     const score = outlet('.score-container');
     const labels = score.querySelectorAll('.visually-hidden');
 
-    // ADOPTED, NOT REPLACED: one label, and it is the markup's own wording.
+    // The markup's own label is adopted rather than replaced: one label, in the
+    // markup's own wording.
     expect(labels).toHaveLength(1);
     expect(labels[0]?.textContent).toBe('Points earned');
     expect(valueText(score)).toBe('Points earned7');
@@ -161,8 +162,8 @@ describe('the accessible name each outlet carries', () => {
 
     panel.update({ score: 5, bestScore: '99' });
 
-    // NO LABEL NODE ADDED: the outlet already has an accessible name, and a
-    // second one would be read alongside it.
+    // No label node is appended here: the outlet already has an accessible
+    // name, and a second one would be read alongside it.
     expect(outlet('.score-container').querySelector('.visually-hidden')).toBe(
       null,
     );

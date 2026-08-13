@@ -25,9 +25,13 @@
 //   TR-LIVE-08  `TerminalVerdict` and its labels
 //   TR-LIVE-09  the injected report sink and the per-listener error isolation
 //
-// Decisions: DL-LIVE-01, DL-LIVE-02, DL-LIVE-03, DL-LIVE-04, DL-LIVE-07
-// (docs/DECISION_LOG.md).
+// Decisions: DL-LIVE-01, DL-LIVE-02, DL-LIVE-03, DL-LIVE-04, DL-LIVE-07,
+// DL-LIVE-08, DL-FOCUS-09 (docs/DECISION_LOG.md).
 
+// The shared row-first coordinate phrase. Imported rather than restated: this
+// module narrated the same coordinates in the opposite axis order from the two
+// board layers. DL-FOCUS-09.
+import { formatCellCoordinates } from './focus-manager';
 import type {
   MountRoot,
   PreferenceKey,
@@ -279,6 +283,12 @@ export interface TerminalAnnouncement {
   readonly kind: 'terminal';
   readonly verdict: TerminalVerdict;
   readonly score?: number | undefined;
+
+  /**
+   * Who raised it, for `clearAssertive(source)` to withdraw by. Optional,
+   * and an announcement carrying none is withdrawn only by an unscoped clear.
+   */
+  readonly source?: AnnouncementSource | undefined;
 }
 
 /** Free text: screen transitions, preference changes, fallback notices. */
@@ -286,6 +296,30 @@ export interface TextAnnouncement {
   readonly kind: 'text';
   readonly text: string;
   readonly polarity?: AnnouncementPolarity | undefined;
+
+  /** Who raised it. See `TerminalAnnouncement.source`. */
+  readonly source?: AnnouncementSource | undefined;
+}
+
+/**
+ * The identity of an assertive line's producer.
+ *
+ * A free string rather than a union, because the producers are outside this
+ * module — the HUD, the composition root, a screen — and this module has no
+ * business enumerating them. Each producer declares one constant and uses it on
+ * both ends: on the announcements it raises and on the withdrawals it makes.
+ * `'hud/persistence'` and `'run/stage-open'` are the shape the shipped producers
+ * follow. DL-LIVE-08.
+ */
+export type AnnouncementSource = string;
+
+/** What `announceText` accepts beyond its text and its polarity. */
+export interface AnnounceTextOptions {
+  /**
+   * The producer raising the line, so it can withdraw this line later without
+   * withdrawing a peer's. See `TerminalAnnouncement.source`. DL-LIVE-08.
+   */
+  readonly source?: AnnouncementSource | undefined;
 }
 
 /** Everything `announce` accepts. */
@@ -302,6 +336,14 @@ export type Announcement =
 export interface Utterance {
   readonly text: string;
   readonly polarity: AnnouncementPolarity;
+
+  /**
+   * The source of the announcement this line was composed from, carried
+   * so a pending utterance can be withdrawn by the producer that raised it and
+   * by nobody else. Absent for every composed gameplay line, which is never
+   * assertive. DL-LIVE-08.
+   */
+  readonly source?: AnnouncementSource | undefined;
 }
 
 function unhandledKind(value: never): void {
@@ -314,6 +356,7 @@ const NOT_FOUND = -1;
 
 interface AnnouncementRecord {
   readonly kind?: unknown;
+  readonly source?: unknown;
   readonly direction?: unknown;
   readonly changed?: unknown;
   readonly score?: unknown;
@@ -375,6 +418,22 @@ export function isGameplayAnnouncementKind(kind: AnnouncementKind): boolean {
   }
 
   return false;
+}
+
+/**
+ * Reads an announcement's source, or `undefined` where it declares none.
+ *
+ * A non-string and the empty string both resolve to `undefined` rather than to a
+ * source nothing can match, so an unusable value cannot silently make a line
+ * un-withdrawable by anything but an unscoped clear — which is what an
+ * announcement without a source gets anyway. Not reported: a source is optional,
+ * so its absence is not a defect. DL-LIVE-08.
+ *
+ * @param value Value the caller supplied.
+ * @returns The source, or `undefined`.
+ */
+function toSource(value: unknown): AnnouncementSource | undefined {
+  return typeof value === 'string' && value !== '' ? value : undefined;
 }
 
 function toPolarity(value: unknown): AnnouncementPolarity | undefined {
@@ -645,6 +704,10 @@ export function normalizeAnnouncement(
         kind: 'terminal',
         verdict,
         score: toOptionalNumber(record.score),
+
+        // Preserved through normalisation, so a withdrawal can be scoped
+        // to the producer. DL-LIVE-08.
+        source: toSource(record.source),
       } as const);
     }
 
@@ -661,6 +724,7 @@ export function normalizeAnnouncement(
         kind: 'text',
         text,
         polarity: toPolarity(record.polarity),
+        source: toSource(record.source),
       } as const);
     }
 
@@ -767,10 +831,16 @@ function describeSpawns(spawns: readonly SpawnAnnouncement[]): string {
     return `New ${spawn.value}.`;
   }
 
-  const column = position.x + HUMAN_INDEX_OFFSET;
-  const row = position.y + HUMAN_INDEX_OFFSET;
-
-  return `New ${spawn.value} at column ${column}, row ${row}.`;
+  // The axes are narrated ROW FIRST, through the one formatter
+  // ./focus-manager.ts exports. This read `at column x, row y` while both board
+  // layers named the same cell `Row y, column x`, so a spawn was announced in the
+  // opposite axis order from the board it then had to be found on — and a
+  // listener had to reverse one of the two readings in their head every turn.
+  // DL-FOCUS-09.
+  return `New ${spawn.value} at ${formatCellCoordinates(
+    position.x,
+    position.y,
+  )}.`;
 }
 
 function describeStages(stages: readonly StageClearAnnouncement[]): string {
@@ -838,6 +908,10 @@ function collapseRepeats(utterances: readonly Utterance[]): {
     if (kept.length > 0) {
       const previous = kept[kept.length - 1];
 
+      // Text and polarity only: the SOURCE is deliberately not part of the
+      // equality, because two producers emitting the identical line still speak
+      // it once. The surviving copy keeps the first producer's source, so a
+      // scoped withdrawal by the second does not reach it. DL-LIVE-08.
       if (
         previous.text === utterance.text &&
         previous.polarity === utterance.polarity
@@ -942,6 +1016,10 @@ export function composeAnnouncements(
     composed.push({
       text: item.text,
       polarity: item.polarity ?? DEFAULT_POLARITY,
+
+      // Carried onto the composed line, which is what a scoped
+      // withdrawal matches a PENDING utterance on. DL-LIVE-08.
+      source: item.source,
     });
   }
 
@@ -957,6 +1035,7 @@ export function composeAnnouncements(
     composed.push({
       text: describeTerminal(terminal),
       polarity: ASSERTIVE_POLARITY,
+      source: terminal.source,
     });
   }
 
@@ -1060,7 +1139,7 @@ export const DEFAULT_MAX_QUEUED_ANNOUNCEMENTS = 32;
  */
 export const OUTBOX_CAPACITY_MULTIPLE = 2;
 
-/** `aria-atomic` value index.html L105 declares. */
+/** `aria-atomic` value `#live-region` of index.html declares. */
 const ARIA_TRUE = 'true';
 
 const REGION_ROLES = Object.freeze({
@@ -1136,12 +1215,22 @@ export interface LiveRegionAnnouncerOptions {
  */
 export interface LiveRegionAnnouncer {
   announce(input: Announcement): void;
-  announceText(text: string, polarity?: AnnouncementPolarity): void;
+
+  /**
+   * An options bag joins the two positional arguments, carrying the
+   * producer's own `source`. Optional and last, so every existing caller and
+   * every structural stand-in still satisfies this. DL-LIVE-08.
+   */
+  announceText(
+    text: string,
+    polarity?: AnnouncementPolarity,
+    options?: AnnounceTextOptions,
+  ): void;
   flush(): void;
   clear(): void;
 
   /**
-   * Withdraws every assertive line this announcer holds: the region's text, the
+   * Withdraws the assertive lines this announcer holds: the region's text, the
    * queued announcements that would be written assertively, and the pending
    * utterances already composed for that region. The polite region, the polite
    * queue entries and the polite utterances behind them are untouched, and a
@@ -1153,13 +1242,22 @@ export interface LiveRegionAnnouncer {
    * readable on a screen that had nothing to do with it. `clear()` is too broad
    * for that — it would also discard a polite batch mid-flight. DL-LIVE-06.
    *
-   * CHANGED: the two QUEUE STAGES are drained as well, and a write step
-   * scheduled over an assertive utterance is cancelled and restarted. Blanking
-   * the node alone left the verdict queued behind the clear, so the deferred
-   * scheduler wrote it back into the region a task later and the line the caller
-   * had just withdrawn was readable again. DL-LIVE-07.
+   * The two QUEUE STAGES are drained as well, and a write step scheduled over
+   * an assertive utterance is cancelled and restarted, so the deferred
+   * scheduler cannot write a withdrawn line back into the region a task later.
+   * DL-LIVE-07.
+   *
+   * A `source` SCOPES the withdrawal. Given one, this withdraws only the queued
+   * announcements and pending utterances raised under that source, and blanks
+   * the region only where the text standing on it was written under it, so one
+   * producer clearing its own alert cannot erase a peer's. Given none, every
+   * assertive line goes, whoever raised it, which is what the screen flow's
+   * stale-verdict sweep asks for. DL-LIVE-08.
+   *
+   * @param source The producer withdrawing its own lines, or omitted to
+   *   withdraw every assertive line.
    */
-  clearAssertive(): void;
+  clearAssertive(source?: AnnouncementSource): void;
 
   /** Announcements queued plus lines composed and not yet written. */
   pending(): number;
@@ -1382,6 +1480,24 @@ function isAssertiveAnnouncement(item: Announcement): boolean {
 }
 
 /**
+ * The source a QUEUED announcement declares, for the two kinds that can
+ * carry one.
+ *
+ * Read off the item rather than off a composed utterance, because a scoped
+ * withdrawal reaches the queue before composition has run. DL-LIVE-08.
+ *
+ * @param item The queued announcement.
+ * @returns Its source, or `undefined` where its kind carries none.
+ */
+function announcementSource(
+  item: Announcement,
+): AnnouncementSource | undefined {
+  return item.kind === 'terminal' || item.kind === 'text'
+    ? item.source
+    : undefined;
+}
+
+/**
  * Removes every entry a predicate selects, in place.
  *
  * Used by `clearAssertive` on both queue stages: the arrays are the live state
@@ -1571,6 +1687,13 @@ export function createLiveRegionAnnouncer(
   const outbox: Utterance[] = [];
   let destroyed = false;
   let phase: WritePhase = 'idle';
+
+  /**
+   * The source of the text the ASSERTIVE region currently holds, or
+   * `undefined` where it holds none or the line that wrote it declared none.
+   * DL-LIVE-08.
+   */
+  let assertiveSource: AnnouncementSource | undefined;
   let flushPending = false;
   let flushTask: ScheduledAnnouncerTask | null = null;
   let writePending = false;
@@ -1792,6 +1915,14 @@ export function createLiveRegionAnnouncer(
       outbox.splice(0, 1);
 
       if (writeText(utterance.polarity, utterance.text)) {
+        // The assertive region holds its text until something replaces
+        // it, so who last wrote there is state worth keeping — it is what a
+        // scoped withdrawal decides whether to blank the node on. Recorded only
+        // for a write that landed. DL-LIVE-08.
+        if (utterance.polarity === ASSERTIVE_POLARITY) {
+          assertiveSource = utterance.source;
+        }
+
         reporter.count(UTTERED_METRIC, {
           polarity: utterance.polarity,
           length: utterance.text.length,
@@ -1942,8 +2073,9 @@ export function createLiveRegionAnnouncer(
   function announceText(
     text: string,
     polarity?: AnnouncementPolarity,
+    options?: AnnounceTextOptions,
   ): void {
-    announce({ kind: 'text', text, polarity });
+    announce({ kind: 'text', text, polarity, source: options?.source });
   }
 
   function flush(): void {
@@ -2005,7 +2137,7 @@ export function createLiveRegionAnnouncer(
     }
   }
 
-  function clearAssertive(): void {
+  function clearAssertive(source?: AnnouncementSource): void {
     // ADDED, matching `flush`: `destroy` has already emptied both stages and
     // released the regions, so there is nothing to withdraw and a `cleared`
     // count here would describe work that did not happen.
@@ -2015,15 +2147,26 @@ export function createLiveRegionAnnouncer(
       return;
     }
 
-    // CHANGED: the queue and the outbox are drained of assertive work before the
-    // region is blanked, so nothing writes the withdrawn line back. Blanking the
-    // node alone left a queued verdict — and one already composed into a pending
-    // utterance — to be written by the deferred scheduler a task later.
-    // DL-LIVE-07.
-    const queued = drainWhere(queue, isAssertiveAnnouncement);
+    // The SCOPE of the withdrawal. A caller naming its own source withdraws
+    // only what it raised; a caller naming none withdraws everything, which is
+    // what the screen flow's stale-verdict sweep asks for. DL-LIVE-08.
+    const scoped = toSource(source);
+    const owns = (candidate: AnnouncementSource | undefined): boolean =>
+      scoped === undefined || candidate === scoped;
+
+    // The queue and the outbox are drained of assertive work before the region
+    // is blanked, so nothing writes the withdrawn line back: neither a queued
+    // verdict nor one already composed into a pending utterance reaches the
+    // deferred scheduler. DL-LIVE-07.
+    const queued = drainWhere(
+      queue,
+      (item): boolean =>
+        isAssertiveAnnouncement(item) && owns(announcementSource(item)),
+    );
     const pendingUtterances = drainWhere(
       outbox,
-      (utterance): boolean => utterance.polarity === ASSERTIVE_POLARITY,
+      (utterance): boolean =>
+        utterance.polarity === ASSERTIVE_POLARITY && owns(utterance.source),
     );
 
     // THE WRITE CURSOR IS `outbox[0]`, so a step scheduled over an utterance
@@ -2038,8 +2181,15 @@ export function createLiveRegionAnnouncer(
       phase = 'idle';
     }
 
-    if (assertiveRegion !== null) {
+    // The node is blanked only where the text on it BELONGS to the
+    // withdrawing source. A scoped call that does not own the standing line
+    // leaves it, which is the whole point: one producer's recovery must not
+    // erase a peer's alert. DL-LIVE-08.
+    const blanked = assertiveRegion !== null && owns(assertiveSource);
+
+    if (blanked) {
       writeText('assertive', '');
+      assertiveSource = undefined;
     }
 
     if (restarted) {
@@ -2050,6 +2200,8 @@ export function createLiveRegionAnnouncer(
       queued,
       pending: pendingUtterances,
       restarted,
+      blanked,
+      source: scoped ?? 'all',
       context,
     });
   }

@@ -187,7 +187,7 @@ describe('no tracked file carries loose whitespace', () => {
         file.text
           .split('\n')
           .map((line, index) => {
-            // CHANGED: the WHOLE leading-whitespace run is examined, not just
+            // The WHOLE leading-whitespace run is examined, not just
             // its first character. `startsWith('\t')` caught a tab only in
             // column one, so a line indented with spaces and THEN a tab — the
             // shape an editor with a mixed-indent setting actually produces —

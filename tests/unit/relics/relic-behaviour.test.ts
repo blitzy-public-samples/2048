@@ -231,7 +231,7 @@ describe('charge accounting through the registry and the bus', () => {
   it('spends a charge for every turn a charge relic acted on, and stops', () => {
     // `scouring-wind` carries exactly one charge and clears the first
     // fully-occupied ROW after a move — a row being one fixed `y` across every
-    // `x`. CHANGED: this said column. DL-TEST-14.
+    // `x`, not a column. DL-TEST-14.
     const full = boardFrom([
       [2, 4, 8, 16],
       [2, 32, 64, 128],
@@ -275,12 +275,11 @@ describe('charge accounting through the registry and the bus', () => {
 
     registry.restore([{ id: 'scouring-wind', charges: 0 }]);
 
-    // CHANGED: this was `expect(registry.restore(...)).toBe(undefined)`, and
-    // `restore` returns `void`, so the assertion held for every possible
-    // implementation — including one that restored nothing at all. What the
-    // restore is FOR is asserted instead: the relic is held at the persisted
-    // budget, it is subscribed to the bus so its handlers can be reached, and
-    // the projection reports it. DL-TEST-14.
+    // What the restore is FOR, rather than its return: `restore` returns
+    // `void`, so asserting on that would hold for an implementation that
+    // restored nothing at all. The relic is held at the persisted budget, it is
+    // subscribed to the bus so its handlers can be reached, and the projection
+    // reports it. DL-TEST-14.
     expect(registry.find('scouring-wind')?.charges).toBe(0);
     expect(registry.ownedIds()).toEqual(['scouring-wind']);
     expect(registry.size()).toBe(1);
@@ -415,10 +414,10 @@ describe('the board-manipulation family', () => {
 
     // A permutation neither creates nor destroys material.
     //
-    // CHANGED: `before` was computed, sorted and then never compared with
-    // anything. The two assertions here were `join(',')` not being the empty
-    // string — true of any non-empty board — and `before.length > 0`, so the
-    // conservation this case is named for was entirely unproved. DL-TEST-14.
+    // `before` is COMPARED, which is what proves the conservation this case is
+    // named for: `join(',')` not being the empty string is true of any
+    // non-empty board, and `before.length > 0` proves nothing about the
+    // arrangement. DL-TEST-14.
     expect(sortedAfter).toEqual(before);
     expect(afterArrangement).toHaveLength(beforeArrangement.length);
     expect(sortedAfter.reduce((sum, value) => sum + value, 0)).toBe(

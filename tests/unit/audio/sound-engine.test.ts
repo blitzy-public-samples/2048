@@ -169,8 +169,8 @@ describe('a disposed sound engine is detached from its sources', () => {
 
     engine.dispose();
 
-    // The defect: the handles were discarded, so this stayed at its peak for
-    // the emitter's whole life.
+    // Disposal releases every handle it took, so the emitter is left holding
+    // nothing live rather than standing at its peak for the rest of its life.
     expect(emitter.live()).toBe(0);
   });
 

@@ -1,4 +1,5 @@
-// The composition root: the single module index.html L113 loads.
+// The composition root: the one module the `<script type="module">` of
+// index.html loads.
 //
 // Ported from js/application.js L1-L4, the whole of it:
 //   L1-L2, L4  the one-animation-frame deferral, reproduced by `bootstrap()`
@@ -14,8 +15,8 @@
 //           `activateRelic`, `continueStage`, `endRun`, `openSettings`,
 //           `closeSettings` and `cancel`
 //   L13     `setup()`, now `RunController.openEngineBoard()`, called last
-// Ported from index.html L7, the <link> to the committed generated CSS,
-// replaced by the stylesheet import below.
+// Ported from the stylesheet <link> of index.html, which named the committed
+// generated CSS and is replaced by the stylesheet import below.
 //
 // One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of
 // this module's area enumerated:
@@ -34,8 +35,8 @@
 //                                            and relic actions
 //   TR-MAIN-05  js/game_manager.js L13       `setup()` called last, now
 //                                            `RunController.openEngineBoard()`
-//   TR-MAIN-06  index.html L7                the <link> to the committed
-//                                            generated stylesheet, replaced by
+//   TR-MAIN-06  index.html stylesheet       the <link> to the committed
+//               <link>                       generated stylesheet, replaced by
 //                                            the style/main.scss import
 //   TR-MAIN-07  target-only row              the renderer, relic registry, run
 //                                            controller and observability
@@ -46,7 +47,7 @@
 // named beside the constructs they belong to. DL-MAIN-01 to DL-MAIN-14 are
 // this file's own rows.
 
-// Ported from index.html L7. DL-MAIN-01.
+// Ported from the stylesheet <link> of index.html. DL-MAIN-01.
 import '../style/main.scss';
 
 import {
@@ -96,7 +97,10 @@ import type {
 } from './observability/logger';
 import { createLogger, deriveCorrelationId } from './observability/logger';
 import type { HealthSurface } from './observability/health';
-import { createHealthSurface } from './observability/health';
+import {
+  createHealthSurface,
+  WEB_STORAGE_STRATEGY,
+} from './observability/health';
 import type {
   BoundaryTracing,
   EngineTracingSubscription,
@@ -120,6 +124,7 @@ import {
 } from './observability/metrics';
 import type { WebGLProbeView } from './observability/health';
 import type { DiagnosticsOverlay } from './observability/diagnostics-overlay';
+import type { DiagnosticsRunView } from './observability/diagnostics-overlay';
 import {
   createDiagnosticsOverlay,
   isDiagnosticsRequested,
@@ -175,10 +180,12 @@ import type {
 // is the controller's. DL-RUNCTL-01.
 import { RunController, resolveRunIdentity } from './run/run-controller';
 import type {
+  RunFaultOperation,
   RunOutcome,
   RunReporter,
   RunSummary,
 } from './run/run-state';
+import { RUN_FAULT_OPERATIONS } from './run/run-state';
 import { RunStateStore } from './run/run-state-store';
 import type { StorageFailure } from './storage/local-storage-manager';
 import { LocalStorageManager } from './storage/local-storage-manager';
@@ -226,13 +233,12 @@ import type { SettingsPanel } from './ui/components/settings-panel';
 import type { Hud } from './ui/screens/hud';
 import { createHud } from './ui/screens/hud';
 
-// The five screens the flow needs besides the HUD. Imported and INSTANTIATED
-// here, and handed to the router as its `screens` registry: the router records
-// which module renders each state as data and imports none of them, so a module
-// this root does not pass is a state the router mounts nothing for. All five were
-// unreferenced by any production file, so `runStart`, `stageClear`, `reward`,
-// `won`, `gameOver` and `runSummary` each entered as an empty container.
-// DL-MAIN-12.
+// The five screen modules the flow needs besides the HUD, which between them
+// render the six non-HUD states — `won` and `gameOver` share one module, as
+// they share one container. Imported and INSTANTIATED here, and handed to the
+// router as its `screens` registry: the router records which module renders
+// each state as data and imports none of them, so a state this root passes no
+// module for is one the router mounts an empty container for. DL-MAIN-12.
 import { createGameOverScreen } from './ui/screens/game-over';
 import type { GameOverScreen } from './ui/screens/game-over';
 import { createRewardScreen } from './ui/screens/reward';
@@ -302,8 +308,8 @@ const FRAME_INTERVAL_TIMING = 'render.frame.interval';
  * was dereferenced unchecked in four places in js/html_actuator.js L2-L5 and
  * one in js/keyboard_input_manager.js L141, so a renamed class was a startup
  * failure; an absent element is reported here and the rest of the page starts.
- * `.tile-container` of index.html L70-L72 is not among them: the canvas host
- * replaces it.
+ * The `.tile-container` the retired markup declared is not among them: the
+ * canvas host replaces it.
  */
 const SELECTORS = Object.freeze({
   boardNumberOnly: '#board-number-only',
@@ -539,9 +545,17 @@ function createInputSink(
  * Adapts a render sink to the accessibility surface's sink shape.
  *
  * @param reporter Render sink to write through.
+ * @param readScope Reads the correlation scope reports are being filed under.
+ *   Supplied for a screen that files a report AFTER an await — the run summary
+ *   awaits the clipboard — because beginning a run rotates that scope while such
+ *   a write is still pending. Absent for every other screen, which answers as
+ *   "no scope is knowable" and behaves exactly as before. DL-SUMMARY-18.
  * @returns A preference-store sink.
  */
-function createPreferenceSink(reporter: RenderReporter): UiReporter {
+function createPreferenceSink(
+  reporter: RenderReporter,
+  readScope?: () => string,
+): UiReporter {
   return {
     log(level, message, fields): void {
       reporter.onDiagnostic({
@@ -579,12 +593,12 @@ function createPreferenceSink(reporter: RenderReporter): UiReporter {
       });
     },
 
-    // ADDED: the same reduction at the caller's own severity. `error` above
-    // fixes the level at `error`, so a RECOVERED failure had to either overstate
-    // itself or stringify what it caught into an ordinary field — and ordinary
-    // fields are never sensitivity-redacted. Routed here, the caught value
-    // reaches `logger.failure` through `createSink`, where redaction and the
-    // record budget apply to it. DL-SETTINGS-07, DL-SUMMARY-17.
+    // The same reduction at the caller's own severity. `error` above fixes the
+    // level at `error`, so a RECOVERED failure had to either overstate itself
+    // or stringify what it caught into an ordinary field — and ordinary fields
+    // are never sensitivity-redacted. Routed here, the caught value reaches
+    // `logger.failure` through `createSink`, where redaction and the record
+    // budget apply to it. DL-SETTINGS-07, DL-SUMMARY-17.
     failure(level, message, thrown, fields): void {
       reporter.onDiagnostic({
         level: level === 'warn' ? 'warning' : level,
@@ -594,6 +608,13 @@ function createPreferenceSink(reporter: RenderReporter): UiReporter {
         error: describeRenderError(thrown),
         thrown,
       });
+    },
+
+    // The scope reader. Answers with the empty string where no reader was
+    // supplied, which every caller reads as "not knowable" rather than as a
+    // scope that differs. DL-SUMMARY-18.
+    scope(): string {
+      return readScope === undefined ? '' : readScope();
     },
   };
 }
@@ -747,7 +768,7 @@ interface RunSinkObservers {
   readonly onRunEnded?: (outcome: string) => void;
 
   /**
-   * ADDED: called once the run has crossed between persisting and not, with the
+   * Called once the run has crossed between persisting and not, with the
    * status it crossed into.
    *
    * The health surface holds the report its last check produced, so a crossing
@@ -756,6 +777,17 @@ interface RunSinkObservers {
    * DL-MAIN-35.
    */
   readonly onPersistenceStatusChanged?: (status: string) => void;
+
+  /**
+   * Called once a contained run fault has ALTERED THE RUN — a reward
+   * that was not offered, a stage that did not open, a stage that did not
+   * resolve. Never called for a fault that fell back invisibly.
+   *
+   * The composition announces it: a player whose reward round vanished is owed a
+   * statement that it did, and the diagnostic record alone reaches nobody
+   * playing. DL-MAIN-46.
+   */
+  readonly onRunFlowFaulted?: (operation: string) => void;
 }
 
 /**
@@ -830,6 +862,46 @@ function createRunSink(
         }),
         thrown: report.error,
       });
+    },
+
+    // The fault channel that is NOT a write.
+    //
+    // Ten run-controller failures reached `onWriteFailed` above and were logged
+    // as "the run could not be persisted" while touching no store, so an
+    // operator reading a skipped reward or an unopened stage was sent to
+    // storage. Each now names its own operation, and the message says what did
+    // not happen rather than where it was not written. `run/controller` is the
+    // source, because these are lifecycle faults and not state ones.
+    // DL-MAIN-46, DL-RUN-10.
+    onRunFaulted(report): void {
+      reporter.onDiagnostic({
+        level: 'error',
+        source: 'run/controller',
+        message: RUN_FAULT_MESSAGES[report.operation],
+        detail: Object.freeze({
+          operation: report.operation,
+          affectsRunFlow: report.affectsRunFlow,
+        }),
+        thrown: report.error,
+      });
+
+      reporter.onCount({
+        name: 'run.fault',
+        value: 1,
+        detail: Object.freeze({
+          operation: report.operation,
+          affectsRunFlow: report.affectsRunFlow,
+        }),
+      });
+
+      // The PLAYER-FACING half, and only for the faults that changed what the
+      // run does. A projection that fell back to the envelope is invisible in
+      // play and says nothing; a reward that was never offered, a stage that
+      // never opened and a stage that never resolved are each visible, so the
+      // observer that saw it is what tells the player. DL-MAIN-46.
+      if (report.affectsRunFlow) {
+        observers.onRunFlowFaulted?.(report.operation);
+      }
     },
 
     // The transition, not the attempt: `onWriteFailed` above already carries
@@ -1086,18 +1158,54 @@ export type BoardRenderMode = 'three' | 'number-only';
 const CONTEXT_LOST_FAILURE = 'context-lost';
 
 /**
- * ADDED: the reason the number-only board is forced in place of a 2.5D board
+ * The stage index `stageOpenRecovery` holds while no stage is owed an
+ * open. Outside the stage domain, so it can never equal a pending index.
+ * DL-MAIN-42.
+ */
+const NO_PENDING_STAGE_RECOVERY = -1;
+
+/**
+ * Retries the recovery makes per stage a transition could not open.
+ *
+ * One. The call it retries is synchronous and takes no lock, so a second
+ * attempt raising for the same reason as the first is the expected outcome
+ * rather than a race worth re-running; the failure is surfaced instead.
+ * DL-MAIN-42.
+ */
+const MAX_STAGE_OPEN_RETRIES = 1;
+
+/**
+ * The reason the number-only board is forced in place of a 2.5D board
  * whose context was taken away.
  *
- * A NAMED CONSTANT rather than the literal it was, because it is now read as
- * well as written: the reclaim below releases the force only when THIS is the
- * force in force, so a number-only board standing in for a renderer that could
+ * A NAMED CONSTANT rather than a literal, because it is read as well as
+ * written: the reclaim below releases the force only when THIS is the force in
+ * force, so a number-only board standing in for a renderer that could
  * not be constructed or could not be mounted is left exactly where it is. Those
  * two are properties of the document and the build, and a context coming back
  * says nothing about either. DL-MAIN-33.
  */
 const CONTEXT_LOST_FORCE_REASON =
   'the WebGL context was lost and not restored';
+
+/**
+ * The sources this root raises its three assertive lines under.
+ *
+ * One per subject rather than one for the root, because each names a different
+ * condition with a different lifetime: a board-mode change is withdrawn by its
+ * own reclaim, while a refused reward and a stage that would not open are stated
+ * once and left to be replaced. All three differ from
+ * `PERSISTENCE_ANNOUNCEMENT_SOURCE`, which src/ui/screens/hud.ts owns — that
+ * screen withdraws its own alert on recovery, and before these existed its
+ * withdrawal took every one of these lines with it. DL-MAIN-45, DL-LIVE-08.
+ */
+const BOARD_MODE_ANNOUNCEMENT_SOURCE = 'main/board-mode';
+
+/** The refused-reward line's source. See `BOARD_MODE_ANNOUNCEMENT_SOURCE`. */
+const REWARD_REFUSAL_ANNOUNCEMENT_SOURCE = 'main/reward-refusal';
+
+/** The stage-open failure's source. See `BOARD_MODE_ANNOUNCEMENT_SOURCE`. */
+const STAGE_OPEN_ANNOUNCEMENT_SOURCE = 'main/stage-open';
 
 /**
  * The WebGL failure the health check reports while a restored context's
@@ -1121,16 +1229,79 @@ const RENDERER_UNMOUNTED_FAILURE = 'renderer-not-mounted';
 const FORCED_FALLBACK_FAILURE = 'number-only-forced';
 
 /**
- * ADDED: the storage failure the health check reports while the run is no
+ * The storage failure the health check reports while the run is no
  * longer being saved.
  *
- * Worded as the consequence rather than as the mechanism, because the `storage`
- * row is read beside a HUD that states the same thing in the same words. The
- * mechanism — the key, the byte length and the error itself — is in the records
- * the store already emits per refused write. DL-HEALTH-08.
+ * WORDED AS THE CONSEQUENCE, in the same words the HUD uses beside it. The
+ * mechanism — the key, the byte length and the error itself — is carried by the
+ * records the store emits per refused write, not by this string. DL-HEALTH-08.
  */
 const EPHEMERAL_STORAGE_FAILURE =
   'the run is no longer being saved and continues in memory only';
+
+/**
+ * What each contained run fault MEANS, one message per operation.
+ *
+ * The record says what did not happen. Every one of these used to read "the run
+ * could not be persisted under blitzy.2048.runState", which named a write that
+ * was never attempted. DL-MAIN-46, DL-RUN-10.
+ */
+const RUN_FAULT_MESSAGES: Readonly<Record<RunFaultOperation, string>> =
+  Object.freeze({
+    [RUN_FAULT_OPERATIONS.rewardDraw]:
+      'The reward draw failed, so no relic was offered for this stage.',
+    [RUN_FAULT_OPERATIONS.relicPickup]:
+      'The relic registry failed, so the chosen relic was not taken on.',
+    [RUN_FAULT_OPERATIONS.relicPickupUnsupported]:
+      'The relic registry cannot seat a relic, so the choice was refused.',
+    [RUN_FAULT_OPERATIONS.relicOwnership]:
+      'The held-relic list could not be read, so the draw excluded the ' +
+      'relics the stored run records instead.',
+    [RUN_FAULT_OPERATIONS.relicProjection]:
+      'The relics could not be projected, so the stored run keeps the ' +
+      'entries it already carried.',
+    [RUN_FAULT_OPERATIONS.relicHydration]:
+      'The stored relics could not be restored, so the resumed run holds ' +
+      'none of them live.',
+    [RUN_FAULT_OPERATIONS.relicBoardSize]:
+      'The relic-implied board size could not be read, so the board was ' +
+      'reconciled without it.',
+    [RUN_FAULT_OPERATIONS.stageOpen]:
+      'The next stage could not be opened and is still owed an open.',
+    [RUN_FAULT_OPERATIONS.stageResolution]:
+      'The stage in force could not be resolved, so the run ended without ' +
+      'closing it.',
+    [RUN_FAULT_OPERATIONS.cursorRead]:
+      'The RNG cursors could not be read, so the stored run keeps the ' +
+      'counts it already carried.',
+  });
+
+/**
+ * What the PLAYER is told for each run fault that altered the run.
+ *
+ * Only the five `runFaultAltersFlow` admits appear: the rest fall back
+ * invisibly and there is nothing to say. Worded as the consequence in play,
+ * never as the operation. DL-MAIN-46.
+ */
+const RUN_FAULT_ANNOUNCEMENTS: Readonly<Partial<Record<string, string>>> =
+  Object.freeze({
+    [RUN_FAULT_OPERATIONS.rewardDraw]:
+      'No relic could be offered for this stage. The run continues without ' +
+      'a reward.',
+    [RUN_FAULT_OPERATIONS.relicPickup]:
+      'That relic could not be taken on. The run continues without it.',
+    [RUN_FAULT_OPERATIONS.relicPickupUnsupported]:
+      'That relic could not be taken on. The run continues without it.',
+    [RUN_FAULT_OPERATIONS.stageOpen]:
+      'The next stage could not be opened. The board in front of you is ' +
+      'still the previous stage.',
+    [RUN_FAULT_OPERATIONS.stageResolution]:
+      'The stage could not be closed, so the run summary may not include it.',
+  });
+
+/** What a fault with no announcement of its own is stated as. DL-MAIN-46. */
+const RUN_FAULT_ANNOUNCEMENT_FALLBACK =
+  'Part of the run could not be completed. The run continues.';
 
 /** How the board is drawn, and what put that mode in force. */
 export interface BoardRenderSelection {
@@ -1528,10 +1699,11 @@ export function start(ownerDocument: Document): Application {
     createToken: createRunToken,
   });
 
-  // The one derivation of the run correlation identifier, from the seed and the
-  // run instance. Every module that reports receives it; none derives one of
-  // its own, and neither the seed nor the run identifier is carried into a
-  // report — the run identifier is the KEY every segment of the identifier is
+  // The run correlation identifier, derived here from the seed and the run
+  // instance through `deriveCorrelationId` of src/observability/logger.ts.
+  // Every module that reports receives this value by injection rather than
+  // deriving one of its own, and neither the seed nor the run identifier is
+  // carried into a report — the run identifier is the KEY every segment is
   // derived under, so an export carries the value and not the key. No engine
   // behaviour reads it. DL-LOG-09.
   //
@@ -1589,15 +1761,16 @@ export function start(ownerDocument: Document): Application {
   let readLiveWebGLFailure: () => string | null = (): string | null => null;
 
   /**
-   * ADDED: the storage counterpart of the slot above, filled once the run
+   * The storage counterpart of the slot above, filled once the run
    * controller exists.
    *
    * The health surface reads the storage manager's CONSTRUCTION-TIME probe
-   * result, which is what keeps a repeated check write-free — and what left the
-   * `storage` row reporting `pass` while the run had already stopped being
-   * saved, a green row beside the very failure an operator opened the surface to
-   * read. The controller is the owner of that fact: it tracks whether the run
-   * persists and reports every crossing. DL-HEALTH-08, DL-MAIN-35.
+   * result, which is what keeps a repeated check write-free — and which on its
+   * own would leave the `storage` row reporting `pass` after the run had
+   * stopped being saved, a green row beside the very failure an operator opened
+   * the surface to read. The controller is the owner of that fact: it tracks
+   * whether the run persists and reports every crossing. DL-HEALTH-08,
+   * DL-MAIN-35.
    */
   let readLiveStorageFailure: () => string | null = (): string | null => null;
 
@@ -1692,21 +1865,20 @@ export function start(ownerDocument: Document): Application {
     // own refusal record. A store that threw keeps error. DL-STORE-07.
     const refused = !('thrown' in failure);
 
-    // ADDED: a stored value that did not PARSE belongs on the same tier as a
+    // A stored value that did not PARSE belongs on the same tier as a
     // refusal, for the same reason. The store handed the text over without
     // complaint and the read recovered — `readJson` answered `null` and the
     // reading module fell back — so nothing the product owned was lost and no
-    // storage fault occurred. Reporting it at `error` claimed one, once per
+    // storage fault occurred. Reporting it at `error` would claim one, once per
     // corrupt value, on a path whose whole design is to survive corruption.
     // The caught `SyntaxError` still travels as `thrown`. DL-STORE-09.
     //
-    // CHANGED: read from `error.parse`, the adapter's tag, where this read
-    // `error.name === PARSE_ERROR_NAME`. `JSON.parse` is not the only source of
+    // Read from `error.parse`, the adapter's tag, rather than from
+    // `error.name === PARSE_ERROR_NAME`: `JSON.parse` is not the only source of
     // a `SyntaxError` the adapter can catch — a `toJSON` member, a replacer or
     // an injected store method can raise one on a write, a probe or a removal —
-    // and each of those is an operation that FAILED, so tiering it as a
-    // recovered read demoted a lost write to a warning and told the reader a
-    // stored value was unreadable when none had been read.
+    // and each of those is an operation that FAILED rather than a recovered
+    // read.
     const unreadable = failure.error.parse;
     const recovered = refused || unreadable;
 
@@ -1804,7 +1976,7 @@ export function start(ownerDocument: Document): Application {
   // would replace the array the seeded reward snapshots resolve their drawn
   // indices against. DL-REGISTRY-01.
   //
-  // ADDED: the live rules are handed over as well, so a run RESUMED from the
+  // The live rules are handed over as well, so a run RESUMED from the
   // stored envelope reinstates the standing rules its relics had already
   // established — `frostbind`'s frozen cells being the one such rule — onto the
   // rules this page rebuilt from the defaults. The reinstatement dispatches
@@ -1860,7 +2032,7 @@ export function start(ownerDocument: Document): Application {
   let settleTracedStage: (outcome: string) => void = (): void => undefined;
 
   /**
-   * ADDED: puts the run's persistence status on screen, or does nothing before
+   * Puts the run's persistence status on screen, or does nothing before
    * the HUD exists.
    *
    * A slot for the same reason as `settleTracedStage`: the run sink is composed
@@ -1870,12 +2042,29 @@ export function start(ownerDocument: Document): Application {
    */
   let showRunPersistence: () => void = (): void => undefined;
 
+  /**
+   * States a contained run fault that ALTERED THE RUN, or does nothing
+   * before the announcer exists.
+   *
+   * A slot for the same reason as `showRunPersistence`: the run sink is composed
+   * before the one announcer of the page, and `run.begin()` can fault before
+   * either. DL-MAIN-46.
+   */
+  let announceRunFault: (operation: RunFaultOperation) => void = (): void =>
+    undefined;
+
   // The run: the versioned envelope's load, save and clear, the stage and relic
   // slices of every commit, and stage advancement. Composed before the
   // substreams, which are built from the seed and cursors it supplies.
   const runSink = createRunSink(reporter, {
     onRunEnded: (outcome): void => {
       settleTracedStage(outcome);
+    },
+
+    // The player-facing half of a run fault that changed the run.
+    // DL-MAIN-46.
+    onRunFlowFaulted: (operation): void => {
+      announceRunFault(operation as RunFaultOperation);
     },
 
     // The held health report follows the crossing, so the `storage` row, its
@@ -1885,12 +2074,11 @@ export function start(ownerDocument: Document): Application {
     onPersistenceStatusChanged: (status): void => {
       refreshHealth(`run persistence became ${status}`);
 
-      // CHANGED: the PLAYER is told as well as the health surface. The
-      // controller writes after every view has taken the commit, so the status
-      // the HUD read during that commit is the one in force before the write
-      // that changed it — and for a store that refuses every later write too,
-      // that value stayed wrong for the rest of the run. Written after the
-      // health refresh, so the two surfaces are never inconsistent in the other
+      // The PLAYER is told as well as the health surface. The controller writes
+      // after every view has taken the commit, so the status the HUD read
+      // during that commit is the one in force BEFORE the write that changed
+      // it, and this notice is what corrects it. Written after the health
+      // refresh, so the two surfaces are never inconsistent in the other
       // direction, and through the HUD's status-only member so the turn's
       // rising score delta is not cleared. DL-MAIN-38, DL-HUD-17.
       showRunPersistence();
@@ -1927,18 +2115,20 @@ export function start(ownerDocument: Document): Application {
    * and the health surface read theirs from. A log record already emitted keeps
    * the identifier it was emitted under. DL-MAIN-06.
    *
-   * AND THE SCOPE IS A PARTITION, not a relabelling. The registry, the tracer
-   * and the health surface all read the identifier through that one getter, so
-   * an aggregate still held across a rotation would be REPORTED under the new
-   * run while describing the previous one: a series total, a span ring, the
-   * commit and anomaly counters, the frame statistics and the held health
-   * report each carried the run before. All three are therefore returned to
-   * their start here — the registry keeps its families, their kinds, their help
-   * text and their bucket layouts, the tracer keeps its configuration, and the
-   * health surface keeps its probes and its subscribers, so what is discarded
-   * is one run's readings and not any capability. `health.check()` is not
-   * called here: dropping the held report is what makes the next reader
-   * re-probe under the identifier it will carry. DL-MAIN-28.
+   * AND THE SCOPE IS A PARTITION, not a relabelling. The registry, the tracer,
+   * the health surface and the hook bus all read the identifier through that one
+   * getter, so an aggregate still held across a rotation would be REPORTED under
+   * the new run while describing the previous one: a series total, a span ring,
+   * the commit and anomaly counters, the frame statistics, the held health report
+   * and the bus's own hook, subscriber and charge counts each carried the run
+   * before. All four are therefore returned to their start here — the registry
+   * keeps its families, their kinds, their help text and their bucket layouts,
+   * the tracer keeps its configuration, the health surface keeps its probes and
+   * its subscribers, and the bus keeps its registrations, handlers, charges,
+   * pickup order and degraded marks, so what is discarded is one run's readings
+   * and not any capability. `health.check()` is not called here: dropping the
+   * held report is what makes the next reader re-probe under the identifier it
+   * will carry. DL-MAIN-28, DL-HOOKBUS-12.
    *
    * @param next The identifier the run now in force is keyed under.
    */
@@ -1954,6 +2144,19 @@ export function start(ownerDocument: Document): Application {
 
     metrics.reset();
     tracer.reset();
+
+    // The hook bus is partitioned too.
+    //
+    // `HookBus.metrics()` reports LIFETIME totals and the registry folds them by
+    // their increase since the previous fold of the same key — and the fold key
+    // is namespaced by the correlation identifier, which this call has just
+    // changed. So the first fold of the new run found no previous absolute for
+    // its new key and folded the WHOLE lifetime total as the new run's opening
+    // delta: run two began carrying every dispatch, invocation, skip, rejection,
+    // failure and degraded skip of run one, under a correlation identifier that
+    // said otherwise. The bus keeps its registrations, its handlers, its charges
+    // and its degraded marks; only the readings go. DL-MAIN-28, DL-HOOKBUS-12.
+    const busReadingsDropped = hooks.resetMetrics();
 
     const forgotten = health.forget();
 
@@ -1973,6 +2176,7 @@ export function start(ownerDocument: Document): Application {
       previous,
       correlationId: next,
       healthReportDropped: forgotten,
+      busReadingsDropped,
     });
   };
 
@@ -2027,6 +2231,16 @@ export function start(ownerDocument: Document): Application {
     createToken: createRunToken,
     reporter: runSink,
     correlationId: readCorrelationId,
+
+    // The second half of the persistence verdict, read from the LIVE
+    // manager on the same rule `HealthSurface.readiness()` applies — a supported
+    // probe and the Web Storage strategy. `MemoryStorage` accepts every write, so
+    // without this the controller reported a saved run over a store that
+    // discards on reload while readiness called the same store ephemeral, and
+    // the HUD sided with the controller. One rule, three surfaces.
+    // DL-MAIN-47, DL-RUNCTL-33, DL-HEALTH-10.
+    durable: (): boolean =>
+      storage.probe.supported && storage.strategy === WEB_STORAGE_STRATEGY,
 
     // The registry, reached through the port so the controller names no relic
     // type. Every member delegates on each call rather than being captured, so
@@ -2225,11 +2439,11 @@ export function start(ownerDocument: Document): Application {
 
   // The frame callback is the system's only asynchronous boundary.
   //
-  // CHANGED: the failure channel travels with the pair. The loop CONTAINS a
-  // throw from a frame callback or from either hook, so a frame that failed was
-  // reported through `reporter` and still closed a `render.frame` span that read
-  // as a clean frame; `onFrameError` is what marks that span as the failure it
-  // was. DL-TRACE-14, DL-LOOP-05.
+  // The failure channel travels with the pair. The loop CONTAINS a throw from a
+  // frame callback or from either hook, so a failed frame is reported through
+  // `reporter` and would otherwise close a `render.frame` span reading as a
+  // clean frame; `onFrameError` is what marks that span as the failure it is.
+  // DL-TRACE-14, DL-LOOP-05.
   const frameLifecycle = tracer.frameLifecycleHooks();
   const loop = createRenderLoop({
     reporter,
@@ -2240,7 +2454,7 @@ export function start(ownerDocument: Document): Application {
   });
 
   /**
-   * ADDED: reads the persisted preference envelope, or nothing where none is
+   * Reads the persisted preference envelope, or nothing where none is
    * stored.
    *
    * Guarded the way `readStoredKeymap` is: an ABSENT key is the first run and
@@ -2258,7 +2472,28 @@ export function start(ownerDocument: Document): Application {
       return {};
     }
 
-    return deserializePreferences(stored, createPreferenceSink(reporter));
+    const sink = createPreferenceSink(reporter);
+
+    // A SECOND boundary around a loader that already promises never to
+    // throw. This call is made during composition, before the board, the
+    // renderer or the screens exist, so a raise here is not a preference that
+    // did not restore — it is a page that never starts, with nothing composed
+    // yet to say why. The promise is asserted directly against the loader in
+    // tests/unit/ui/a11y-lifecycle.test.ts; this is the containment that keeps
+    // the boot independent of it holding. DL-SETTINGS-09, DL-MAIN-44.
+    try {
+      return deserializePreferences(stored, sink);
+    } catch (error: unknown) {
+      sink.failure?.(
+        'error',
+        'stored preferences could not be read; defaults used',
+        error,
+        { key: PREFERENCES_KEY },
+      );
+      sink.count('ui.preferences.payload_rejected', { cause: 'raised' });
+
+      return {};
+    }
   };
 
   // The preference store, composed BEFORE the renderer, whose selection reads
@@ -2267,7 +2502,7 @@ export function start(ownerDocument: Document): Application {
   const preferences = createPreferenceStore({
     reporter: createPreferenceSink(reporter),
 
-    // ADDED: the palette, motion setting, number-only choice, mute and volume
+    // The palette, motion setting, number-only choice, mute and volume
     // an earlier session left behind, so a player who needs high contrast,
     // reduced motion or the number-only board does not re-apply it on every
     // load. DL-MAIN-34.
@@ -2275,25 +2510,24 @@ export function start(ownerDocument: Document): Application {
   });
 
   /**
-   * ADDED: the envelope text last written, or `null` where none has been
+   * The envelope text last written, or `null` where none has been
    * written or the last write was refused. DL-MAIN-40.
    */
   let persistedPreferences: string | null = null;
 
   /**
-   * ADDED: the open coalescing window, or `null` when none is. DL-MAIN-40.
+   * The open coalescing window, or `null` when none is. DL-MAIN-40.
    */
   let preferenceWriteWindow: ReturnType<typeof setTimeout> | null = null;
 
   /**
-   * ADDED: whether a change arrived while the window was open. DL-MAIN-40.
+   * Whether a change arrived while the window was open. DL-MAIN-40.
    */
   let preferenceWritePending = false;
 
   /**
-   * ADDED: writes the envelope, and only where it differs from the one on disk.
-   *
-   * CHANGED: the write was unconditional. DL-MAIN-34, DL-MAIN-40.
+   * Writes the envelope, and only where it differs from the one on disk.
+   * DL-MAIN-34, DL-MAIN-40.
    */
   const persistPreferences = (): void => {
     // The write carries every persisted field, so it satisfies whatever the
@@ -2341,7 +2575,7 @@ export function start(ownerDocument: Document): Application {
   };
 
   /**
-   * ADDED: opens the window that folds a run of changes into one write.
+   * Opens the window that folds a run of changes into one write.
    *
    * DL-MAIN-40.
    */
@@ -2362,7 +2596,7 @@ export function start(ownerDocument: Document): Application {
   };
 
   /**
-   * ADDED: writes a coalesced change: the first of a run at once, the rest of it
+   * Writes a coalesced change: the first of a run at once, the rest of it
    * when the window closes.
    *
    * DL-MAIN-40.
@@ -2379,7 +2613,7 @@ export function start(ownerDocument: Document): Application {
   };
 
   /**
-   * ADDED: closes the window, writing whatever it was holding. DL-MAIN-40.
+   * Closes the window, writing whatever it was holding. DL-MAIN-40.
    */
   const flushPreferences = (): void => {
     if (preferenceWriteWindow !== null) {
@@ -2411,7 +2645,7 @@ export function start(ownerDocument: Document): Application {
   setReducedMotionOverride(preferences.reducedMotionOverride());
   reflectMotion(queryReducedMotion());
 
-  // ADDED: and so is the palette. The store holds the restored theme but
+  // And so is the palette. The store holds the restored theme but
   // activates nothing at construction, so without this the persisted palette
   // would be reported by the settings dialog while the document carried the
   // default one. Written here rather than inside the store so its constructor
@@ -2439,10 +2673,9 @@ export function start(ownerDocument: Document): Application {
   // READINESS IS RESOLVED BEFORE ANYTHING IS SELECTED OR MOUNTED. The health
   // surface owns the renderer and storage verdicts, and both inputs it derives
   // them from are already in hand here: the WebGL probe result is in the slot
-  // above and the live storage manager's own probe ran at its construction. It
-  // was resolved after the renderer had been selected AND mounted, so the
-  // verdict that decides whether a WebGL board may be mounted at all was
-  // consulted once that decision had already been taken.
+  // above and the live storage manager's own probe ran at its construction. The
+  // verdict that decides whether a WebGL board may be mounted at all is
+  // therefore consulted BEFORE that decision is taken.
   //
   // This call writes the six per-check records and the six status gauges,
   // once, in composition order, and `readiness` below reads the report it
@@ -2493,8 +2726,9 @@ export function start(ownerDocument: Document): Application {
     );
   }
 
-  // The parallel accessibility board of index.html L70: the focusable,
-  // labelled per-cell counterparts beside the canvas, which is `aria-hidden`.
+  // The parallel accessibility board `#board-a11y` of index.html: the
+  // focusable, labelled per-cell counterparts beside the canvas, which is
+  // `aria-hidden`.
   const parallelBoardHost = ownerDocument.querySelector(SELECTORS.boardA11y);
   const parallelBoard = createParallelBoardLayer({
     host: parallelBoardHost,
@@ -2550,15 +2784,20 @@ export function start(ownerDocument: Document): Application {
       }),
     });
 
-    // CHANGED: the literal moved to `CONTEXT_LOST_FORCE_REASON`, which the
-    // reclaim below matches against. DL-MAIN-33.
+    // The reason is `CONTEXT_LOST_FORCE_REASON` rather than a literal, because
+    // the reclaim below matches against it. DL-MAIN-33.
     preferences.forceNumberOnlyMode(CONTEXT_LOST_FORCE_REASON);
 
     // Announced assertively: the board the player is reading has been replaced
     // by a different one.
+    //
+    // Under this root's BOARD-MODE source, so the reclaim below withdraws
+    // this line and only this line, and a peer's alert — the HUD's persistence
+    // notice, a terminal verdict — is left standing. DL-MAIN-45, DL-LIVE-08.
     announcer.announceText(
       'The 3D board is unavailable. The number board is now in use.',
       ASSERTIVE_POLARITY,
+      { source: BOARD_MODE_ANNOUNCEMENT_SOURCE },
     );
   };
 
@@ -2788,10 +3027,10 @@ export function start(ownerDocument: Document): Application {
       return null;
     }
 
-    // CHANGED: a fallback forced by a LOST CONTEXT keeps naming the context.
+    // A fallback forced by a LOST CONTEXT keeps naming the context.
     //
-    // The takeover replaces the renderer, so `readContextLost` above no longer
-    // has a WebGL renderer to ask and every forced fallback read as
+    // The takeover replaces the renderer, so `readContextLost` above has no
+    // WebGL renderer left to ask and would report every forced fallback as
     // `number-only-forced` — which describes the SYMPTOM the health surface can
     // see and discards the cause it was asked for. The reason the force was
     // recorded under is the surviving evidence of that cause, and it is already
@@ -2847,7 +3086,7 @@ export function start(ownerDocument: Document): Application {
   // The slot declared beside the run sink is filled: from here a finished run
   // closes the span of the stage it was playing.
   //
-  // CHANGED: THIS IS NOW THE FALLBACK, NOT THE NORMAL PATH.
+  // THIS IS THE FALLBACK, NOT THE NORMAL PATH.
   // `RunController.finish()` resolves the stage in force through the engine
   // before it summarises, so `stage:end` fires with `cleared: false` and the
   // ordinary stage listener closes the span as a resolved stage. `settleStage`
@@ -2925,7 +3164,7 @@ export function start(ownerDocument: Document): Application {
   let switchingRenderer = false;
 
   /**
-   * ADDED: how many renderer swaps have completed, each of which recomputed the
+   * How many renderer swaps have completed, each of which recomputed the
    * health report.
    *
    * Read by a caller that has just done something which MIGHT have caused a
@@ -2981,7 +3220,7 @@ export function start(ownerDocument: Document): Application {
       onRendererWork();
       reportSelection();
 
-      // ADDED: counted beside the refresh it performs, so a caller that
+      // Counted beside the refresh it performs, so a caller that
       // triggered this indirectly can tell that the report is already current.
       // DL-MAIN-41.
       rendererSwitches += 1;
@@ -3031,7 +3270,7 @@ export function start(ownerDocument: Document): Application {
     bestContainer: ownerDocument.querySelector<HTMLElement>(SELECTORS.best),
     messageContainer: ownerDocument.querySelector(SELECTORS.message),
 
-    // The in-run status outlets index.html L47-L49 declares.
+    // The in-run status outlets the HUD group of index.html declares.
     hudContainer: ownerDocument.querySelector(SELECTORS.hudGroup),
     stageContainer: ownerDocument.querySelector(SELECTORS.hudStage),
     relicTrayContainer: ownerDocument.querySelector(SELECTORS.relicTray),
@@ -3063,14 +3302,15 @@ export function start(ownerDocument: Document): Application {
 
     // THE TWO FAILURE STATES A PLAYABLE RUN CAN BE IN, both read per write from
     // the module that owns them rather than pushed. `HookBus` marks a relic
-    // degraded when one of its handlers throws and then skips it for the rest of
-    // its registration, and the registry holds that marking — so without this
-    // reader the tray showed an enabled relic that no longer fires. DL-MAIN-31.
+    // degraded when one of its handlers throws and then skips it for the rest
+    // of its registration, and the registry holds that marking — so this reader
+    // is what stops the tray showing a skipped relic as enabled. DL-MAIN-31.
     degradedRelics: (): readonly string[] => registry.degradedIds(),
 
-    // The run controller resolves this from each write's own outcome. A refused
-    // write leaves the run playable and unsaved, which is a state only the
-    // interface can tell the player about. DL-RUNCTL-20.
+    // The run controller resolves this from each write's own outcome AND from
+    // whether the store survives a reload, so a run played entirely in memory
+    // shows the not-saved notice from its first commit rather than never.
+    // DL-RUNCTL-20, DL-RUNCTL-33.
     persistence: (): 'persistent' | 'ephemeral' => run.persistenceStatus(),
 
     // Read per write as well: a board-mutating relic changes the dimension
@@ -3084,7 +3324,7 @@ export function start(ownerDocument: Document): Application {
     reporter: createPreferenceSink(reporter),
   });
 
-  // ADDED: the slot the run sink's persistence observer calls, filled now that
+  // The slot the run sink's persistence observer calls, filled now that
   // the screen holding the notice exists. The status-only member, never
   // `render`: a second write of the turn's commit would clear the rising `+N`
   // that commit put on screen. DL-MAIN-38, DL-HUD-17.
@@ -3106,7 +3346,7 @@ export function start(ownerDocument: Document): Application {
     hud.render(commit);
   });
 
-  // The ONE announcer for the page, over `#live-region` of index.html L109, and
+  // The ONE announcer for the page, over `#live-region` of index.html, and
   // the translator that feeds it from the engine's events. One announcer, not
   // several; the score outlets carry labels rather than `role="status"`.
   // DL-LIVE-01, DL-ANNOUNCE-01.
@@ -3122,6 +3362,22 @@ export function start(ownerDocument: Document): Application {
   });
   const stopAnnouncer = engineAnnouncer.subscribe(hooks.events);
 
+  // The slot the run sink's fault observer calls, filled now that the
+  // one announcer exists.
+  //
+  // Written ASSERTIVELY, and only for the faults `runFaultAltersFlow` admits: a
+  // reward round that vanished, a stage that did not open and a stage that did
+  // not resolve each change what the player is looking at, which is the polarity
+  // src/ui/a11y/live-region.ts keeps for a state the player did not ask for. The
+  // wording states the consequence rather than the operation — the operation is
+  // in the record the sink already filed. DL-MAIN-46.
+  announceRunFault = (operation: RunFaultOperation): void => {
+    announcer.announceText(
+      RUN_FAULT_ANNOUNCEMENTS[operation] ?? RUN_FAULT_ANNOUNCEMENT_FALLBACK,
+      ASSERTIVE_POLARITY,
+    );
+  };
+
   // Preference changes are announced by the announcer itself, from the store's
   // own change notifications, so no second subscriber narrates them.
   const stopAnnouncedPreferences = announcer.observePreferences(preferences);
@@ -3135,11 +3391,11 @@ export function start(ownerDocument: Document): Application {
   });
 
   const stopPreferences = preferences.subscribe((_snapshot, changed): void => {
-    // ADDED: every preference key is persisted, so the write is unconditional
+    // Every preference key is persisted, so the write is unconditional
     // on WHICH one changed. The store notifies only on a real change, so this
     // is one write per change and none per read. DL-MAIN-34.
     //
-    // CHANGED: a change that leaves the persisted envelope byte-identical writes
+    // A change that leaves the persisted envelope byte-identical writes
     // nothing, and a run of volume-only changes — which is what a dragged
     // slider emits, one per `input` event — is folded into one write per
     // `PREFERENCE_WRITE_COALESCE_MS`. The live gain is unaffected: the sound
@@ -3169,7 +3425,7 @@ export function start(ownerDocument: Document): Application {
   });
 
   /**
-   * ADDED: reclaims the 2.5D board when a context the browser took away
+   * Reclaims the 2.5D board when a context the browser took away
    * genuinely comes back.
    *
    * The renderer installs its own `webglcontextrestored` handler and rebuilds
@@ -3234,7 +3490,7 @@ export function start(ownerDocument: Document): Application {
         }),
       });
 
-      // ADDED: read across the release, which reaches `applyRenderMode` through
+      // Read across the release, which reaches `applyRenderMode` through
       // the preference commit. DL-MAIN-41.
       const switchesBefore = rendererSwitches;
 
@@ -3249,15 +3505,15 @@ export function start(ownerDocument: Document): Application {
         announcer.announceText(
           'The 3D board is available again and is now in use.',
           ASSERTIVE_POLARITY,
+          { source: BOARD_MODE_ANNOUNCEMENT_SOURCE },
         );
       }
 
-      // CHANGED: only where the release did NOT swap the renderer. A swap
-      // recomputes the report itself, so the refresh that used to follow every
-      // reclaim recomputed a report one statement old. A release the persisted
-      // number-only choice holds swaps nothing, and that case still refreshes:
-      // the live WebGL verdict has changed even though the board has not.
-      // DL-MAIN-41.
+      // Refreshed only where the release did NOT swap the renderer: a swap
+      // recomputes the report itself, so refreshing after one would recompute a
+      // report one statement old. A release the persisted number-only choice
+      // holds swaps nothing, and that case does refresh: the live WebGL verdict
+      // has changed even though the board has not. DL-MAIN-41.
       if (rendererSwitches === switchesBefore) {
         refreshHealth('a WebGL context reclaimed after the fallback');
       }
@@ -3442,12 +3698,12 @@ export function start(ownerDocument: Document): Application {
     placeFocus: false,
     announce: false,
 
-    // Keep Going CLEARS THE TERMINATION and nothing else: `continuePlaying()`
+    // Keep Going CLEARS THE TERMINATION and nothing else: `continueAfterWin()`
     // commits, and `readCommit` of src/ui/screen-router.ts takes the one edge
     // out of `won` back to `stage` on the commit that reports the board
     // playable again. Sending the edge here as well would apply it twice.
     onKeepPlaying: (): void => {
-      engine.continuePlaying();
+      engine.continueAfterWin();
     },
     onEndRun: (): void => {
       router.send('endRun');
@@ -3466,7 +3722,13 @@ export function start(ownerDocument: Document): Application {
    */
   const runSummaryScreen: RunSummaryScreen = createRunSummaryScreen({
     document: ownerDocument,
-    reporter: createPreferenceSink(reporter),
+
+    // THE ONE SINK CARRYING THE SCOPE READER. This screen awaits
+    // `clipboard.writeText`, and `rotateCorrelation` can run while that write is
+    // pending — the New Run control is on this screen — so its delayed reports
+    // are the only ones in the composition that can resolve into a scope other
+    // than the one they opened under. DL-SUMMARY-18.
+    reporter: createPreferenceSink(reporter, readCorrelationId),
     announcer,
     preferences,
     run: {
@@ -3527,14 +3789,23 @@ export function start(ownerDocument: Document): Application {
     onSettingsOpen: (): void => {
       settings?.open();
 
-      // The dialog's own actions become available with it, and `openSettings`
-      // becomes unavailable, so the layer is reapplied on both edges.
+      // The dialog's own actions become available with it and `openSettings`
+      // becomes unavailable, so the layer is reapplied here — the body this
+      // callback renders is what the newly available actions are read from, and
+      // the router's own `settle()` refresh happens after the trap engages.
       // DL-CONTROL-06.
       controlLayer?.refresh();
     },
+
+    // The panel is closed and NOTHING ELSE. The router refreshes the
+    // control layer from inside the trap release — between the lift of the
+    // inertness and the focus restore, which is the one window where
+    // `#settings-button` can be re-presented — and `settle()` refreshes where no
+    // trap was engaged, so this callback's own refresh was a second walk of
+    // every managed control per close. DL-MAIN-43, DL-ROUTER-41, DL-ROUTER-45,
+    // DL-ROUTER-46.
     onSettingsClose: (): void => {
       settings?.close();
-      controlLayer?.refresh();
     },
 
     rewardScreen: ownerDocument.querySelector(SELECTORS.rewardScreen),
@@ -3659,7 +3930,7 @@ export function start(ownerDocument: Document): Application {
       // to the same three cards.
       presentPendingReward();
 
-      // ADDED: and it says so. `RunController.selectReward` rolls the relic back
+      // And it says so. `RunController.selectReward` rolls the relic back
       // where the run cannot be written (DL-RUNCTL-15), which leaves a pressed
       // card doing nothing a player can perceive; the refusal is announced, and
       // it names the persistence state when that is what refused it — the same
@@ -3669,6 +3940,7 @@ export function start(ownerDocument: Document): Application {
           ? 'That relic was not taken: this run is not being saved. The same three are still on offer.'
           : 'That relic was not taken. The same three are still on offer.',
         ASSERTIVE_POLARITY,
+        { source: REWARD_REFUSAL_ANNOUNCEMENT_SOURCE },
       );
 
       return selection;
@@ -3688,11 +3960,18 @@ export function start(ownerDocument: Document): Application {
 
     // NO STAGE LINE IS ANNOUNCED HERE. `run.selectReward` above advances the
     // run, which drives `stage:start`, and the router announces the incoming
-    // stage from `announcement(context)` — a fuller line than the bare
-    // `Stage N.` this used to add. That bare line was queued in the same batch
-    // as the pickup above and, one tick later, replaced it on the region: the
-    // acquisition AAP §0.6.4 requires to be announced was readable for about
-    // two milliseconds. DL-LIVE-05.
+    // stage from `announcement(context)` — a fuller line than a bare `Stage N.`
+    // here, which would queue in the same batch as the pickup above and replace
+    // it on the region a tick later, leaving the acquisition AAP §0.6.4
+    // requires to be announced readable for about two milliseconds.
+    // DL-LIVE-05.
+
+    // The transition the accepted selection performed is CLOSED. The
+    // controller contains an opener that raised and records the stage as owed
+    // an open; this is the caller that closes that record, and it runs on the
+    // accepted path alone because a refused selection advances nothing.
+    // DL-MAIN-42.
+    recoverPendingStageOpen('a reward was taken');
 
     return selection;
   }
@@ -3702,14 +3981,14 @@ export function start(ownerDocument: Document): Application {
    * the one showing, and takes the flow to stage clear when an offer stands on a
    * state that is neither.
    *
-   * ANNOUNCES NOTHING. The offer's own line belongs to the REWARD STATE'S ENTRY,
-   * which the router reads from `announcement(context)` of
-   * src/ui/screens/reward.ts at the moment the cards go up and become
-   * operable. Announcing here as well spoke the three cards on the commit that
-   * drew them — before the state had been entered and while the board was still
-   * the surface in force — and then again on entry, so a screen-reader user
-   * heard the offer twice and heard it first for cards they could not yet
-   * choose. DL-REWARD-14, DL-ROUTER-11.
+   * ANNOUNCES NOTHING. The offer's own line belongs to the REWARD STATE'S
+   * ENTRY, which the router reads from `announcement(context)` of
+   * src/ui/screens/reward.ts at the moment the cards go up and become operable.
+   * Announcing here as well would speak the three cards on the commit that drew
+   * them — before the state is entered and while the board is still the surface
+   * in force — and then again on entry, so a screen-reader user would hear the
+   * offer twice and hear it first for cards they could not yet choose.
+   * DL-REWARD-14, DL-ROUTER-11.
    *
    * Called after every commit rather than only on the commit that drew the
    * offer, so an offer that survived a reload is followed on the first commit
@@ -3745,6 +4024,104 @@ export function start(ownerDocument: Document): Application {
     }
 
     return false;
+  };
+
+  /**
+   * The stage index the recovery below has already retried, and how many
+   * times, so one failed transition is retried once rather than on every commit
+   * for the rest of the run. DL-MAIN-42.
+   */
+  let stageOpenRecovery: { stage: number; attempts: number } = {
+    stage: NO_PENDING_STAGE_RECOVERY,
+    attempts: 0,
+  };
+
+  /**
+   * Closes a stage transition the engine refused to open.
+   *
+   * `RunController.selectReward()` persists the reward and then asks the engine
+   * to open the stage the run advanced to. A `startStage` that raises is
+   * contained by the controller, which records the stage as owed an open and
+   * publishes `stageOpenPending()` and `openPendingStage()` for a caller to
+   * close it with — and nothing called either, so an accepted reward could
+   * leave the run standing on a stage index no board had been opened for, with
+   * `onStageStart` never dispatched for it and nothing said to the player.
+   *
+   * BOUNDED, AND VISIBLE WHEN IT FAILS. The retry is attempted once per stage
+   * index; a retry that also fails is announced assertively and reported at
+   * error, and no further attempt is made for that stage — so a permanently
+   * raising opener costs one extra call rather than one per commit. The run is
+   * left playable on the board it holds either way, because the board is the
+   * engine's and the failed call opened no new one.
+   *
+   * Called from the reward transaction and from every commit, which are the two
+   * paths `openNextStage()` is reached from: the reward selection, and the
+   * commit handler where a cleared stage advanced with no offer left to draw.
+   * DL-MAIN-42, DL-RUNCTL-25.
+   *
+   * @param reason What ran the recovery, carried into the reports.
+   */
+  const recoverPendingStageOpen = (reason: string): void => {
+    const pending = run.stageOpenPending();
+
+    if (pending === null) {
+      // Nothing owed: the record is cleared by the engine accepting an open, so
+      // the attempt count is released with it.
+      stageOpenRecovery = { stage: NO_PENDING_STAGE_RECOVERY, attempts: 0 };
+
+      return;
+    }
+
+    if (pending !== stageOpenRecovery.stage) {
+      stageOpenRecovery = { stage: pending, attempts: 0 };
+    }
+
+    if (stageOpenRecovery.attempts >= MAX_STAGE_OPEN_RETRIES) {
+      return;
+    }
+
+    stageOpenRecovery = {
+      stage: pending,
+      attempts: stageOpenRecovery.attempts + 1,
+    };
+
+    const opened = run.openPendingStage(engine);
+
+    reporter.onCount({
+      name: opened ? 'run.stageOpen.recovered' : 'run.stageOpen.unrecovered',
+      value: 1,
+      detail: Object.freeze({
+        reason,
+        stageIndex: pending,
+        attempt: stageOpenRecovery.attempts,
+      }),
+    });
+
+    if (opened) {
+      return;
+    }
+
+    reporter.onDiagnostic({
+      level: 'error',
+      source: 'run/stage',
+      message:
+        `Stage ${pending + 1} could not be opened and the retry did not ` +
+        'succeed; the run continues on the board it holds.',
+      detail: Object.freeze({
+        reason,
+        stageIndex: pending,
+        attempts: stageOpenRecovery.attempts,
+      }),
+    });
+
+    // Assertive for the same reason a lost board is: what the player is playing
+    // is no longer what the run says they are on.
+    announcer.announceText(
+      `Stage ${pending + 1} could not be started. The board in play is the ` +
+        'one from the stage before it.',
+      ASSERTIVE_POLARITY,
+      { source: STAGE_OPEN_ANNOUNCEMENT_SOURCE },
+    );
   };
 
   // The control layer, filled in immediately below. Declared first: the input
@@ -4041,6 +4418,33 @@ export function start(ownerDocument: Document): Application {
     // every export answer from one reading. DL-MAIN-30.
     rngCursors: (): Readonly<Record<string, number>> =>
       streamHolder.streams.snapshotCursors(),
+
+    // The third pull integration, and the one that makes the Run panel
+    // the run's panel. CARRIES NEITHER THE RUN IDENTIFIER NOR THE SEED: the
+    // snapshot this feeds is downloadable, `DL-LOG-09` keeps the run identifier
+    // out of every export, and `DL-LOG-07` keeps a seed out of one. Every member
+    // is read live, so a stage advanced or a relic taken since the last render
+    // is what the next reading shows. DL-DIAG-26.
+    run: (): DiagnosticsRunView => {
+      const goal = run.stageGoal();
+
+      return {
+        stageIndex: run.stageIndex(),
+        goalKind: goal.kind,
+        goalTarget: goal.target,
+        goalProgress: run.goalProgress(),
+        relics: registry.active().length,
+        persistence: run.persistenceStatus(),
+      };
+    },
+
+    // The PAGE's announcer, so an export outcome is spoken by the one
+    // service that owns announcements rather than by a live region this surface
+    // would have to own. Polite: an export outcome is not an interruption.
+    // DL-DIAG-26.
+    announce: (text: string): void => {
+      announcer.announceText(text);
+    },
   });
 
   /**
@@ -4063,6 +4467,12 @@ export function start(ownerDocument: Document): Application {
   // the controller stays the single authority on whether a choice is owed.
   const stopRewardScreen = engine.events.on('state:commit', (): void => {
     presentPendingReward();
+
+    // The OTHER path a stage transition is opened from. A cleared stage
+    // whose draw yielded no offer — an exhausted pool — advances inside the
+    // commit handler and opens the next stage there, so a refused open on that
+    // path is recovered here rather than only after a reward. DL-MAIN-42.
+    recoverPendingStageOpen('a commit followed a stage transition');
 
     // Availability is derived from the slots that are FILLED as well as from
     // the screen, and a commit is where a relic set and an offer change, so the
@@ -4209,7 +4619,7 @@ export function start(ownerDocument: Document): Application {
     let resolution: FinalMoveResolution = 'failed';
     let committed = false;
 
-    // ADDED: the direction that actually RESOLVED, which an `onBeforeMove`
+    // The direction that actually RESOLVED, which an `onBeforeMove`
     // handler may have redirected. It travels with the outcome so the turn span
     // names the move that happened rather than the one that was requested; the
     // requested direction is what the span was opened with. DL-TRACE-16.
@@ -4277,7 +4687,7 @@ export function start(ownerDocument: Document): Application {
       return;
     }
 
-    engine.continuePlaying();
+    engine.continueAfterWin();
   });
 
   // `selectReward` is NOT subscribed here. `attach` of src/ui/screen-router.ts
@@ -4406,13 +4816,13 @@ export function start(ownerDocument: Document): Application {
 
   loop.start();
 
-  // ADDED: the persisted best score is painted BEFORE the first screen is
+  // The persisted best score is painted BEFORE the first screen is
   // presented.
   //
   // The two score outlets live in the page heading and are visible on every
   // screen, but the HUD writes them only on a commit or a context refresh — and
-  // the run-start state precedes both, so a returning player was shown `BEST 0`
-  // over a best score that was on disk the whole time.
+  // the run-start state precedes both, so without this paint a returning player
+  // would see `BEST 0` over a best score that is on disk the whole time.
   //
   // `updateBestScore` is used rather than a full `update`, because a full write
   // would also write the score and so compute a delta against it. The value is
@@ -4580,18 +4990,18 @@ export function start(ownerDocument: Document): Application {
       loop.stop();
       renderer.destroy();
 
-      // ADDED: and the canvas's own renderer with it. An appearance switch
+      // And the canvas's own renderer with it. An appearance switch
       // destroys the 2.5D renderer and builds another over the SAME canvas, so
       // `three-renderer.ts` parks the `WebGLRenderer` across that destruction
       // rather than rebuilding one per switch; this is the call that says the
       // canvas is finished with, and it is made here and nowhere else.
       // DL-MAIN-36, DL-THREE-06.
       //
-      // CHANGED: the sink travels with the call, and the outcome is recorded.
-      // This is the ONE release an ordinary session performs, and it was the one
-      // release nothing counted: the release count, a refusal and a failed
-      // unpack reset are all reported by the module now, and the boolean it
-      // answers with says whether a renderer was there to release. DL-THREE-12.
+      // The sink travels with the call, and the outcome is recorded. This is
+      // the ONE release an ordinary session performs: the release count, a
+      // refusal and a failed unpack reset are all reported by the module, and
+      // the boolean it answers with says whether a renderer was there to
+      // release. DL-THREE-12.
       const releasedSurface = releaseParkedRenderer(
         ownerDocument.querySelector(SELECTORS.boardCanvas),
         reporter,
@@ -4626,13 +5036,13 @@ export function start(ownerDocument: Document): Application {
       frameSubscription.remove();
       stopMotion();
 
-      // ADDED: before the subscription is released, so a change the coalescing
-      // window was still holding is written rather than dropped, and no timer of
-      // this root's outlives it. DL-MAIN-40.
+      // Before the subscription is released, so a change the coalescing window
+      // was still holding is written rather than dropped, and no timer of this
+      // root's outlives it. DL-MAIN-40.
       flushPreferences();
       stopPreferences();
 
-      // ADDED: released with the other root-owned subscriptions, so a disposed
+      // Released with the other root-owned subscriptions, so a disposed
       // application leaves no canvas listener behind. DL-MAIN-33.
       stopContextReclaim();
       controls.unmount();

@@ -12,28 +12,26 @@
  * One traceability row of docs/TRACEABILITY_MATRIX.md apiece. TOKEN is one area
  * across both halves of the mirror, so these ordinals continue the ones
  * style/_tokens.scss carries:
- *   TR-TOKEN-02  style/main.scss L4-L22   the fourteen-token block, mirrored
- *                                        here name for name and value for value
- *   TR-TOKEN-03  style/main.scss L6-L7    `$grid-row-cells` and `$tile-size`,
- *                                        mirrored as `gridRowCells` and the
- *                                        geometry scales, with the board size
- *                                        read from src/config/default-config.ts
- *   TR-TOKEN-04  style/main.scss L475-L548 the mobile scale, mirrored as the
- *                                        second `GeometryScale`
- *   TR-TOKEN-05  style/main.scss L404-L430 the tile numeral sizes, mirrored as
- *                                        `tileNumeralSize`
- *   TR-TOKEN-06  style/helpers.scss       the Sass colour derivations, carried
- *                                        here in their compiled form as
- *                                        `derivedColors`
- *   TR-TOKEN-07  target-only row          `depthScale`, the extrusion depths
- *                                        expressed as arithmetic on
- *                                        `gridSpacing`
- *   TR-TOKEN-08  target-only row          `sassTokenProjection`, the map
- *                                        vite.config.ts passes to Dart Sass
- *   TR-TOKEN-12  target-only row          `neutralLightColor`, the neutral
- *                                        white point of the 2.5D lighting rig,
- *                                        the one token the stylesheet has no
- *                                        counterpart for
+ *   TR-TOKEN-02  style/main.scss     the fourteen-token block, mirrored here
+ *                token block         name for name and value for value
+ *   TR-TOKEN-03  style/main.scss     `$grid-row-cells` and `$tile-size`,
+ *                $grid-row-cells     mirrored as `gridRowCells` and the
+ *                                    geometry scales, with the board size read
+ *                                    from src/config/default-config.ts
+ *   TR-TOKEN-04  style/main.scss     the mobile scale, mirrored as the second
+ *                mobile block        `GeometryScale`
+ *   TR-TOKEN-05  style/main.scss     the tile numeral sizes, mirrored as
+ *                numeral rules       `tileNumeralSize`
+ *   TR-TOKEN-06  style/helpers.scss  the Sass colour derivations, carried here
+ *                                    in their compiled form as `derivedColors`
+ *   TR-TOKEN-07  target-only row     `depthScale`, the extrusion depths
+ *                                    expressed as arithmetic on `gridSpacing`
+ *   TR-TOKEN-08  target-only row     `sassTokenProjection`, the map
+ *                                    vite.config.ts passes to Dart Sass
+ *   TR-TOKEN-12  target-only row     `neutralLightColor`, the neutral white
+ *                                    point of the 2.5D lighting rig, the one
+ *                                    token the stylesheet has no counterpart
+ *                                    for
  *
  * Decisions: DL-TOKEN-02, DL-TOKEN-03, DL-TOKEN-04, DL-TOKEN-07
  * (docs/DECISION_LOG.md).
@@ -341,10 +339,9 @@ export const tileNumeralCellRatio = 0.61;
 /**
  * Smallest numeral this scale is willing to draw, in px.
  *
- * Below this a numeral is not legible at all, so a board size that would
- * demand it is served this instead: the cell is then smaller than its numeral,
- * which is visible and reportable, where an unbounded ratio silently produced
- * a numeral of a fraction of a pixel.
+ * Below this a numeral is not legible at all, so a board size that would demand
+ * it is served this instead: the cell is then smaller than its numeral, which
+ * is visible and reportable rather than a numeral a fraction of a pixel high.
  */
 export const minTileNumeralSize = 6;
 
@@ -635,6 +632,18 @@ export function tilePositionStep(
 }
 
 /**
+ * Smallest pointer target this interface paints, in px.
+ *
+ * The 44px floor WCAG 2.5.5 states, held here rather than in the one sheet that
+ * consumes it so the length has ONE owner like every other length in this file.
+ * `style/_a11y.scss` resolves it through `$minimum-target-size` of
+ * style/_tokens.scss and applies it as a minimum on the controls this feature
+ * generates; the retained classic controls keep the 40px their own token gives
+ * them. Decision DL-A11Y-13.
+ */
+export const minimumTargetSize = 44;
+
+/**
  * Extrusion depths for the WebGL board, in px, each an arithmetic expression
  * on `gridSpacing`. Lengths only: camera and lighting values live in
  * src/render.
@@ -687,6 +696,7 @@ export const sassTokenProjection = {
   'z-index-screen-overlay': `${zIndex.screenOverlay}`,
   'z-index-modal': `${zIndex.modal}`,
   'z-index-diagnostics': `${zIndex.diagnosticsOverlay}`,
+  'minimum-target-size': `${minimumTargetSize}px`,
 } as const satisfies Record<string, string>;
 
 /**

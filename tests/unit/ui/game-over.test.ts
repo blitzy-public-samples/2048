@@ -277,8 +277,8 @@ describe('the verdict resolution', () => {
       resolveTerminalState({ over: false, won: false, terminated: false }),
     ).toBeNull();
 
-    // A win played past is not terminal, which is the renamed engine flag doing
-    // the work the shadowed `keepPlaying` used to.
+    // A win played past is not terminal, which the renamed engine flag
+    // `continuedPlay` carries in place of the shadowed `keepPlaying`.
     expect(
       resolveTerminalState({ over: false, won: true, continuedPlay: true }),
     ).toBeNull();

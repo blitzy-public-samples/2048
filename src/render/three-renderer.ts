@@ -5,16 +5,18 @@
 // own api. src/render/number-only-renderer.ts takes the same layer down while
 // its own lattice draws, so exactly one of the two is exposed at a time.
 //
-// Every payload carries the LIVE board and the LIVE tiles, per AAP Contract 1,
-// so each listener plans its paint synchronously INSIDE the emission and holds
-// no engine object past it.
+// THE PAYLOADS THAT CARRY LIVE ENGINE OBJECTS. `move:before`, `move:after` and
+// `state:commit` carry the live `Grid`; `tile:merge` carries the two live
+// `Tile`s; `stage:start`, `tile:spawn` and `stage:end` carry neither. Every
+// such reference is projected SYNCHRONOUSLY inside the emission, so no listener
+// here holds an engine object past it. AAP Contract 1.
 //
 // Reduced motion is resolved by each animating member against
 // src/render/webgl-support.ts and is not re-decided here. This module reads no
 // storage and consumes no randomness.
 //
-// in either direction. One traceability row of docs/TRACEABILITY_MATRIX.md
-// apiece, every row of this module's area enumerated:
+// One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of this
+// module's area enumerated:
 //   TR-THREE-01  actuate            L10-L36   `render()` queues, `frame()`
 //                                             draws
 //   TR-THREE-02  the x-major walk   L16-L22   `planCommit()`
@@ -211,21 +213,21 @@ const STAGE_LIGHTING_METRIC = 'render.three.stage.lighting';
 /** Counter raised once per stage resolution presented. */
 const STAGE_END_METRIC = 'render.three.stage.end';
 
-/** ADDED: counter raised once per `WebGLRenderer` constructed. DL-THREE-06. */
+/** Counter raised once per `WebGLRenderer` constructed. DL-THREE-06. */
 const SURFACE_OPENED_METRIC = 'render.three.surface.opened';
 
-/** ADDED: counter raised once per parked `WebGLRenderer` reused. DL-THREE-06. */
+/** Counter raised once per parked `WebGLRenderer` reused. DL-THREE-06. */
 const SURFACE_REUSED_METRIC = 'render.three.surface.reused';
 
 /**
- * ADDED: counter raised once per `WebGLRenderer` released for good, on BOTH
+ * Counter raised once per `WebGLRenderer` released for good, on BOTH
  * release paths — the context-loss disposal inside a renderer and the normal
  * final release a caller makes through `releaseParkedRenderer`. DL-THREE-11.
  */
 const SURFACE_RELEASED_METRIC = 'render.three.surface.released';
 
 /**
- * ADDED: counter raised once per release that released nothing, carrying the
+ * Counter raised once per release that released nothing, carrying the
  * reason on its `reason` detail. DL-THREE-12.
  */
 const SURFACE_RELEASE_REFUSED_METRIC = 'render.three.surface.release_refused';
@@ -761,15 +763,15 @@ function asCanvas(value: Element | null | undefined): HTMLCanvasElement | null {
 }
 
 /**
- * CHANGED: what is parked over a canvas — the `WebGLRenderer` and the sink to
- * report its release through.
+ * What is parked over a canvas: the `WebGLRenderer` and the sink to report its
+ * release through.
  *
  * `releaseParkedRenderer` is a module function, so it has no renderer instance
- * and therefore no reporter of its own; without one it disposed the instance
- * silently and `render.three.surface.released` counted the context-loss releases
- * alone, undercounting the NORMAL final release that the composition root makes
- * exactly once per page. Parking the sink beside the instance is what lets that
- * release be reported by whoever performs it. `DL-THREE-11`.
+ * and therefore no reporter of its own. Parking the sink beside the instance is
+ * what lets a release be reported by whoever performs it, so
+ * `render.three.surface.released` counts the NORMAL final release the
+ * composition root makes once per page as well as a context-loss release.
+ * `DL-THREE-11`.
  */
 interface ParkedSurface {
   readonly renderer: WebGLRenderer;
@@ -783,7 +785,7 @@ interface ParkedSurface {
 }
 
 /**
- * ADDED: the `WebGLRenderer` parked over each canvas, held weakly so a canvas
+ * The `WebGLRenderer` parked over each canvas, held weakly so a canvas
  * that goes out of scope takes its entry with it.
  *
  * A WebGL context belongs to its canvas and outlives every renderer built over
@@ -796,7 +798,7 @@ interface ParkedSurface {
 const parkedRenderers = new WeakMap<HTMLCanvasElement, ParkedSurface>();
 
 /**
- * ADDED: the canvases whose parked renderer is currently MOUNTED and drawing.
+ * The canvases whose parked renderer is currently MOUNTED and drawing.
  *
  * `releaseParkedRenderer` refuses one of these: a renderer in use is not a
  * parked renderer, and disposing it would take the context away from the board
@@ -805,12 +807,12 @@ const parkedRenderers = new WeakMap<HTMLCanvasElement, ParkedSurface>();
 const mountedSurfaces = new WeakSet<HTMLCanvasElement>();
 
 /**
- * ADDED: returns the pixel-store unpack state to its initial values, reporting
+ * Returns the pixel-store unpack state to its initial values, reporting
  * nothing.
  *
- * Extracted from the factory's own `restoreUnpackState` so the module-level
- * release below shares one implementation with it. The reasoning is unchanged
- * and is stated there. DL-THREE-05.
+ * The one implementation the factory's own `restoreUnpackState` and the
+ * module-level release below share; the state it resets is described there.
+ * DL-THREE-05.
  *
  * @param renderer Renderer whose context is reset.
  * @returns Whether the reset completed.
@@ -862,7 +864,7 @@ function resetPixelStoreUnpack(renderer: WebGLRenderer | null): boolean {
 }
 
 /**
- * ADDED: why a release released nothing, as the refusal count's `reason`.
+ * Why a release released nothing, as the refusal count's `reason`.
  * DL-THREE-12.
  */
 const RELEASE_REFUSALS = Object.freeze({
@@ -877,7 +879,7 @@ const RELEASE_REFUSALS = Object.freeze({
 } as const);
 
 /**
- * ADDED: releases the renderer parked over one canvas, for good.
+ * Releases the renderer parked over one canvas, for good.
  *
  * The counterpart of the parking: an unmount keeps the renderer so the next
  * mount reuses it, and this is how a caller that is finished with the canvas —
@@ -885,13 +887,10 @@ const RELEASE_REFUSALS = Object.freeze({
  * resources back. Calling it for a canvas holding no parked renderer is a
  * no-op. DL-THREE-06.
  *
- * CHANGED: it REPORTS, through an optional sink. The instance-level release
- * inside the factory counts `render.three.surface.released` and warns where the
- * unpack reset fails; this one did neither, so the ONE release that happens in
- * an ordinary session — the composition root's disposal — was the one release
- * nothing counted, and a failed reset here disappeared where the same failure
- * inside the factory is a warning. The sink is optional and guarded, so a caller
- * that supplies none behaves exactly as before. DL-THREE-12.
+ * IT REPORTS, through an optional sink: the release is counted on
+ * `render.three.surface.released` and a failed unpack reset is warned about,
+ * exactly as the instance-level release inside the factory does. The sink is
+ * optional and guarded. DL-THREE-12.
  *
  * @param candidate Canvas whose parked renderer is released.
  * @param sink Sink the release, the refusal and a failed reset are reported
@@ -947,14 +946,12 @@ export function releaseParkedRenderer(
 
   parked.renderer.dispose();
 
-  // CHANGED: and it is REPORTED, exactly once. This is the normal final release
-  // — the one the composition root makes when it disposes the application — and
-  // it went uncounted, so the released counter answered only for a lost context
-  // and never balanced the opened counter on an ordinary teardown. A caller that
-  // supplied a sink asked for this release, so its sink is the one told; a caller
-  // that supplied none is reported to through the sink parked beside the
-  // instance, which is already guarded, so a release is never lost and never
-  // counted twice. DL-THREE-11.
+  // REPORTED, exactly once. This is the normal final release — the one the
+  // composition root makes when it disposes the application — so the released
+  // counter balances the opened counter on an ordinary teardown as well as on a
+  // lost context. A caller that supplied a sink asked for this release, so its
+  // sink is the one told; a caller that supplied none is reported to through
+  // the guarded sink parked beside the instance. DL-THREE-11.
   const releaseReporter =
     sink === NOOP_RENDER_REPORTER ? parked.reporter : reporter;
 
@@ -1060,10 +1057,9 @@ export function createThreeRenderer(
   /**
    * The scale the live `factory` was CONSTRUCTED at.
    *
-   * ADDED: the factory resolves every length from the scale handed to it once,
-   * at construction, and publishes no way to change it — so a breakpoint
-   * crossing that rebuilt the board left desktop geometry on a board this
-   * renderer was reporting as mobile. `null` while no factory stands.
+   * The factory resolves every length from the scale handed to it once, at
+   * construction, and publishes no way to change it, so this member is what a
+   * breakpoint crossing reconciles against. `null` while no factory stands.
    * DL-THREE-08.
    */
   let factoryScale: ScaleName | null = null;
@@ -1210,18 +1206,14 @@ export function createThreeRenderer(
    *   signal `mount` converts into its number-only fallback.
    */
   const openSurface = (surface: HTMLCanvasElement): WebGLRenderer => {
-    // CHANGED: a renderer already parked over this canvas is REUSED, where this
-    // constructed one per mount.
-    //
-    // Each construction takes a fresh set of GL objects from the canvas's own
-    // context — among them the two placeholder textures its state cache uploads
-    // for `TEXTURE_2D_ARRAY` and `TEXTURE_3D`, named in DL-THREE-05 — and
-    // `dispose()` does not delete them, so ten appearance switches over one
-    // canvas grew the live `WebGLTexture` count from 12 to 71 and the
-    // `WebGLProgram` count from 6 to 15. One renderer per canvas removes the
-    // growth at its source rather than chasing the objects it leaves behind.
-    // `releaseParkedRenderer` is how the instance is finally released.
-    // DL-THREE-06.
+    // ONE RENDERER PER CANVAS: a renderer already parked over this canvas is
+    // REUSED rather than constructed again. Each construction takes a fresh set
+    // of GL objects from the canvas's own context — among them the two
+    // placeholder textures its state cache uploads for `TEXTURE_2D_ARRAY` and
+    // `TEXTURE_3D`, named in DL-THREE-05 — and `dispose()` does not delete
+    // them, so reuse is what keeps the live object count flat across appearance
+    // switches. `releaseParkedRenderer` is how the instance is finally
+    // released. DL-THREE-06.
     const parked = parkedRenderers.get(surface);
     const renderer =
       parked?.renderer ??
@@ -1234,7 +1226,7 @@ export function createThreeRenderer(
     if (parked === undefined) {
       parkedRenderers.set(surface, { renderer, reporter });
     } else {
-      // CHANGED: the parked entry adopts THIS renderer's sink on every mount, so
+      // The parked entry adopts THIS renderer's sink on every mount, so
       // a release reported after an appearance switch is reported through the
       // reporter of the renderer that last held the context rather than through
       // one whose owner has been destroyed. DL-THREE-11.
@@ -1258,7 +1250,7 @@ export function createThreeRenderer(
   };
 
   /**
-   * ADDED: leaves the renderer parked over its canvas for the next mount.
+   * Leaves the renderer parked over its canvas for the next mount.
    *
    * The mount's counterpart of `discardSurface` below: nothing is disposed and
    * the registry entry stands, so the next mount over this canvas takes the
@@ -1278,7 +1270,7 @@ export function createThreeRenderer(
   };
 
   /**
-   * ADDED: releases the renderer and un-parks it, for a context that is gone.
+   * Releases the renderer and un-parks it, for a context that is gone.
    *
    * A lost context takes every GL object with it, so the instance holding it
    * has nothing left to reuse and a later mount must build over the restored
@@ -1311,8 +1303,8 @@ export function createThreeRenderer(
   };
 
   /**
-   * ADDED: returns the pixel-store unpack state to its initial values before
-   * the renderer that changed it lets go of the context.
+   * Returns the pixel-store unpack state to its initial values before the
+   * renderer that changed it lets go of the context.
    *
    * A `WebGLRenderer` releases its resources on `dispose()` but the CONTEXT
    * belongs to the canvas and outlives it, carrying whatever unpack state was
@@ -1324,20 +1316,18 @@ export function createThreeRenderer(
    * `INVALID_OPERATION: texImage3D` warnings on every re-mount, with no visual
    * consequence and no deduplication.
    *
-   * Restoring the state here rather than before the next construction keeps the
-   * fix with the instance that caused it: this renderer leaves the context as it
-   * found it, so any later consumer — this one re-mounting, or another entirely
-   * — starts from the initial state the specification promises.
-   *
-   * `forceContextLoss()` was rejected: it makes the canvas permanently unable to
-   * take another context, and this canvas is re-used for the life of the page.
-   * DL-THREE-05.
+   * The reset belongs to the instance that wrote the state, so this renderer
+   * leaves the context as it found it and any later consumer — this one
+   * re-mounting, or another entirely — starts from the initial state the
+   * specification promises. `forceContextLoss()` is not used: it makes the
+   * canvas permanently unable to take another context, and this canvas is
+   * re-used for the life of the page. DL-THREE-05.
    *
    * @param renderer Renderer about to be disposed, or `null`.
    */
   const restoreUnpackState = (renderer: WebGLRenderer | null): void => {
-    // CHANGED: the reset itself moved to the module-level `resetPixelStoreUnpack`
-    // so `releaseParkedRenderer` shares it; this wrapper keeps the report.
+    // The reset itself is the module-level `resetPixelStoreUnpack`, shared with
+    // `releaseParkedRenderer`; this wrapper adds the report.
     if (resetPixelStoreUnpack(renderer)) {
       return;
     }
@@ -1418,8 +1408,8 @@ export function createThreeRenderer(
    * Builds the tile-mesh factory at one scale and records the scale it was
    * built at.
    *
-   * ADDED: the one construction site for the factory, so `factoryScale` cannot
-   * fall out of step with the factory it describes. DL-THREE-08.
+   * The one construction site for the factory, so `factoryScale` cannot fall
+   * out of step with the factory it describes. DL-THREE-08.
    *
    * @param size Board size the factory is configured for.
    * @param scale Scale every length is resolved from.
@@ -1443,17 +1433,15 @@ export function createThreeRenderer(
    * Rebuilds the factory where the scale in force is no longer the scale it was
    * built at.
    *
-   * ADDED: this is the step a breakpoint crossing was missing. The factory
-   * resolves the cell pitch, the tile footprint, the extrusion depth and the
-   * numeral font size from its construction scale, so reusing it across a
-   * crossing produced desktop blocks on a board the scene had reframed for
-   * mobile — every length wrong by the ratio between the two token sets, and
-   * invisible to a test that read the renderer's own reported scale.
+   * THE STEP A BREAKPOINT CROSSING TAKES. The factory resolves the cell pitch,
+   * the tile footprint, the extrusion depth and the numeral font size from its
+   * construction scale, so a crossing must rebuild it or the board carries the
+   * lengths of the other scale.
    *
-   * Every block on screen is released FIRST, because a block returns to the
-   * pool of the factory that made it and a pooled desktop mesh must not be
-   * handed out for a mobile board. The tweens driving those blocks are cleared
-   * for the same reason: a tween holds the mesh it animates.
+   * Every block on screen is released FIRST: a block returns to the pool of the
+   * factory that made it, and a pooled desktop mesh must not be handed out for
+   * a mobile board. The tweens driving those blocks are cleared for the same
+   * reason — a tween holds the mesh it animates.
    *
    * @param size Board size the rebuilt factory is configured for.
    * @param scale Scale in force.
@@ -1493,8 +1481,8 @@ export function createThreeRenderer(
 
     const scale = resolveScale();
 
-    // CHANGED: reconciled BEFORE the up-to-date check below, so a board of the
-    // same size at a different scale is rebuilt rather than kept. DL-THREE-08.
+    // Reconciled BEFORE the up-to-date check below, so a board of the same size
+    // at a different scale is rebuilt rather than kept. DL-THREE-08.
     reconcileFactoryScale(size, scale);
 
     const activeFactory = factory;
@@ -1523,16 +1511,14 @@ export function createThreeRenderer(
       camera?.setRestTransform(activeScene.readRestTransform());
       particles?.attachTo(built.group);
 
-      // CHANGED: the two effect controllers are re-measured against the geometry
-      // this board was built at, beside the rest transform the reframe produced.
+      // The two effect controllers are re-measured against the geometry this
+      // board was built at, beside the rest transform the reframe produced.
       // Both hold a magnitude derived from a planar length — the burst's spread
-      // is one cell pitch and the punch's peak is a share of the field measure —
-      // and this is the ONE path every rebuild takes: a configured board size
+      // is one cell pitch and the punch's peak is a share of the field measure
+      // — and this is the ONE path every rebuild takes: a configured board size
       // that changed, the breakpoint handler that nulls `board` and `geometry`
-      // and rebuilds, and the rebuild after a restored context. Without it a
-      // board whose geometry differed from the desktop 4x4 sprayed the wrong
-      // number of cell pitches — about 1.80 at the mobile scale, 0.75 on a 3x3
-      // desktop board. DL-THREE-10, DL-PARTICLE-07, DL-CAMERA-05.
+      // and rebuilds, and the rebuild after a restored context. DL-THREE-10,
+      // DL-PARTICLE-07, DL-CAMERA-05.
       particles?.useGeometry(built.geometry);
       camera?.useGeometry(built.geometry);
       applySize();
@@ -1545,11 +1531,10 @@ export function createThreeRenderer(
         name: BOARD_METRIC,
         value: 1,
 
-        // CHANGED: the geometry the board was ACTUALLY laid out with, and the
-        // framing the camera came to rest at, rather than the scale's name
-        // alone. The name was already correct while every length behind it was
-        // wrong, so a report carrying only the name could not tell a mobile
-        // board from a desktop one wearing a mobile label. DL-THREE-08.
+        // The geometry the board was ACTUALLY laid out with, and the framing
+        // the camera came to rest at, rather than the scale's name alone: a
+        // report carrying only the name cannot tell a mobile board from a
+        // desktop one wearing a mobile label. DL-THREE-08.
         detail: Object.freeze({
           boardSize: built.boardSize,
           scale,
@@ -2194,9 +2179,9 @@ export function createThreeRenderer(
 
     for (const planned of plan.tiles) {
       // js/html_actuator.js L73-L80 appended the two source tiles after the
-      // merged tile had been classed, leaving them beneath it in the
-      // container; the order is kept so a depth tie, if the tweens ever
-      // produced one, resolves the way the 2D board resolved it.
+      // merged tile was classed, leaving them beneath it in the container; the
+      // order is kept so a depth tie, if the tweens ever produced one, resolves
+      // the way the 2D board resolved it.
       for (const source of planned.merged) {
         addTile(source, true);
       }
@@ -2456,9 +2441,9 @@ export function createThreeRenderer(
     scene?.dispose();
     scene = null;
 
-    // CHANGED: released and un-parked rather than parked, because this path
-    // serves a LOST context and a rebuild over the restored one. The unpack
-    // reset still runs first, inside `discardSurface`. DL-THREE-05, DL-THREE-06.
+    // Released and un-parked rather than parked: this path serves a LOST
+    // context and a rebuild over the restored one. The unpack reset runs first,
+    // inside `discardSurface`. DL-THREE-05, DL-THREE-06.
     discardSurface();
     board = null;
     geometry = null;
@@ -2501,10 +2486,8 @@ export function createThreeRenderer(
 
       webgl = openSurface(surface);
 
-      // CHANGED: resolved into a local, so the scene and the two effect
-      // controllers below are built against ONE geometry rather than the scene
-      // against this one and the controllers against the desktop defaults.
-      // DL-THREE-10.
+      // Resolved into a local, so the scene and the two effect controllers
+      // below are built against ONE geometry. DL-THREE-10.
       const restoredGeometry = resolveBoardGeometry(size, scale);
 
       scene = createScene({
@@ -2672,12 +2655,10 @@ export function createThreeRenderer(
             // does not evaluate its arguments, so passing the rebuild inline
             // would skip it entirely for a renderer built with no callback.
             //
-            // CHANGED: the LIVE size and the LIVE scale, resolved now. This
-            // closure captured the two values `mount()` read once, so a context
-            // lost and restored after a breakpoint crossing — or after the board
-            // was rebuilt at another size — came back at the size and scale the
-            // renderer had mounted at rather than the ones in force.
-            // DL-THREE-08.
+            // The LIVE size and the LIVE scale, resolved now rather than
+            // captured at mount, so a context lost and restored after a
+            // breakpoint crossing — or after the board was rebuilt at another
+            // size — comes back at the size and scale in force. DL-THREE-08.
             const outcome = rebuildAfterContextRestore(
               surface,
               boardSize > 0 ? boardSize : readConfiguredSize(),
@@ -2820,7 +2801,7 @@ export function createThreeRenderer(
     contextRestores = 0;
     orphanedTriggers = 0;
 
-    // CHANGED: PARKED rather than disposed, so the next mount over this canvas
+    // PARKED rather than disposed, so the next mount over this canvas
     // takes the same renderer and the same GL objects, and the pixel-store
     // state is left exactly as this renderer wrote it.
     // `releaseParkedRenderer` is the caller's way to give the context back, and
@@ -3144,8 +3125,8 @@ export function createThreeRenderer(
     // The six names of AAP Contract 1 this renderer reads.
     const taken: EngineEventSubscription[] = [];
 
-    // CHANGED: released in full whichever release raises, so one refusing
-    // listener cannot strand the five behind it. DL-THREE-09.
+    // Released in full whichever release raises, so one refusing listener
+    // cannot strand the five behind it. DL-THREE-09.
     const releaseTaken = (): void => {
       let raised: unknown = null;
       let failed = false;
@@ -3168,13 +3149,10 @@ export function createThreeRenderer(
       }
     };
 
-    // CHANGED: ONE AT A TIME, so a registration that raises part-way rolls the
-    // ones already taken back. They were taken in an array literal, so a throw
-    // from the third `on()` left the first two attached to the emitter with no
-    // reference to them anywhere — this renderer went on drawing for an engine
-    // it had reported it was not subscribed to, and neither `dispose()` nor the
-    // returned release could reach them. Rolling back and rethrowing leaves the
-    // emitter as it was, so the caller can retry. DL-THREE-09.
+    // ONE AT A TIME, so a registration that raises part-way rolls the ones
+    // already taken back and rethrows. The emitter is left exactly as it was,
+    // so no listener is attached with no reference to it and the caller can
+    // retry. DL-THREE-09.
     try {
       taken.push(events.on('stage:start', onStageStart));
       taken.push(events.on('tile:merge', onMerge));
@@ -3233,11 +3211,9 @@ export function createThreeRenderer(
 
       released = true;
 
-      // CHANGED: `try`/`finally`, so a listener release that raises still
-      // leaves the shared collection accurate. It used to run the removal after
-      // the releases, so one refusing release left every entry of this
-      // subscription in `subscriptions` — and `dispose()` then called each of
-      // them a second time. DL-THREE-09.
+      // `try`/`finally`, so a listener release that raises still leaves the
+      // shared collection accurate and no entry of this subscription can be
+      // released a second time by `dispose()`. DL-THREE-09.
       try {
         releaseTaken();
       } finally {

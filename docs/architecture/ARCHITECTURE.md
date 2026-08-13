@@ -396,7 +396,7 @@ The three input event names `move`, `restart` and `keepPlaying` are likewise
 preserved, and the new screen-flow and relic actions are additions beside them.
 `keepPlaying` survives in two places for that reason: as the input event name,
 and as the persisted property name. The engine's own flag and method are named
-`continuedPlay` and `continuePlaying()` instead (`DL-ENGINE-04`).
+`continuedPlay` and `continueAfterWin()` instead (`DL-ENGINE-04`).
 
 ## 6. Where the rationale lives
 

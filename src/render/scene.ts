@@ -7,21 +7,20 @@
 //
 // One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of
 // this module's area enumerated:
-//   TR-SCENE-01  style/main.scss L171-L194  `@mixin game-field`, reproduced as
-//                                           the board surface
-//   TR-SCENE-02  style/main.scss L254       the `.grid-container` layer, which
-//                                           the scene replaces
-//   TR-SCENE-03  style/main.scss L288       the `.tile-container` layer, which
-//                                           the scene replaces
-//   TR-SCENE-04  style/main.scss L475-L548  the mobile scale, framed through
-//                                           this code with no branch
-//   TR-SCENE-05  target-only row            `createScene()` and `BoardScene`
-//   TR-SCENE-06  target-only row            `frameBoard()`, `BoardFraming` and
-//                                           `CameraRestPose`
-//   TR-SCENE-07  target-only row            `LightingRig` and `RigTuning`
-//   TR-SCENE-08  target-only row            `sceneOptics`
-//   TR-SCENE-09  target-only row            `SceneStats` and the injected
-//                                           reporter
+//   TR-SCENE-01  style/main.scss   `@mixin game-field`, reproduced as the board
+//                game-field mixin  surface
+//   TR-SCENE-02  style/main.scss   the `.grid-container` layer, which the scene
+//                .grid-container   replaces
+//   TR-SCENE-03  style/main.scss   the `.tile-container` layer, which the scene
+//                .tile-container   replaces
+//   TR-SCENE-04  style/main.scss   the mobile scale, framed through this code
+//                mobile block      with no branch
+//   TR-SCENE-05  target-only row   `createScene()` and `BoardScene`
+//   TR-SCENE-06  target-only row   `frameBoard()`, `BoardFraming` and
+//                                  `CameraRestPose`
+//   TR-SCENE-07  target-only row   `LightingRig` and `RigTuning`
+//   TR-SCENE-08  target-only row   `sceneOptics`
+//   TR-SCENE-09  target-only row   `SceneStats` and the injected reporter
 //
 // Decisions: DL-SCENE-01, DL-SCENE-02, DL-SCENE-03, DL-SCENE-04, DL-SCENE-05
 // (docs/DECISION_LOG.md).
@@ -384,7 +383,7 @@ export interface BoardScene {
    * Re-frames the camera for a board size, and re-reads the rest transform.
    *
    * Called when a board-mutating relic changes the edge length and when the
-   * scale changes at the mobile breakpoint of style/main.scss L475.
+   * scale changes at the `$mobile-threshold` breakpoint of style/main.scss.
    *
    * @param boardSize Cells per row.
    * @param geometry Lengths resolved for that size and scale. Resolved from
@@ -677,9 +676,9 @@ export function createScene(options: SceneOptions = {}): BoardScene {
   const scene = new Scene();
 
   // TRANSPARENT. The canvas is composited over `.game-container`, whose
-  // `$game-container-background` at style/main.scss L188 is the colour the
-  // board field itself is drawn in, and the DOM overlay layer at
-  // style/main.scss L205 composites above the canvas.
+  // `$game-container-background` is the colour the board field itself is drawn
+  // in, and the `[hidden]`-gated overlay layer of style/main.scss composites
+  // above the canvas.
   scene.background = null;
 
   const boardGroup = new Group();

@@ -63,11 +63,16 @@ merged.
  - Please test your modification thoroughly before submitting your Pull
    Request. Run `npm run typecheck`, `npm test` and `npm run test:snapshot`
    before you open it, `npm run test:e2e` as well if you touched the renderer,
-   the run flow or the screens, and `npx sass style/main.scss` if you touched a
-   stylesheet. `.github/workflows/ci.yml` runs the type check, the stylesheet
-   deprecation gate, the unit suite, the snapshot gate, the dashboard gate, the
-   build and the recorded proof against every push and every Pull Request to
-   `master`.
+   the run flow or the screens, and `npm run lint:styles` if you touched a
+   stylesheet. That last one is the gate, and a plain `npx sass
+   style/main.scss` is not a stand-in for it: the script adds
+   `--fatal-deprecation`, so a deprecation warning fails the command, where the
+   plain invocation prints the same warning and still exits `0`
+   (`DL-BUILD-17`). Reach for plain `sass` when you want to read the compiled
+   CSS, not to clear the gate. `.github/workflows/ci.yml` runs the type check,
+   the stylesheet deprecation gate, the unit suite, the snapshot gate, the
+   dashboard gate, the build and the recorded proof against every push and
+   every Pull Request to `master`.
 
    `npm run test:snapshot` is its own command because the seeded snapshot suite
    is a separate regression gate, with its own configuration in
@@ -88,10 +93,18 @@ merged.
    case each by the tag that case declares. `gameplay-recording` plays a seeded
    run from the run-start screen through a merge, a stage clear and a 1-of-3
    relic reward to a terminal state and on into the run summary, and then
-   decodes the file it recorded to assert a finite, non-zero duration at the
-   configured frame size. `diagnostics-surface` exercises the diagnostics
-   overlay and the observability surfaces behind it, at the same viewport and
-   with no video of its own. The other three — `variant-webgl-unavailable`,
+   decodes the file it recorded and makes that file carry the proof itself: a
+   finite duration that reaches past the moment the relic was taken, the
+   configured frame size, opening frames holding a rendered board rather than a
+   black rectangle, the reward dialog and the stage that replaced it each
+   located inside the recording by matching a clip taken from the live page and
+   found in that order, and the merge measured over the merged tile's own cell,
+   asserted disjoint from the cell the same turn spawned into, against both an
+   absolute floor and a settled-window baseline — so the spawn animation
+   running alongside the merge cannot satisfy the merge test (`DL-PW-08`).
+   `diagnostics-surface` exercises the diagnostics overlay and the
+   observability surfaces behind it, at the same viewport and with no video of
+   its own. The other three — `variant-webgl-unavailable`,
    `variant-reduced-motion` and `variant-mobile` — run one tagged case each of
    `tests/e2e/browser-variants.spec.ts`. Only the recording project captures
    video, so the gate still produces exactly the one R11 artifact. Please run it
@@ -102,10 +115,12 @@ merged.
    whether the run passed or failed — watch it before you push a rendering
    change, because a recording that exists and shows a blank board still fails
    the gate it exists to satisfy. It takes a little over a minute, most of it the
-   filmed run itself, and leaves that video, a trace and end-of-test screenshots
-   per case under `test-results/`, with the HTML report under
-   `playwright-report/`; both directories are git-ignored, and the workflow
-   uploads `test-results/**/*.webm` as an artifact with
+   filmed run itself, and leaves that video under `test-results/`; a trace and a
+   screenshot join it only for a case that failed, because `trace` is
+   `retain-on-failure` and `screenshot` is `only-on-failure` (`DL-PW-07`), so
+   the video is the one artifact a passing run leaves behind. The HTML report
+   lands under `playwright-report/`; both directories are git-ignored, and the
+   workflow uploads `test-results/**/*.webm` as an artifact with
    `if-no-files-found: error` instead.
 
    `npm run e2e:install` provisions what that gate needs, and it needs running

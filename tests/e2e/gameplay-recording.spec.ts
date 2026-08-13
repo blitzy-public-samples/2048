@@ -21,7 +21,8 @@
 // the TAG its project selects on — `@gameplay` for the recorded proof and
 // `@diagnostics` for the observability exercise — so the video is retained for
 // the run that is the proof and for nothing else.
-// Decisions: DL-PW-01, DL-PW-02, DL-PW-03, DL-PW-05, DL-PW-07
+// Decisions: DL-PW-01, DL-PW-02, DL-PW-03, DL-PW-05, DL-PW-07, DL-PW-08,
+//   DL-PW-09, DL-PW-10
 // (docs/DECISION_LOG.md).
 //
 // One traceability row of docs/TRACEABILITY_MATRIX.md apiece, continuing this
@@ -37,8 +38,11 @@
 //   TR-PW-11  the observability case read through the diagnostics surface
 //
 // Provenance of the constants below:
-//   style/main.scss L22, L104, L234, L329, L430-L431, L450-L451
-//                                     the timing budget and the overlay delay
+//   style/main.scss                   the `$transition-speed` token, the
+//                                     move transition and the `move-up`,
+//                                     `fade-in`, `appear` and `pop`
+//                                     keyframes: the timing budget and the
+//                                     overlay delay
 //   index.html                        every selector and mount id
 //   src/ui/screen-router.ts           the seven states and the `hidden`
 //                                     attribute as the whole active-screen
@@ -223,6 +227,12 @@ const SCREEN_SETTLE_MS = MERGE_POP_MS + SCORE_DELTA_MS;
 /** Ceiling on a web-first wait for a state this spec drives itself. */
 const STATE_TIMEOUT_MS = 30_000;
 
+/**
+ * Interval the in-page recorder samples the frame counter at, in milliseconds:
+ * one 60Hz frame.
+ */
+const RECORDER_SAMPLE_MS = 16;
+
 /* --------------------------------------------------------------------------
  * Probing the encoded artifact.
  * ----------------------------------------------------------------------- */
@@ -267,6 +277,66 @@ const VIEWPORT_HEIGHT = 960;
 const MILESTONE_TOLERANCE_S = 1.5;
 
 /**
+ * Step between decoded samples of a milestone bracket, in seconds.
+ *
+ * Six encoded frames. A held screen state stands for `MILESTONE_HOLD_MS`, so
+ * this resolves several samples inside the state however the bracket lands.
+ */
+const MILESTONE_STEP_S = FRAME_STEP_S * 6;
+
+/** Step between decoded samples of the merge window, in seconds. */
+const MERGE_STEP_S = FRAME_STEP_S * 2;
+
+/**
+ * Seconds either side of a mapped milestone that its bracket reaches.
+ *
+ * The recording's own timeline and the wall clock are related by the rate the
+ * encoder actually wrote at, which is measured rather than assumed; this is the
+ * slack that rate is searched within, and it was measured at 2.5s over the
+ * runs this scenario was pinned against.
+ */
+const MILESTONE_SEARCH_S = 6;
+
+/** Milliseconds a filmed screen state is held before the run moves on. */
+const MILESTONE_HOLD_MS = MILESTONE_TOLERANCE_S * 1000 + MOVE_SETTLE_MS;
+
+/**
+ * Samples of the merged cell taken where nothing is animating, one every
+ * `MERGE_STEP_S` from the frame the settled state was found at.
+ */
+const SETTLED_SAMPLE_COUNT = 8;
+
+/** Edge of the grayscale grid each measured picture is reduced to. */
+const THUMBNAIL_EDGE = 12;
+
+/**
+ * Mean per-cell difference, on the 0-255 scale, within which a decoded frame
+ * carries the same picture as a clip of the live page.
+ *
+ * The clip is exact and the frame is VP8, so a match is close rather than
+ * equal.
+ */
+const MATCH_TOLERANCE = 12;
+
+/**
+ * Mean per-cell difference, on the same scale, that separates two pictures of
+ * DIFFERENT screen states.
+ */
+const MIN_STATE_CHANGE = 24;
+
+/**
+ * Mean per-cell difference, on the same scale, that separates two decoded
+ * pictures of one board cell across a merge animation.
+ */
+const MIN_MERGE_CHANGE = 6;
+
+/**
+ * Factor by which the change inside the merge window must exceed the change
+ * measured over the same cell while nothing is animating.
+ */
+const MERGE_CHANGE_MARGIN = 2;
+
+/**
  * The counter `src/observability/metrics.ts` advances once per drawn frame.
  *
  * Read to establish that the render loop was live while an animation played. It
@@ -299,13 +369,13 @@ const TERMINAL_MOVE_CAP = 200;
 /** The score the terminal screen reports, as `src/ui/screens/game-over.ts` words it. */
 const TERMINAL_OVERLAY_SCORE = /Score (\d+)/u;
 
-/** `runSummaryCopy.title('lost')` of src/ui/screens/run-summary.ts L354. */
+/** `runSummaryCopy.title('lost')` of src/ui/screens/run-summary.ts. */
 const RUN_LOST_TEXT = /Run lost/u;
 
-/** `runSummaryCopy.scoreLabel` of src/ui/screens/run-summary.ts L365. */
+/** `runSummaryCopy.scoreLabel` of src/ui/screens/run-summary.ts. */
 const SUMMARY_SCORE_LABEL = 'Final score';
 
-/** `runSummaryCopy.stageLabel` of src/ui/screens/run-summary.ts L366. */
+/** `runSummaryCopy.stageLabel` of src/ui/screens/run-summary.ts. */
 const SUMMARY_STAGE_LABEL = 'Stage reached';
 
 /** The `data-outcome` a lost run writes: `RunOutcome` of src/run/run-state.ts. */
@@ -351,6 +421,12 @@ const SELECTORS = Object.freeze({
   trayRelic: '#relic-tray [data-relic-id]',
   continueStage: '.stage-progress-continue',
   rewardCard: '#screen-reward button.relic-card',
+
+  /**
+   * The reward dialog's own surface, `rewardScreenClasses.panel` of
+   * src/ui/screens/reward.ts, inside the container index.html declares.
+   */
+  rewardPanel: '#screen-reward .reward-panel',
   diagnostics: '#diagnostics-overlay',
   diagnosticsControl: '#diagnostics-overlay button',
 
@@ -885,11 +961,17 @@ interface FilmedMove {
   /** Wall clock at the press, for locating the move inside the recording. */
   readonly pressedAt: number;
 
-  /** Frames the render loop drew inside `MERGE_POP_MS` of the press. */
+  /** Frames the render loop drew across the bracketed `MERGE_POP_MS` window. */
   readonly framesInPopWindow: number;
 
-  /** Samples the recorder took inside the same window. */
+  /**
+   * Samples the bracket holds: those inside the window, plus the one that
+   * closes it.
+   */
   readonly samplesInPopWindow: number;
+
+  /** Offset of the sample that closed the bracket, in ms from the press. */
+  readonly popWindowClosedAtMs: number;
 
   /** Frames drawn across the whole recorded window. */
   readonly framesDrawn: number;
@@ -903,9 +985,16 @@ interface FilmedMove {
  * than the window is open — measured at over 600ms for the first capture — and
  * reading the WebGL canvas with `drawImage` returns a cleared buffer, because
  * the context is not created with `preserveDrawingBuffer`. So the observation is
- * made INSIDE the page: a `requestAnimationFrame` loop installed before the
- * press samples the frame counter every frame at no round-trip cost, and the
- * series is read back afterwards.
+ * made INSIDE the page: a loop installed before the press samples the frame
+ * counter every `RECORDER_SAMPLE_MS`, and the series is read back afterwards.
+ *
+ * The loop is driven by a TIMER where it was driven by
+ * `requestAnimationFrame`, so how many samples it takes is a property of the
+ * clock rather than of the render loop it is measuring. DL-PW-09.
+ *
+ * The pop window is bracketed rather than filtered, because neither a
+ * timer nor a frame callback can be relied on to fire inside a window the
+ * thread it shares with the renderer may occupy entirely. DL-PW-10.
  *
  * The recorder replaces the settle rather than adding to it.
  *
@@ -926,6 +1015,7 @@ async function playFilmedMove(
       async (request: {
         readonly windowMs: number;
         readonly counter: string;
+        readonly sampleMs: number;
       }): Promise<readonly { readonly ms: number; readonly f: number }[]> => {
         const surface = (
           globalThis as unknown as {
@@ -962,7 +1052,7 @@ async function playFilmedMove(
             });
 
             if (performance.now() < stopAt) {
-              requestAnimationFrame(step);
+              window.setTimeout(step, request.sampleMs);
 
               return;
             }
@@ -970,19 +1060,33 @@ async function playFilmedMove(
             resolve();
           };
 
-          requestAnimationFrame(step);
+          step();
         });
 
         return samples;
       },
-      { windowMs, counter: FRAMES_RENDERED_METRIC },
+      {
+        windowMs,
+        counter: FRAMES_RENDERED_METRIC,
+        sampleMs: RECORDER_SAMPLE_MS,
+      },
     ),
     page.keyboard.press(key),
   ]);
 
-  const inWindow = series.filter(
-    (sample): boolean => sample.ms <= MERGE_POP_MS,
+  // THE POP WINDOW IS BRACKETED, NOT FILTERED. The sampler and the render loop
+  // share the page's one main thread, so a single long task — an engine turn
+  // plus a software-rendered WebGL frame — can span the whole window and leave
+  // only the synchronous opening sample strictly inside it. Taking every sample
+  // up to the window closing PLUS the first one at or after it keeps the frames
+  // drawn across the window measurable in that case, and the closing offset is
+  // reported so the caller can reject an observation that ran too late to be
+  // the merge's own. DL-PW-10.
+  const closingIndex = series.findIndex(
+    (sample): boolean => sample.ms >= MERGE_POP_MS,
   );
+  const inWindow =
+    closingIndex === -1 ? series : series.slice(0, closingIndex + 1);
   const span = (
     samples: readonly { readonly ms: number; readonly f: number }[],
   ): number =>
@@ -994,8 +1098,145 @@ async function playFilmedMove(
     pressedAt,
     framesInPopWindow: span(inWindow),
     samplesInPopWindow: inWindow.length,
+    popWindowClosedAtMs:
+      inWindow.length === 0 ? 0 : inWindow[inWindow.length - 1].ms,
     framesDrawn: span(series),
   };
+}
+
+/**
+ * Name the recorder below collects under. Owned by this spec; the application
+ * declares nothing under it.
+ */
+const TURN_GEOMETRY_GLOBAL = '__blitzyRecordedTurnGeometry';
+
+/** One board cell an engine event named, in engine coordinates. */
+interface CellRef {
+  /** Column, zero-based, as src/engine/tile.ts holds it. */
+  readonly x: number;
+
+  /** Row, zero-based. */
+  readonly y: number;
+
+  /** The commit the event belongs to, as its `turn` carried it. */
+  readonly turn: number;
+}
+
+/** What the recorder collected while the run played. */
+interface TurnGeometry {
+  /** Whether the engine's emitter was reachable. */
+  readonly attached: boolean;
+
+  /**
+   * `tile:merge` target cells, in emission order.
+   *
+   * `target` is the tile that already occupied the destination cell, and
+   * src/engine/move-resolver.ts builds the merged tile at that same cell, so
+   * this is where the merged tile is.
+   */
+  readonly merged: readonly CellRef[];
+
+  /** `tile:spawn` cells that carried a position, in emission order. */
+  readonly spawned: readonly CellRef[];
+}
+
+/** The `tile:merge` and `tile:spawn` fields the recorder reads. */
+interface RecordedEvent {
+  readonly turn: number;
+  readonly target?: { readonly x: number; readonly y: number } | undefined;
+  readonly position?: { readonly x: number; readonly y: number } | undefined;
+}
+
+/** The subscription surface `Engine.events` offers this recorder. */
+interface RecordedEmitter {
+  on(name: string, listener: (event: RecordedEvent) => void): unknown;
+}
+
+/**
+ * Subscribes to the engine's own emitter so the cells one turn merged into and
+ * spawned at can be read back afterwards.
+ *
+ * Installed once; a second call is a no-op that reports the first one's state.
+ *
+ * @param page Page carrying the running application.
+ * @returns Whether the emitter was reached and the recorder is collecting.
+ */
+async function recordTurnGeometry(page: Page): Promise<boolean> {
+  return await page.evaluate(
+    (request: {
+      readonly application: string;
+      readonly sink: string;
+    }): boolean => {
+      const holder = globalThis as unknown as Record<string, unknown>;
+
+      if (holder[request.sink] !== undefined) {
+        return true;
+      }
+
+      const application = holder[request.application] as
+        | { readonly engine?: { readonly events?: RecordedEmitter } }
+        | undefined;
+      const events = application?.engine?.events;
+
+      if (events === undefined) {
+        return false;
+      }
+
+      const sink: {
+        readonly merged: { x: number; y: number; turn: number }[];
+        readonly spawned: { x: number; y: number; turn: number }[];
+      } = { merged: [], spawned: [] };
+
+      holder[request.sink] = sink;
+
+      events.on('tile:merge', (event: RecordedEvent): void => {
+        const cell = event.target;
+
+        if (cell !== undefined) {
+          sink.merged.push({ x: cell.x, y: cell.y, turn: event.turn });
+        }
+      });
+
+      events.on('tile:spawn', (event: RecordedEvent): void => {
+        const cell = event.position;
+
+        if (cell !== undefined) {
+          sink.spawned.push({ x: cell.x, y: cell.y, turn: event.turn });
+        }
+      });
+
+      return true;
+    },
+    { application: APPLICATION_GLOBAL, sink: TURN_GEOMETRY_GLOBAL },
+  );
+}
+
+/**
+ * Reads back what `recordTurnGeometry` has collected so far.
+ *
+ * @param page Page the recorder was installed on.
+ * @returns The merge and spawn cells recorded, in emission order.
+ */
+async function readTurnGeometry(page: Page): Promise<TurnGeometry> {
+  return await page.evaluate((sink: string): TurnGeometry => {
+    const holder = globalThis as unknown as Record<string, unknown>;
+    const recorded = holder[sink] as
+      | {
+          readonly merged?: readonly CellRef[];
+          readonly spawned?: readonly CellRef[];
+        }
+      | undefined;
+
+    if (recorded === undefined) {
+      return { attached: false, merged: [], spawned: [] };
+    }
+
+    return {
+      attached: true,
+      merged: [...(recorded.merged ?? [])],
+      spawned: [...(recorded.spawned ?? [])],
+    };
+  }, TURN_GEOMETRY_GLOBAL);
 }
 
 /**
@@ -1519,19 +1760,249 @@ interface FrameRegion {
   readonly height: number;
 }
 
-/** One decoded frame: where it was taken, what it looked like. */
-interface FrameSample {
-  /** The timestamp actually decoded, in seconds. */
+/** One timestamp of the recording, with the rectangle to sample there. */
+interface RegionSample {
+  /** Seconds into the recording. */
   readonly at: number;
 
+  /** Rectangle of that frame to measure. */
+  readonly region: FrameRegion;
+}
+
+/** What one measured picture of a rectangle amounts to. */
+interface RegionMeasurement {
   /** The same measurements `sampleBoardCanvas` takes of the live board. */
   readonly verdict: CanvasVerdict;
 
   /**
-   * A stable digest of the sampled pixels. Two frames carrying the same
+   * A stable digest of the sampled pixels. Two pictures carrying the same
    * signature are the same picture, which is how a static encode is caught.
    */
   readonly signature: string;
+
+  /**
+   * The picture reduced to a `THUMBNAIL_EDGE` square of mean luminance, one
+   * entry per cell in row-major order, on the 0-255 scale.
+   */
+  readonly thumbnail: readonly number[];
+}
+
+/** One decoded frame: where it was taken, what it looked like. */
+interface FrameSample extends RegionMeasurement {
+  /** The timestamp actually decoded, in seconds. */
+  readonly at: number;
+}
+
+/**
+ * A picture of the LIVE page, handed to the decoder so the recording can be
+ * searched for the state it holds.
+ */
+interface RegionReference {
+  /** Short label naming the state, carried into a failure. */
+  readonly label: string;
+
+  /** The clip, PNG-encoded and base64-wrapped. */
+  readonly encoded: string;
+}
+
+/**
+ * Rectangle of one cell of the parallel board, in page coordinates.
+ *
+ * src/ui/a11y/focus-manager.ts writes `data-cell-x` and `data-cell-y` on each
+ * `role="gridcell"` counterpart and lays it out at the tile geometry
+ * style/main.scss positions the visual tile at, so the counterpart's box is the
+ * board cell's box.
+ *
+ * @param page Page to measure.
+ * @param cell Cell to resolve, in engine coordinates.
+ * @param context Short label naming the cell, carried into the failure.
+ * @returns The cell's rectangle, rounded to whole pixels.
+ */
+async function cellRegion(
+  page: Page,
+  cell: CellRef,
+  context: string,
+): Promise<FrameRegion> {
+  const counterpart = page.locator(
+    `${SELECTORS.parallelBoard} [data-cell-x="${String(cell.x)}"]` +
+      `[data-cell-y="${String(cell.y)}"]`,
+  );
+
+  await expect(
+    counterpart,
+    `${context}: the parallel board carries no cell at ` +
+      `(${String(cell.x)}, ${String(cell.y)})`,
+  ).toHaveCount(1);
+
+  const box = await counterpart.boundingBox();
+
+  expect(
+    box,
+    `${context}: the cell at (${String(cell.x)}, ${String(cell.y)}) ` +
+      'reported no bounding box',
+  ).not.toBeNull();
+
+  if (box === null) {
+    throw new Error(`${context}: the cell reported no bounding box`);
+  }
+
+  return {
+    x: Math.round(box.x),
+    y: Math.round(box.y),
+    width: Math.round(box.width),
+    height: Math.round(box.height),
+  };
+}
+
+/**
+ * Captures one rectangle of the LIVE page as a reference picture.
+ *
+ * The clip is taken at `deviceScaleFactor` 1 over the same coordinates a
+ * recorded frame carries, and is measured by `probeRecording` through the same
+ * pipeline the decoded frames go through, so the two are comparable.
+ *
+ * @param page Page to capture.
+ * @param region Rectangle to clip.
+ * @param label Short label naming the state captured.
+ * @returns The reference, PNG-encoded and base64-wrapped.
+ */
+async function captureReference(
+  page: Page,
+  region: FrameRegion,
+  label: string,
+): Promise<RegionReference> {
+  const png: EncodableBuffer = await page.screenshot({
+    clip: region,
+    type: 'png',
+  });
+
+  return { label, encoded: png.toString('base64') };
+}
+
+/**
+ * Whether two rectangles share no pixel.
+ *
+ * @param first First rectangle.
+ * @param second Second rectangle.
+ * @returns Whether the two do not overlap.
+ */
+function regionsDisjoint(first: FrameRegion, second: FrameRegion): boolean {
+  return (
+    first.x + first.width <= second.x ||
+    second.x + second.width <= first.x ||
+    first.y + first.height <= second.y ||
+    second.y + second.height <= first.y
+  );
+}
+
+/**
+ * Mean per-cell difference between two measured pictures, on the 0-255 scale.
+ *
+ * @param first First picture.
+ * @param second Second picture.
+ * @returns The mean absolute difference of the two thumbnails.
+ */
+function frameDistance(
+  first: RegionMeasurement,
+  second: RegionMeasurement,
+): number {
+  const cells = Math.min(first.thumbnail.length, second.thumbnail.length);
+
+  if (cells === 0) {
+    return 0;
+  }
+
+  let total = 0;
+
+  for (let index = 0; index < cells; index += 1) {
+    total += Math.abs(first.thumbnail[index] - second.thumbnail[index]);
+  }
+
+  return total / cells;
+}
+
+/**
+ * The widest difference between any two frames of one window.
+ *
+ * @param frames Frames of the window.
+ * @returns The widest distance, and 0 for fewer than two frames.
+ */
+function widestDistanceWithin(frames: readonly FrameSample[]): number {
+  let widest = 0;
+
+  for (let first = 0; first < frames.length; first += 1) {
+    for (let second = first + 1; second < frames.length; second += 1) {
+      widest = Math.max(widest, frameDistance(frames[first], frames[second]));
+    }
+  }
+
+  return widest;
+}
+
+/**
+ * The frame of a window that most closely matches a reference picture.
+ *
+ * @param frames Frames to search.
+ * @param reference Measured reference picture.
+ * @returns The closest frame with its distance, or `null` for no frames.
+ */
+function closestFrameTo(
+  frames: readonly FrameSample[],
+  reference: RegionMeasurement,
+): { readonly frame: FrameSample; readonly distance: number } | null {
+  let closest: { frame: FrameSample; distance: number } | null = null;
+
+  for (const frame of frames) {
+    const distance = frameDistance(frame, reference);
+
+    if (closest === null || distance < closest.distance) {
+      closest = { frame, distance };
+    }
+  }
+
+  return closest;
+}
+
+/**
+ * The first frame of a window that matches a reference picture.
+ *
+ * The FIRST rather than the closest, so a wide bracket cannot resolve to a
+ * later occurrence of the same state.
+ *
+ * @param frames Frames to search, in the order they were sampled.
+ * @param reference Measured reference picture.
+ * @param tolerance Widest distance that counts as a match.
+ * @returns The first matching frame, or `null` where none matches.
+ */
+function firstFrameMatching(
+  frames: readonly FrameSample[],
+  reference: RegionMeasurement,
+  tolerance: number,
+): FrameSample | null {
+  for (const frame of frames) {
+    if (frameDistance(frame, reference) <= tolerance) {
+      return frame;
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Whether one sample carries a rendered picture rather than a cleared, black
+ * or flat one. The thresholds are the ones `expectRenderedBoard` holds the live
+ * board to.
+ *
+ * @param verdict Verdict of the sample.
+ * @returns Whether it clears all four thresholds.
+ */
+function carriesRenderedContent(verdict: CanvasVerdict): boolean {
+  return (
+    verdict.distinctColours >= MIN_DISTINCT_COLOURS &&
+    verdict.meanLuminance >= MIN_MEAN_LUMINANCE &&
+    verdict.peakLuminance >= MIN_PEAK_LUMINANCE &&
+    verdict.channelSpread >= MIN_CHANNEL_SPREAD
+  );
 }
 
 /** What decoding the artifact established. */
@@ -1551,6 +2022,9 @@ interface RecordingProbe {
 
   /** One entry per requested timestamp, in the order requested. */
   readonly frames: readonly FrameSample[];
+
+  /** One entry per reference picture, in the order supplied. */
+  readonly references: readonly RegionMeasurement[];
 }
 
 /**
@@ -1563,17 +2037,22 @@ interface RecordingProbe {
  * is also the stronger proof, because it establishes that a browser can play
  * what was written rather than that the bytes resemble a container.
  *
+ * Each request carries its OWN rectangle, so one decode answers for windows
+ * addressing different parts of the frame.
+ *
  * @param browser Browser to open a throwaway context on.
  * @param filePath Path Playwright wrote the recording to.
- * @param region Rectangle of each frame to sample.
- * @param timestamps Seconds to decode, in the order wanted.
+ * @param samples Timestamps to decode with the rectangle to measure at each,
+ *   in the order wanted. An empty list reads the container's metadata alone.
+ * @param references Pictures of the live page to measure through the same
+ *   pipeline, so a frame can be matched against the state it holds.
  * @returns What decoding established.
  */
 async function probeRecording(
   browser: Browser,
   filePath: string,
-  region: FrameRegion,
-  timestamps: readonly number[],
+  samples: readonly RegionSample[],
+  references: readonly RegionReference[] = [],
 ): Promise<RecordingProbe> {
   const reader = await browser.newContext();
 
@@ -1588,9 +2067,10 @@ async function probeRecording(
 
     return await readerPage.evaluate(
       async (request: {
-        readonly region: FrameRegion;
-        readonly timestamps: readonly number[];
+        readonly samples: readonly RegionSample[];
+        readonly references: readonly RegionReference[];
         readonly edge: number;
+        readonly thumbnailEdge: number;
         readonly quantisationBits: number;
         readonly loadTimeoutMs: number;
         readonly seekTimeoutMs: number;
@@ -1610,6 +2090,7 @@ async function probeRecording(
             width: 0,
             height: 0,
             frames: [],
+            references: [],
           };
         }
 
@@ -1623,6 +2104,7 @@ async function probeRecording(
             width: 0,
             height: 0,
             frames: [],
+            references: [],
           };
         }
 
@@ -1665,6 +2147,7 @@ async function probeRecording(
             width: 0,
             height: 0,
             frames: [],
+            references: [],
           };
         }
 
@@ -1685,38 +2168,23 @@ async function probeRecording(
             width: film.videoWidth,
             height: film.videoHeight,
             frames: [],
+            references: [],
           };
         }
 
-        const frames: FrameSample[] = [];
-        const last = Math.max(0, film.duration - request.frameStep);
-
-        for (const wanted of request.timestamps) {
-          const target = Math.min(Math.max(0, wanted), last);
-
-          await new Promise<void>((resolve): void => {
-            let settled = false;
-
-            const finish = (): void => {
-              if (!settled) {
-                settled = true;
-                resolve();
-              }
-            };
-
-            film.addEventListener('seeked', finish, { once: true });
-            window.setTimeout(finish, request.seekTimeoutMs);
-            film.currentTime = target;
-          });
-
-          // The region is in page coordinates and the frame is the viewport at
-          // deviceScaleFactor 1, so the two share one coordinate space.
+        // THE ONE MEASUREMENT. Every decoded frame and every reference picture
+        // is reduced by this function, so a frame and the live state it is
+        // matched against are measured by identical arithmetic.
+        const measure = (
+          source: HTMLVideoElement | HTMLImageElement,
+          area: FrameRegion,
+        ): RegionMeasurement => {
           context.drawImage(
-            film,
-            request.region.x,
-            request.region.y,
-            request.region.width,
-            request.region.height,
+            source,
+            area.x,
+            area.y,
+            area.width,
+            area.height,
             0,
             0,
             request.edge,
@@ -1737,6 +2205,11 @@ async function probeRecording(
           let digest = 0;
           const low = [255, 255, 255];
           const high = [0, 0, 0];
+
+          // Mean luminance per thumbnail cell, accumulated in the same pass.
+          const cells = request.thumbnailEdge * request.thumbnailEdge;
+          const cellTotals = new Array<number>(cells).fill(0);
+          const cellCounts = new Array<number>(cells).fill(0);
 
           for (let index = 0; index < pixels.length; index += 4) {
             const red = pixels[index];
@@ -1762,12 +2235,30 @@ async function probeRecording(
             high[0] = Math.max(high[0], red);
             high[1] = Math.max(high[1], green);
             high[2] = Math.max(high[2], blue);
+
+            const pixel = index / 4;
+            const column = Math.min(
+              request.thumbnailEdge - 1,
+              Math.floor(
+                ((pixel % request.edge) * request.thumbnailEdge) / request.edge,
+              ),
+            );
+            const row = Math.min(
+              request.thumbnailEdge - 1,
+              Math.floor(
+                (Math.floor(pixel / request.edge) * request.thumbnailEdge) /
+                  request.edge,
+              ),
+            );
+            const cell = row * request.thumbnailEdge + column;
+
+            cellTotals[cell] += luminance;
+            cellCounts[cell] += 1;
           }
 
           const sampled = pixels.length / 4;
 
-          frames.push({
-            at: Number(film.currentTime.toFixed(3)),
+          return {
             verdict: {
               distinctColours: colours.size,
               meanLuminance: luminanceTotal / sampled,
@@ -1781,7 +2272,71 @@ async function probeRecording(
               pixelsSampled: sampled,
             },
             signature: digest.toString(16),
+            thumbnail: cellTotals.map((total, cell): number =>
+              cellCounts[cell] === 0 ? 0 : total / cellCounts[cell],
+            ),
+          };
+        };
+
+        const frames: FrameSample[] = [];
+        const last = Math.max(0, film.duration - request.frameStep);
+
+        for (const wanted of request.samples) {
+          const target = Math.min(Math.max(0, wanted.at), last);
+
+          await new Promise<void>((resolve): void => {
+            let settled = false;
+
+            const finish = (): void => {
+              if (!settled) {
+                settled = true;
+                resolve();
+              }
+            };
+
+            film.addEventListener('seeked', finish, { once: true });
+            window.setTimeout(finish, request.seekTimeoutMs);
+            film.currentTime = target;
           });
+
+          // The region is in page coordinates and the frame is the viewport at
+          // deviceScaleFactor 1, so the two share one coordinate space.
+          frames.push({
+            at: Number(film.currentTime.toFixed(3)),
+            ...measure(film, wanted.region),
+          });
+        }
+
+        const measured: RegionMeasurement[] = [];
+
+        for (const reference of request.references) {
+          const picture = new Image();
+
+          await new Promise<void>((resolve): void => {
+            let settled = false;
+
+            const finish = (): void => {
+              if (!settled) {
+                settled = true;
+                resolve();
+              }
+            };
+
+            picture.addEventListener('load', finish, { once: true });
+            picture.addEventListener('error', finish, { once: true });
+            window.setTimeout(finish, request.seekTimeoutMs);
+            picture.src = `data:image/png;base64,${reference.encoded}`;
+          });
+
+          // The clip is already the region, so the whole of it is measured.
+          measured.push(
+            measure(picture, {
+              x: 0,
+              y: 0,
+              width: picture.naturalWidth,
+              height: picture.naturalHeight,
+            }),
+          );
         }
 
         return {
@@ -1791,12 +2346,14 @@ async function probeRecording(
           width: film.videoWidth,
           height: film.videoHeight,
           frames,
+          references: measured,
         };
       },
       {
-        region,
-        timestamps,
+        samples,
+        references,
         edge: PIXEL_SAMPLE_EDGE,
+        thumbnailEdge: THUMBNAIL_EDGE,
         quantisationBits: COLOUR_QUANTISATION_BITS,
         loadTimeoutMs: STATE_TIMEOUT_MS,
         seekTimeoutMs: STATE_TIMEOUT_MS,
@@ -1828,6 +2385,20 @@ function timestampsAcross(
   }
 
   return stamps;
+}
+
+/**
+ * Pairs each timestamp of a window with the rectangle to sample there.
+ *
+ * @param region Rectangle every timestamp of this window addresses.
+ * @param timestamps Timestamps of the window, in the order wanted.
+ * @returns One request per timestamp.
+ */
+function samplesOver(
+  region: FrameRegion,
+  timestamps: readonly number[],
+): readonly RegionSample[] {
+  return timestamps.map((at): RegionSample => ({ at, region }));
 }
 
 /* ==========================================================================
@@ -2189,6 +2760,7 @@ const DIAGNOSTICS_SNAPSHOT_KEYS = Object.freeze([
   'hooks',
   'logs',
   'metrics',
+  'run',
   'schemaVersion',
   'traces',
 ] as const);
@@ -2645,6 +3217,16 @@ test.describe('recorded gameplay proof', () => {
 
       /* -- Criterion (b): a merge, with its animation --------------------- */
 
+      // Installed before the first press: the cells a turn merges into and
+      // spawns at are read off the engine's own `tile:merge` and `tile:spawn`
+      // events, which is what makes the merge window addressable in the frames
+      // as a rectangle rather than as a moment. DL-PW-08.
+      expect(
+        await recordTurnGeometry(page),
+        'the engine event emitter could not be reached through ' +
+          `"${APPLICATION_GLOBAL}", so no turn geometry can be recorded`,
+      ).toBe(true);
+
       let moves = 0;
       let mergeAnnouncement = '';
       let mergeDeltaText = '';
@@ -2734,12 +3316,19 @@ test.describe('recorded gameplay proof', () => {
 
       expect(
         mergeFilm.samplesInPopWindow,
-        `the recorder took no sample inside the ${MERGE_POP_MS}ms the pop is ` +
-          'open, so nothing was observed while it played',
+        `the recorder took no bracket around the ${MERGE_POP_MS}ms the pop ` +
+          'is open, so nothing was observed while it played',
       ).toBeGreaterThan(1);
       expect(
+        mergeFilm.popWindowClosedAtMs,
+        `the ${MERGE_POP_MS}ms pop window was observed only as far as ` +
+          `${mergeFilm.popWindowClosedAtMs}ms from the press, past the ` +
+          `${FILMED_MOVE_SETTLE_MS}ms the merge animates for, so the frames ` +
+          'counted across it are not the ones the merge drew',
+      ).toBeLessThanOrEqual(FILMED_MOVE_SETTLE_MS);
+      expect(
         mergeFilm.framesInPopWindow,
-        `the render loop drew no frame inside the ${MERGE_POP_MS}ms merge ` +
+        `the render loop drew no frame across the ${MERGE_POP_MS}ms merge ` +
           'window, so the pop cannot have been drawn',
       ).toBeGreaterThan(0);
 
@@ -2796,6 +3385,74 @@ test.describe('recorded gameplay proof', () => {
         merged.scoreText,
         'the score never left zero, so no merge scored',
       ).not.toBe(ZERO_SCORE_TEXT);
+
+      /* -- Where the merge happened, and where the spawn did -------------- */
+
+      // The two cells of the merged turn, read off the engine's own events. The
+      // merged tile is built at the target cell and a spawn only takes a cell
+      // the board still has free, so the two cells are never the same one; the
+      // rectangles are asserted disjoint below rather than assumed so.
+      // DL-PW-08.
+      const geometry = await readTurnGeometry(page);
+
+      expect(
+        geometry.attached,
+        'the turn-geometry recorder was not collecting',
+      ).toBe(true);
+      expect(
+        geometry.merged.length,
+        'the engine emitted no `tile:merge` for the merged turn',
+      ).toBeGreaterThan(0);
+
+      const mergedCell = geometry.merged[geometry.merged.length - 1];
+      const mergedTurnSpawns = geometry.spawned.filter(
+        (cell): boolean => cell.turn === mergedCell.turn,
+      );
+
+      expect(
+        mergedTurnSpawns.length,
+        `the merged turn ${String(mergedCell.turn)} recorded no spawn, so ` +
+          'the tween the merge window has to be isolated from cannot be ' +
+          'located',
+      ).toBe(1);
+
+      const spawnedCell = mergedTurnSpawns[0];
+
+      expect(
+        `${String(spawnedCell.x)},${String(spawnedCell.y)}`,
+        'the turn spawned into the cell the merge produced its tile in',
+      ).not.toBe(`${String(mergedCell.x)},${String(mergedCell.y)}`);
+
+      const mergedCellRegion = await cellRegion(
+        page,
+        mergedCell,
+        'the cell the merge produced its tile in',
+      );
+      const spawnedCellRegion = await cellRegion(
+        page,
+        spawnedCell,
+        'the cell the same turn spawned into',
+      );
+
+      expect(
+        mergedCellRegion.width,
+        'the merged cell resolved to no width, so it addresses no region of ' +
+          'the recording',
+      ).toBeGreaterThan(0);
+      expect(
+        mergedCellRegion.height,
+        'the merged cell resolved to no height',
+      ).toBeGreaterThan(0);
+
+      // THE PROOF THAT THE MERGE WINDOW IS THE MERGE'S. The `appear` tween of
+      // the tile that spawns on the same turn runs over exactly the window the
+      // pop does, so only a rectangle that excludes the spawned cell can carry
+      // evidence the spawn cannot account for.
+      expect(
+        regionsDisjoint(mergedCellRegion, spawnedCellRegion),
+        'the merged cell and the cell the same turn spawned into overlap on ' +
+          'screen, so no rectangle separates the pop from the `appear` tween',
+      ).toBe(true);
 
       /* -- The stage clear, which is the stage end ------------------------ */
 
@@ -2857,6 +3514,38 @@ test.describe('recorded gameplay proof', () => {
         cards,
         `the reward screen did not present ${EXPECTED_OFFER_COUNT} offers`,
       ).toHaveCount(EXPECTED_OFFER_COUNT);
+
+      // Where the reward dialog sits on the page, and the span it is held for.
+      // The window searched in the recording is `MILESTONE_SLACK_S` inside each
+      // end of that span, so the frames it resolves to were taken while this
+      // screen — and no other — was the screen in force. DL-PW-08.
+      const rewardBox = await page.locator(SELECTORS.rewardPanel).boundingBox();
+
+      expect(
+        rewardBox,
+        'the reward dialog reported no bounding box, so no region of the ' +
+          'recording can be addressed',
+      ).not.toBeNull();
+
+      if (rewardBox === null) {
+        throw new Error('the reward dialog reported no bounding box');
+      }
+
+      const rewardRegion: FrameRegion = {
+        x: Math.round(rewardBox.x),
+        y: Math.round(rewardBox.y),
+        width: Math.round(rewardBox.width),
+        height: Math.round(rewardBox.height),
+      };
+
+      const rewardHeldFrom = Date.now();
+      const rewardReference = await captureReference(
+        page,
+        rewardRegion,
+        'the reward dialog',
+      );
+
+      await page.waitForTimeout(MILESTONE_HOLD_MS);
 
       const offer = await readBoardSurface(page);
 
@@ -2929,6 +3618,28 @@ test.describe('recorded gameplay proof', () => {
         taken.stageText,
         'the HUD does not report the second stage goal of the ladder',
       ).toContain(SECOND_STAGE_GOAL_TEXT);
+
+      // The stage the selection opened, held over the SAME rectangle the reward
+      // dialog occupied. Two windows over one rectangle are what carry the
+      // selection into the artifact: the dialog is there in the first and gone
+      // in the second. This window doubles as the settled reading of the merged
+      // cell that the merge window is measured against. DL-PW-08.
+      const selectionHeldFrom = Date.now();
+      const selectionReference = await captureReference(
+        page,
+        rewardRegion,
+        'the stage the selection opened',
+      );
+
+      await page.waitForTimeout(MILESTONE_HOLD_MS);
+
+      const settled = await readBoardSurface(page);
+
+      expect(
+        settled.screen,
+        'the board did not stay in play while the stage the relic opened was ' +
+          'filmed',
+      ).toBe('stage');
 
       /* -- The stage the relic opened ------------------------------------- */
 
@@ -3182,6 +3893,13 @@ test.describe('recorded gameplay proof', () => {
 
       // Playwright writes the WebM at context close. The context is closed
       // here and the artifact is resolved afterwards.
+      //
+      // Wall clock at the moment the close was requested, which is where the
+      // recording stops. With `recordingEpoch` it gives the span the wall clock
+      // saw, and the declared duration less that span is how much earlier than
+      // `recordingEpoch` encoding began. DL-PW-08.
+      const closeRequestedAt = Date.now();
+
       await page.context().close();
 
       const recordingPath = await video.path();
@@ -3204,64 +3922,157 @@ test.describe('recorded gameplay proof', () => {
       // black or single-colour encode. The gate's terms are that the video
       // VISIBLY SHOWS the board, a merge with its animation and the reward
       // selection, so the file is played and its pixels are measured.
+      //
+      // The container is opened first, on its own: the declared duration is
+      // what the milestone brackets below are placed against. DL-PW-08.
+      const metadata = await probeRecording(browser, recordingPath, []);
+
+      expect(
+        metadata.loaded,
+        `the recording at ${recordingPath} could not be decoded by a ` +
+          `browser: ${metadata.error}`,
+      ).toBe(true);
+      expect(
+        Number.isFinite(metadata.duration),
+        `the recording declares a duration of ${String(metadata.duration)}, ` +
+          'which is not a finite span: a truncated or still-open container ' +
+          'reports exactly this',
+      ).toBe(true);
+      expect(
+        metadata.duration,
+        'the recording reports no duration, so it carries no playable span',
+      ).toBeGreaterThan(0);
+      expect(
+        metadata.width,
+        'the recording was encoded at no width',
+      ).toBe(VIEWPORT_WIDTH);
+      expect(
+        metadata.height,
+        'the recording was encoded at no height',
+      ).toBe(VIEWPORT_HEIGHT);
+
+      // THE TWO TIMELINES RUN AT DIFFERENT RATES. The encoder writes a frame
+      // when the page produces one, so the recording's own timeline and the
+      // wall clock this test read are related by a rate that is MEASURED —
+      // the span the container declares over the span the wall clock saw —
+      // and never assumed. Each milestone is bracketed with that rate and found
+      // inside its bracket BY CONTENT, against a clip of the live page.
+      // DL-PW-08.
+      const filmedSpanS = (closeRequestedAt - recordingEpoch) / 1000;
+
+      expect(
+        filmedSpanS,
+        'the wall clock measured no span between the epoch this test took ' +
+          'and the close that ended the recording',
+      ).toBeGreaterThan(0);
+
+      const encodedRate = metadata.duration / filmedSpanS;
+
+      expect(
+        encodedRate,
+        `the recording declares ${metadata.duration.toFixed(2)}s against the ` +
+          `${filmedSpanS.toFixed(2)}s the wall clock measured, a rate no ` +
+          'mapping between the two timelines can be built on',
+      ).toBeGreaterThan(0);
+
+      /** Seconds from the epoch to a wall-clock instant. */
+      const sinceEpoch = (wallClock: number): number =>
+        Math.max(0, (wallClock - recordingEpoch) / 1000);
+
+      /** Recording position of a wall-clock instant, at a given rate. */
+      const positionOf = (wallClock: number, rate: number): number =>
+        Math.min(metadata.duration, sinceEpoch(wallClock) * rate);
+
+      /** The bracket a held screen state is searched in. */
+      const heldBracket = (anchor: number): readonly number[] =>
+        timestampsAcross(
+          positionOf(anchor, encodedRate) - MILESTONE_SEARCH_S,
+          positionOf(anchor + MILESTONE_HOLD_MS, encodedRate) +
+            MILESTONE_SEARCH_S,
+          MILESTONE_STEP_S,
+        );
+
       const sweepStamps = timestampsAcross(
         0,
         SWEEP_SAMPLE_COUNT * FRAME_STEP_S * 10,
         FRAME_STEP_S * 10,
       );
+      const rewardStamps = heldBracket(rewardHeldFrom);
+      const selectionStamps = heldBracket(selectionHeldFrom);
 
-      // The merge window, isolated: it opens after the 100ms move transition
-      // has finished, so the merge pop is the only board motion inside it.
-      const mergeAt = (mergeFilm.pressedAt - recordingEpoch) / 1000;
-      const mergeStamps = timestampsAcross(
-        Math.max(0, mergeAt + MOVE_TRANSITION_MS / 1000),
-        mergeAt + MOVE_TRANSITION_MS / 1000 + MILESTONE_TOLERANCE_S,
-        FRAME_STEP_S,
+      // THE RECORDING HAS TO REACH THE SELECTION. A file truncated before the
+      // relic was taken fails here rather than being sampled at its last frame,
+      // which is what a clamped seek would otherwise do silently.
+      expect(
+        metadata.duration,
+        'the recording ends before the moment the relic was taken had ' +
+          'settled, so the run it records was cut short of the selection',
+      ).toBeGreaterThan(
+        positionOf(selectionHeldFrom + MILESTONE_HOLD_MS, encodedRate) -
+          MILESTONE_STEP_S,
       );
+
+      for (const window of [
+        { label: 'the opening sweep', stamps: sweepStamps },
+        { label: 'the reward bracket', stamps: rewardStamps },
+        { label: 'the post-selection bracket', stamps: selectionStamps },
+      ]) {
+        expect(
+          window.stamps.length,
+          `${window.label} resolved to no timestamp`,
+        ).toBeGreaterThan(0);
+      }
 
       const probe = await probeRecording(
         browser,
         recordingPath,
-        boardRegion,
-        [...sweepStamps, ...mergeStamps],
+        [
+          ...samplesOver(boardRegion, sweepStamps),
+          ...samplesOver(rewardRegion, rewardStamps),
+          ...samplesOver(rewardRegion, selectionStamps),
+        ],
+        [rewardReference, selectionReference],
       );
 
       expect(
         probe.loaded,
-        `the recording at ${recordingPath} could not be decoded by a ` +
-          `browser: ${probe.error}`,
+        `the recording at ${recordingPath} could not be decoded a second ` +
+          `time: ${probe.error}`,
       ).toBe(true);
-      expect(
-        probe.duration,
-        'the recording reports no duration, so it carries no playable span',
-      ).toBeGreaterThan(0);
-      expect(
-        probe.width,
-        'the recording was encoded at no width',
-      ).toBe(VIEWPORT_WIDTH);
-      expect(
-        probe.height,
-        'the recording was encoded at no height',
-      ).toBe(VIEWPORT_HEIGHT);
       expect(
         probe.frames.length,
         'no frame of the recording could be sampled',
-      ).toBe(sweepStamps.length + mergeStamps.length);
+      ).toBe(
+        sweepStamps.length + rewardStamps.length + selectionStamps.length,
+      );
+      expect(
+        probe.references.length,
+        'the two pictures of the live page were not measured alongside the ' +
+          'frames they are matched against',
+      ).toBe(2);
 
-      const sweepFrames = probe.frames.slice(0, sweepStamps.length);
-      const mergeFrames = probe.frames.slice(sweepStamps.length);
+      let sampled = 0;
+      const take = (count: number): readonly FrameSample[] => {
+        const window = probe.frames.slice(sampled, sampled + count);
+
+        sampled += count;
+
+        return window;
+      };
+
+      const sweepFrames = take(sweepStamps.length);
+      const rewardFrames = take(rewardStamps.length);
+      const selectionFrames = take(selectionStamps.length);
+      const rewardShown = probe.references[0];
+      const selectionShown = probe.references[1];
 
       /* Criterion (a), in the artifact: the board is visibly rendered. */
 
       // Every sampled frame of the board region is measured with the same
       // verdict the live canvas is held to, so a black or flat encode fails
       // here on the same thresholds.
-      const litFrames = sweepFrames.filter(
-        (frame): boolean =>
-          frame.verdict.distinctColours >= MIN_DISTINCT_COLOURS &&
-          frame.verdict.meanLuminance >= MIN_MEAN_LUMINANCE &&
-          frame.verdict.peakLuminance >= MIN_PEAK_LUMINANCE &&
-          frame.verdict.channelSpread >= MIN_CHANNEL_SPREAD,
+      const litFrames = sweepFrames.filter((frame): boolean =>
+        carriesRenderedContent(frame.verdict),
       );
 
       expect(
@@ -3298,18 +4109,221 @@ test.describe('recorded gameplay proof', () => {
           'static encode rather than a played run',
       ).toBeGreaterThanOrEqual(MIN_DISTINCT_SWEEP_FRAMES);
 
+      /* Criterion (c), in the artifact: the reward selection is visible. */
+
+      // Both brackets measure the SAME rectangle, the one the reward dialog
+      // occupied, and each is searched for the first frame carrying a clip of
+      // the LIVE page taken while that state stood. What is asserted is that
+      // the recording holds a picture of the dialog and, after it, a picture of
+      // what the selection put in its place.
+      expect(
+        frameDistance(rewardShown, selectionShown),
+        'the clip taken while the reward dialog stood and the clip taken ' +
+          'after the relic was chosen are the same picture, so the two ' +
+          'states are not distinguishable and no search between them means ' +
+          'anything',
+      ).toBeGreaterThanOrEqual(MIN_STATE_CHANGE);
+      expect(
+        carriesRenderedContent(rewardShown.verdict),
+        'the clip taken while the reward dialog stood carries no rendered ' +
+          'picture',
+      ).toBe(true);
+
+      const rewardClosest = closestFrameTo(rewardFrames, rewardShown);
+
+      expect(
+        rewardClosest,
+        'the reward bracket resolved to no frame',
+      ).not.toBeNull();
+
+      if (rewardClosest === null) {
+        throw new Error('the reward bracket resolved to no frame');
+      }
+
+      expect(
+        rewardClosest.distance,
+        'no frame of the reward bracket carries the reward dialog: the ' +
+          `closest, at ${rewardClosest.frame.at.toFixed(2)}s, is ` +
+          `${rewardClosest.distance.toFixed(2)} from the clip taken while ` +
+          'the dialog stood on screen',
+      ).toBeLessThanOrEqual(MATCH_TOLERANCE);
+
+      const rewardMatch = firstFrameMatching(
+        rewardFrames,
+        rewardShown,
+        MATCH_TOLERANCE,
+      );
+
+      expect(
+        rewardMatch,
+        'the reward dialog matched no frame within tolerance',
+      ).not.toBeNull();
+
+      if (rewardMatch === null) {
+        throw new Error('the reward dialog matched no frame');
+      }
+
+      expect(
+        carriesRenderedContent(rewardMatch.verdict),
+        `the recorded frame at ${rewardMatch.at.toFixed(2)}s carries no ` +
+          'rendered picture where the reward dialog was on screen',
+      ).toBe(true);
+      expect(
+        frameDistance(rewardMatch, selectionShown),
+        `the recorded frame at ${rewardMatch.at.toFixed(2)}s is as close to ` +
+          'the state that replaced the dialog as to the dialog itself, so it ' +
+          'establishes neither',
+      ).toBeGreaterThanOrEqual(MIN_STATE_CHANGE);
+
+      // Searched among the frames that FOLLOW the one carrying the dialog, so
+      // what is established is a change in that order rather than a difference
+      // somewhere in the recording.
+      const afterReward = selectionFrames.filter(
+        (frame): boolean => frame.at > rewardMatch.at,
+      );
+
+      expect(
+        afterReward.length,
+        'the post-selection bracket resolved to no frame later than the one ' +
+          `carrying the dialog at ${rewardMatch.at.toFixed(2)}s`,
+      ).toBeGreaterThan(0);
+
+      const selectionClosest = closestFrameTo(afterReward, selectionShown);
+
+      expect(
+        selectionClosest,
+        'the post-selection bracket resolved to no frame',
+      ).not.toBeNull();
+
+      if (selectionClosest === null) {
+        throw new Error('the post-selection bracket resolved to no frame');
+      }
+
+      expect(
+        selectionClosest.distance,
+        'no frame after the dialog carries the state the selection opened: ' +
+          `the closest, at ${selectionClosest.frame.at.toFixed(2)}s, is ` +
+          `${selectionClosest.distance.toFixed(2)} from the clip taken once ` +
+          'the relic had been taken',
+      ).toBeLessThanOrEqual(MATCH_TOLERANCE);
+
+      const selectionMatch = firstFrameMatching(
+        afterReward,
+        selectionShown,
+        MATCH_TOLERANCE,
+      );
+
+      expect(
+        selectionMatch,
+        'the state the selection opened matched no frame after the dialog',
+      ).not.toBeNull();
+
+      if (selectionMatch === null) {
+        throw new Error('the state the selection opened matched no frame');
+      }
+
+      expect(
+        frameDistance(selectionMatch, rewardShown),
+        `the recorded frame at ${selectionMatch.at.toFixed(2)}s still reads ` +
+          'as the reward dialog, so the recording does not show the ' +
+          'selection closing it',
+      ).toBeGreaterThanOrEqual(MIN_STATE_CHANGE);
+
       /* Criterion (b), in the artifact: the merge animation is visible. */
 
+      // The merge window is placed with a rate calibrated between two KNOWN
+      // correspondences — the start of the recording, and the frame just
+      // found to carry the reward dialog — so it is interpolated inside a
+      // measured interval rather than extrapolated from the recording's mean.
+      // The settled reading it is measured against is anchored on the frame
+      // found to carry the state the selection opened.
+      const rewardWallS = sinceEpoch(rewardHeldFrom);
+
+      expect(
+        rewardWallS,
+        'the reward dialog stood at the epoch itself, so no interval closes ' +
+          'between the two',
+      ).toBeGreaterThan(0);
+
+      const calibratedRate = rewardMatch.at / rewardWallS;
+
+      expect(
+        calibratedRate,
+        `the frame carrying the dialog sits at ${rewardMatch.at.toFixed(2)}s ` +
+          `against the ${rewardWallS.toFixed(2)}s the wall clock measured to ` +
+          'it, a rate no mapping can be built on',
+      ).toBeGreaterThan(0);
+
+      const mergeAt = positionOf(mergeFilm.pressedAt, calibratedRate);
+      const mergeStamps = timestampsAcross(
+        Math.max(0, mergeAt + MOVE_TRANSITION_MS / 1000),
+        mergeAt + MOVE_TRANSITION_MS / 1000 + MILESTONE_TOLERANCE_S,
+        MERGE_STEP_S,
+      );
+      // Taken AFTER that frame rather than around it: the first frame to carry
+      // the state is the one the transition into it produced, so a window
+      // straddling it would measure the transition and not the rest.
+      const settledStamps = timestampsAcross(
+        selectionMatch.at + MERGE_STEP_S,
+        selectionMatch.at + MERGE_STEP_S * SETTLED_SAMPLE_COUNT,
+        MERGE_STEP_S,
+      );
+
+      const cellProbe = await probeRecording(browser, recordingPath, [
+        ...samplesOver(mergedCellRegion, mergeStamps),
+        ...samplesOver(mergedCellRegion, settledStamps),
+      ]);
+
+      expect(
+        cellProbe.loaded,
+        `the recording at ${recordingPath} could not be decoded a third ` +
+          `time: ${cellProbe.error}`,
+      ).toBe(true);
+      expect(
+        cellProbe.frames.length,
+        'the merged cell could not be sampled',
+      ).toBe(mergeStamps.length + settledStamps.length);
+
+      const mergeFrames = cellProbe.frames.slice(0, mergeStamps.length);
+      const settledCellFrames = cellProbe.frames.slice(mergeStamps.length);
+
+      // Sampled over the merged cell alone, which the assertions above proved
+      // disjoint from the cell the same turn spawned into: the `appear` tween
+      // runs over the same window as the pop but paints nowhere in this
+      // rectangle, so what changes here is the merge being animated.
       expect(
         mergeFrames.length,
         'the merge window fell outside the recording',
       ).toBeGreaterThan(MIN_DISTINCT_MERGE_FRAMES);
       expect(
+        settledCellFrames.length,
+        'the settled reading of the merged cell resolved to no frame',
+      ).toBeGreaterThan(MIN_DISTINCT_MERGE_FRAMES);
+      expect(
         new Set(mergeFrames.map((frame): string => frame.signature)).size,
-        'the board does not change across the merge window, which opens after ' +
-          'the move transition has finished: the pop is the only motion left ' +
-          'in it, so an unchanging board means it was never drawn',
+        'the merged cell does not change across the merge window, which ' +
+          'opens after the move transition has finished, so nothing was ' +
+          'drawn for the merge in the cell it produced its tile in',
       ).toBeGreaterThanOrEqual(MIN_DISTINCT_MERGE_FRAMES);
+
+      // Measured in magnitude and against a reading of the same cell taken
+      // where nothing is animating, so an encode that differs only by
+      // compression noise cannot stand in for a drawn animation.
+      const mergeChange = widestDistanceWithin(mergeFrames);
+      const settledCellChange = widestDistanceWithin(settledCellFrames);
+
+      expect(
+        mergeChange,
+        `the merged cell moved by ${mergeChange.toFixed(2)} across the merge ` +
+          'window, which is below the change a drawn pop produces',
+      ).toBeGreaterThanOrEqual(MIN_MERGE_CHANGE);
+      expect(
+        mergeChange,
+        `the merged cell moved by ${mergeChange.toFixed(2)} across the merge ` +
+          `window and by ${settledCellChange.toFixed(2)} across a window in ` +
+          'which nothing is animating, so the two are indistinguishable and ' +
+          'the first is compression noise rather than an animation',
+      ).toBeGreaterThanOrEqual(settledCellChange * MERGE_CHANGE_MARGIN);
     },
   );
 

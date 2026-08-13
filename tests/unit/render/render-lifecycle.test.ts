@@ -392,7 +392,7 @@ describe('the accessibility palettes withhold the glow from every value', () => 
     },
   );
 
-  // ADDED: the glow is bounded by the headroom the fill leaves, so the fill the
+  // The glow is bounded by the headroom the fill leaves, so the fill the
   // ramp states survives the addition. Before this bound the five glow-band
   // faces all rendered with a saturated red channel: the last two steps were
   // 2.74 apart where their fills are 5.04 apart, and the numeral ratio on 2048
@@ -550,8 +550,8 @@ describe('the accessibility palettes withhold the glow from every value', () => 
         (value) => cache.getTileMaterial(value).emissiveIntensity,
       );
 
-      // Bounding the term did not flatten it: style/main.scss L334-L402 grows
-      // the shadow with the exponent, and so does this.
+      // Bounding the term does not flatten it: the ramp loop of style/main.scss
+      // grows the shadow with the exponent, and so does this.
       for (let index = 1; index < intensities.length; index += 1) {
         expect(intensities[index] as number).toBeGreaterThan(
           intensities[index - 1] as number,

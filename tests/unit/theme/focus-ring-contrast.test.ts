@@ -292,7 +292,7 @@ describe('a tile numeral is clamped to the cell that holds it', () => {
   it('shrinks the sixteen-cell desktop numeral from 55px into its cell', () => {
     const cell = resolveBoardGeometry(MAX_BOARD_SIZE, 'desktop').tileSize;
 
-    // The defect this closes: a ~15.31px cell carried the 55px base numeral.
+    // A ~15.31px cell must not carry the 55px base numeral.
     expect(cell).toBeLessThan(16);
     expect(tileFontSize(2, 'desktop')).toBe(55);
     expect(tileNumeralSize(2, 'desktop', cell)).toBeLessThan(cell);

@@ -1,8 +1,7 @@
 // Contract suite for the diagnostics surface, Rule 3.
 //
-// The defect it closes: the registry was write-only. Counters moved and
-// nothing could read one, so no count, timing or health result was observable
-// anywhere.
+// What it pins: the registry is READABLE, so every count, timing and health
+// result a module records is observable through this surface.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -21,6 +20,7 @@ import type {
   DiagnosticsSnapshot,
   HealthSurfaceView,
   RngCursorsReader,
+  RunViewReader,
 } from '../../../src/observability/diagnostics-overlay';
 import {
   HEALTH_CHECK_IDS,
@@ -129,6 +129,15 @@ interface Harness {
 
   /** The surface's rendered text, whitespace collapsed. */
   text(): string;
+
+  /**
+   * Every sentence the surface handed to the page's announcer, in order.
+   * DL-DIAG-26.
+   */
+  readonly announced: string[];
+
+  /** The text of the export status line, or `null` where none exists. */
+  exportStatus(): string | null;
 }
 
 const setup = (
@@ -140,6 +149,12 @@ const setup = (
     }[];
     hideEmpty?: boolean;
     rngCursors?: RngCursorsReader;
+
+    /** The run context reader. DL-DIAG-26. */
+    run?: RunViewReader;
+
+    /** Whether the page announcer is attached. Defaults to attached. */
+    announce?: boolean;
   } = {},
 ): Harness => {
   const host = document.querySelector<HTMLElement>('#diagnostics-overlay');
@@ -154,6 +169,7 @@ const setup = (
     consoleOutput: false,
   });
   const metrics = createMetricsRegistry({ logger });
+  const announced: string[] = [];
   const built = createDiagnosticsOverlay({
     metrics,
     logger,
@@ -163,6 +179,14 @@ const setup = (
     ...(options.rngCursors === undefined
       ? {}
       : { rngCursors: options.rngCursors }),
+    ...(options.run === undefined ? {} : { run: options.run }),
+    ...(options.announce === false
+      ? {}
+      : {
+          announce: (text: string): void => {
+            announced.push(text);
+          },
+        }),
   });
 
   overlay = built;
@@ -173,6 +197,9 @@ const setup = (
     logger,
     host,
     text: (): string => (host.textContent ?? '').replace(/\s+/g, ' ').trim(),
+    announced,
+    exportStatus: (): string | null =>
+      host.querySelector('.diagnostics-export-status')?.textContent ?? null,
   };
 };
 
@@ -422,9 +449,9 @@ describe('the surface reports the registry', () => {
 
     const text = harness.text();
 
-    // The defect: every one of these read zero at rest and the filter hid
-    // them, so the panel omitted the skeleton a reader checks a reading
-    // against. DL-DIAG-12.
+    // Every one of these reads zero at rest, and the filter shows them anyway,
+    // so the panel carries the skeleton a reader checks a reading against.
+    // DL-DIAG-12.
     for (const name of [
       METRIC_NAMES.turnsTotal,
       METRIC_NAMES.mergesTotal,
@@ -524,8 +551,8 @@ describe('the surface reports the registry', () => {
       text.startsWith('Metrics ('),
     );
 
-    // A bare "60 of 120 series" left a reader to guess what the other sixty
-    // were and whether they had been lost. DL-DIAG-12.
+    // The heading names why absent series are absent and where they are, rather
+    // than stating a bare "60 of 120 series". DL-DIAG-12.
     expect(heading).toMatch(
       /^Metrics \(\d+ of \d+ series, \d+ at zero hidden here and exported\)$/,
     );
@@ -2016,8 +2043,9 @@ describe('the trace panel', () => {
 
     expect(rendered.length).toBe(chain.records.length);
 
-    // The defect this pins: truncating to the head alone rendered all six as
-    // the same string, so no two spans and no parent link could be told apart.
+    // Every rendered identifier is distinct: truncating to the head alone would
+    // render all six as one string, telling no two spans and no parent link
+    // apart.
     expect(new Set(rendered).size).toBe(rendered.length);
 
     for (const record of chain.records) {
@@ -2435,10 +2463,10 @@ describe('the refresh schedule', () => {
     }
   });
 
-  // The other half of DL-DIAG-24: a render used to rebuild six panels into a
-  // fragment and replace every panel node, so an expanded surface handed the
-  // accessibility tree a wholesale replacement of content that had mostly not
-  // changed, once a second.
+  // The other half of DL-DIAG-24: a render must not rebuild six panels into a
+  // fragment and replace every panel node, which would hand the accessibility
+  // tree a wholesale replacement of content that has mostly not changed, once a
+  // second.
   it('keeps every panel node across a render and writes only what moved', () => {
     const harness = setup();
 
@@ -2761,10 +2789,10 @@ describe('the focus across a render', () => {
       harness.host.querySelectorAll<HTMLButtonElement>(CONTROL_QUERY),
     )[2];
 
-    // The SAME node, still holding the focus. A render used to replace the five
-    // buttons and then move focus to whichever node had taken the position, so
-    // a handle to a control went stale on every tick and the focus was restored
-    // after the fact rather than never disturbed. DL-DIAG-16.
+    // The SAME node, still holding the focus. A render replaces neither the
+    // five buttons nor the focus, so a handle to a control stays live across
+    // every tick and the focus is never disturbed rather than restored after
+    // the fact. DL-DIAG-16.
     expect(after).toBe(before);
     expect(document.activeElement).toBe(before);
     expect(document.activeElement?.textContent).toBe('Export snapshot');
@@ -2842,6 +2870,16 @@ describe('the focus across a render', () => {
     expect(first?.tagName).toBe('H1');
     expect(last?.className).toBe('diagnostics-controls');
     expect(children.filter((node) => node.tagName === 'H2')).toHaveLength(6);
+
+    // The export status line is a child OF THE CONTROL ROW, on a line of
+    // its own beneath the buttons. The row is pinned to the foot of the
+    // scrolling surface, so a status appended after it scrolled out of view
+    // while the buttons that produce it stayed on screen. DL-DIAG-26.
+    const controls = last;
+    const statusNode = controls?.lastElementChild;
+
+    expect(statusNode?.className).toBe('diagnostics-export-status');
+    expect(statusNode?.tagName).toBe('P');
   });
 
   it('keeps the focus on the refresh control it was activated from', () => {
@@ -3094,10 +3132,10 @@ describe('a destroyed overlay', () => {
     harness.overlay.close();
     harness.overlay.destroy();
 
-    // A release used to leave `display: none` behind, because `display` is
-    // written by the visibility pass and is not a member of the style table the
-    // release removes, and to leave `class=""` where the class list had been
-    // emptied. DL-DIAG-14.
+    // A release leaves no `display: none` behind — `display` is written by the
+    // visibility pass and is not a member of the style table the release
+    // removes, so it is removed separately — and no empty `class=""` where the
+    // class list was emptied. DL-DIAG-14.
     expect(harness.host.style.getPropertyValue('display')).toBe('');
     expect(harness.host.style.getPropertyValue('position')).toBe('');
     expect(harness.host.style.getPropertyValue('z-index')).toBe('');
@@ -3965,5 +4003,442 @@ describe('the RNG cursor reader', () => {
         (record) => record.message === 'rng cursor rejected',
       ),
     ).toBe(true);
+  });
+});
+
+describe('the export controls report their own outcome', () => {
+  /**
+   * The export control at one position of the control row.
+   *
+   * @param host Host the surface rendered into.
+   * @param label Accessible name of the control.
+   * @returns The button, or `undefined`.
+   */
+  const controlNamed = (
+    host: HTMLElement,
+    label: string,
+  ): HTMLButtonElement | undefined =>
+    Array.from(host.querySelectorAll<HTMLButtonElement>(CONTROL_QUERY)).find(
+      (button) => (button.textContent ?? '') === label,
+    );
+
+  it('shows and announces a REFUSED snapshot export', () => {
+    // DL-DIAG-26. Both handlers discarded the boolean their export returned, so
+    // a refused download — no `createObjectURL`, no `Blob`, a host that will not
+    // take the anchor — produced a log record and nothing the player could see
+    // or hear. They had pressed a button and been told nothing.
+    const harness = setup();
+
+    vi.spyOn(globalThis.URL, 'createObjectURL').mockImplementation(() => {
+      throw new Error('no object url');
+    });
+
+    harness.overlay.open();
+
+    const button = controlNamed(harness.host, 'Export snapshot');
+
+    expect(button).toBeDefined();
+
+    button?.click();
+
+    const status = harness.exportStatus();
+
+    expect(status).toContain('Export snapshot');
+    expect(status).toContain('did not start');
+
+    // SPOKEN ONCE, through the page's announcer — the surface owns no live
+    // region of its own, and a second one here would say it twice.
+    expect(harness.announced).toHaveLength(1);
+    expect(harness.announced[0]).toBe(status);
+  });
+
+  it('shows and announces a STARTED metrics export', () => {
+    const harness = setup();
+
+    vi.spyOn(globalThis.URL, 'createObjectURL').mockReturnValue('blob:prom');
+    vi.spyOn(globalThis.URL, 'revokeObjectURL').mockImplementation(() => {
+      // The registry revokes its own url; nothing to record here.
+    });
+
+    harness.overlay.open();
+    controlNamed(harness.host, 'Export metrics')?.click();
+
+    const status = harness.exportStatus();
+
+    expect(status).toContain('Export metrics');
+    expect(status).toContain('the download started.');
+    expect(harness.announced).toEqual([status]);
+  });
+
+  it('keeps the outcome on screen across a render and a collapse', () => {
+    // The line is FURNITURE: a render neither writes it nor clears it, so an
+    // outcome survives the one-second cadence that would otherwise wipe it
+    // before it could be read. DL-DIAG-26.
+    const harness = setup();
+
+    vi.spyOn(globalThis.URL, 'createObjectURL').mockImplementation(() => {
+      throw new Error('no object url');
+    });
+
+    harness.overlay.open();
+    controlNamed(harness.host, 'Export snapshot')?.click();
+
+    const status = harness.exportStatus();
+
+    harness.overlay.refresh();
+
+    expect(harness.exportStatus()).toBe(status);
+
+    // Collapsed to the heading and the controls, the status goes with them.
+    controlNamed(harness.host, 'Collapse')?.click();
+
+    expect(harness.exportStatus()).toBe(status);
+  });
+
+  it('reports the outcome with no announcer attached', () => {
+    const harness = setup({ announce: false });
+
+    vi.spyOn(globalThis.URL, 'createObjectURL').mockImplementation(() => {
+      throw new Error('no object url');
+    });
+
+    harness.overlay.open();
+    controlNamed(harness.host, 'Export snapshot')?.click();
+
+    expect(harness.exportStatus()).toContain('did not start');
+    expect(harness.announced).toEqual([]);
+  });
+
+  it('survives an announcer that throws', () => {
+    const host = document.querySelector<HTMLElement>('#diagnostics-overlay');
+
+    if (host === null) {
+      throw new Error('the fixture lost the host');
+    }
+
+    const built = createDiagnosticsOverlay({
+      metrics: createMetricsRegistry(),
+      document,
+      announce: (): void => {
+        throw new Error('the announcer failed');
+      },
+    });
+
+    overlay = built;
+
+    vi.spyOn(globalThis.URL, 'createObjectURL').mockReturnValue('blob:ok');
+    vi.spyOn(globalThis.URL, 'revokeObjectURL').mockImplementation(() => {
+      // Recorded by the spy alone.
+    });
+
+    built.open();
+
+    const button = Array.from(
+      host.querySelectorAll<HTMLButtonElement>(CONTROL_QUERY),
+    ).find((candidate) => (candidate.textContent ?? '') === 'Export metrics');
+
+    expect(() => button?.click()).not.toThrow();
+
+    // The status still stands: the announcement is a page service this surface
+    // does not own, and its failure is contained.
+    expect(
+      host.querySelector('.diagnostics-export-status')?.textContent,
+    ).toContain('the download started.');
+  });
+});
+
+describe('the run panel', () => {
+  /**
+   * The rendered rows, one array of cell texts per row.
+   *
+   * Read as rows rather than as the host's concatenated text, because each run
+   * row is a LABEL cell and a VALUE cell and the concatenation runs the two
+   * together.
+   *
+   * @param host Host the surface rendered into.
+   * @returns One entry per row.
+   */
+  const rowCells = (host: HTMLElement): readonly string[][] =>
+    Array.from(host.querySelectorAll('tr')).map((row): string[] =>
+      Array.from(row.querySelectorAll('td')).map((cell): string =>
+        (cell.textContent ?? '').trim(),
+      ),
+    );
+
+  /**
+   * One row's value cell, addressed by its label.
+   *
+   * @param host Host the surface rendered into.
+   * @param label Label in the row's first cell.
+   * @returns The second cell's text, or `null`.
+   */
+  const valueOf = (host: HTMLElement, label: string): string | null =>
+    rowCells(host).find((cells) => cells[0] === label)?.[1] ?? null;
+
+  const RUN: RunViewReader = () => ({
+    stageIndex: 2,
+    goalKind: 'highest-tile',
+    goalTarget: 256,
+    goalProgress: 0.5,
+    relics: 3,
+    persistence: 'ephemeral',
+  });
+
+  it('renders the run context the guide promises', () => {
+    // DL-DIAG-26. The guide said this panel carried the run's stage and
+    // progress; it carried the metrics snapshot's own metadata and nothing else,
+    // so an operator could not obtain what the documentation promised.
+    const harness = setup({ run: RUN });
+
+    harness.overlay.open();
+
+    // The stage reads ONE-BASED beside its zero-based index, because the HUD
+    // counts stages from one and an operator reading both surfaces should not
+    // have to reconcile them.
+    expect(valueOf(harness.host, 'stage')).toBe('3 (index 2)');
+    expect(valueOf(harness.host, 'stage goal')).toBe('highest-tile 256');
+    expect(valueOf(harness.host, 'goal progress')).toBe('50%');
+    expect(valueOf(harness.host, 'relics held')).toBe('3');
+    expect(valueOf(harness.host, 'run persistence')).toBe('ephemeral');
+
+    // ABOVE the reading metadata: the panel is named for the run, not for the
+    // snapshot it was taken from.
+    const labels = rowCells(harness.host).map((cells) => cells[0]);
+
+    expect(labels.indexOf('relics held')).toBeLessThan(
+      labels.indexOf('generated at'),
+    );
+  });
+
+  it('carries the run context in the combined snapshot', () => {
+    const harness = setup({ run: RUN });
+    const snapshot = harness.overlay.snapshot();
+
+    expect(snapshot.run).toEqual({
+      stageIndex: 2,
+      goalKind: 'highest-tile',
+      goalTarget: 256,
+      goalProgress: 0.5,
+      relics: 3,
+      persistence: 'ephemeral',
+    });
+
+    // AND CARRIES NEITHER THE RUN IDENTIFIER NOR THE SEED, in any section: the
+    // snapshot is a downloadable export, DL-LOG-09 keeps the run identifier out
+    // of every export and DL-LOG-07 keeps a seed out of one.
+    const json = JSON.stringify(snapshot);
+
+    expect(json).not.toContain('runId');
+    expect(json).not.toContain('seed');
+  });
+
+  it('renders the six metadata rows alone where no run source is attached', () => {
+    const harness = setup();
+
+    harness.overlay.open();
+
+    expect(harness.overlay.snapshot().run).toBeNull();
+    expect(valueOf(harness.host, 'relics held')).toBeNull();
+    expect(valueOf(harness.host, 'correlation id')).not.toBeNull();
+  });
+
+  it('reports rather than throws where the run reader fails', () => {
+    const harness = setup({
+      run: () => {
+        throw new Error('the run reader failed');
+      },
+    });
+
+    harness.overlay.open();
+
+    expect(harness.overlay.snapshot().run).toBeNull();
+    expect(valueOf(harness.host, 'correlation id')).not.toBeNull();
+    expect(
+      harness.logger
+        .snapshot()
+        .records.some((record) => record.message.includes('failed')),
+    ).toBe(true);
+  });
+
+  it('normalises a fabricated run reading rather than rendering NaN', () => {
+    const harness = setup({
+      run: () =>
+        ({
+          stageIndex: Number.NaN,
+          goalKind: 'x'.repeat(200),
+          goalTarget: Number.POSITIVE_INFINITY,
+          goalProgress: 'half',
+          relics: null,
+          persistence: '',
+        }) as unknown as ReturnType<RunViewReader>,
+    });
+
+    const run = harness.overlay.snapshot().run;
+
+    expect(run?.stageIndex).toBe(0);
+    expect(run?.goalTarget).toBe(0);
+    expect(run?.goalProgress).toBe(0);
+    expect(run?.relics).toBe(0);
+    expect(run?.persistence).toBe('—');
+    expect((run?.goalKind ?? '').length).toBeLessThanOrEqual(49);
+
+    harness.overlay.open();
+
+    expect(harness.text()).not.toContain('NaN');
+  });
+
+  it('drops the run reader on destroy', () => {
+    let reads = 0;
+    const harness = setup({
+      run: () => {
+        reads += 1;
+
+        return {
+          stageIndex: 0,
+          goalKind: 'score-threshold',
+          goalTarget: 100,
+          goalProgress: 0,
+          relics: 0,
+          persistence: 'persistent',
+        };
+      },
+    });
+
+    harness.overlay.snapshot();
+
+    const before = reads;
+
+    harness.overlay.destroy();
+    harness.overlay.snapshot();
+
+    expect(reads).toBe(before);
+  });
+});
+
+describe('the span attribution on the trace panel', () => {
+  const ATTRIBUTION_CORRELATION_ID = deriveCorrelationId(
+    'attribution-seed',
+    'attribution-run',
+  );
+
+  it('names the relic a handler span was recorded for', () => {
+    // DL-DIAG-26. `docs/dashboards/dashboard.json` panel 14 states that
+    // per-relic attribution is available from this surface, because
+    // `game2048_relic_handler_errors_total` is labelled by hook and carries no
+    // relic identity. The rendered rows carried name, duration, id and parent
+    // only, so the statement was false of the overlay.
+    const tracer = createTracer({
+      logger: createLogger({
+        correlationId: ATTRIBUTION_CORRELATION_ID,
+        consoleOutput: false,
+      }),
+      metrics: createMetricsRegistry(),
+      correlationId: ATTRIBUTION_CORRELATION_ID,
+    });
+    const span = tracer.startSpan(SPAN_NAMES.relicHandler, {
+      attributes: { relic: 'frostbind', hook: 'onMerge' },
+    });
+
+    span.end();
+
+    const host = document.querySelector<HTMLElement>('#diagnostics-overlay');
+
+    if (host === null) {
+      throw new Error('the fixture lost the host');
+    }
+
+    const built = createDiagnosticsOverlay({
+      metrics: createMetricsRegistry(),
+      document,
+      tracer,
+    });
+
+    overlay = built;
+    built.open();
+
+    const text = (host.textContent ?? '').replace(/\s+/g, ' ');
+
+    expect(text).toContain('relic frostbind');
+  });
+
+  it('falls back to the hook where a span names no relic', () => {
+    const tracer = createTracer({
+      logger: createLogger({
+        correlationId: ATTRIBUTION_CORRELATION_ID,
+        consoleOutput: false,
+      }),
+      metrics: createMetricsRegistry(),
+      correlationId: ATTRIBUTION_CORRELATION_ID,
+    });
+    const span = tracer.startSpan(SPAN_NAMES.hookDispatch, {
+      attributes: { hook: 'onSpawn' },
+    });
+
+    span.end();
+
+    const host = document.querySelector<HTMLElement>('#diagnostics-overlay');
+
+    if (host === null) {
+      throw new Error('the fixture lost the host');
+    }
+
+    const built = createDiagnosticsOverlay({
+      metrics: createMetricsRegistry(),
+      document,
+      tracer,
+    });
+
+    overlay = built;
+    built.open();
+
+    const text = (host.textContent ?? '').replace(/\s+/g, ' ');
+
+    expect(text).toContain('hook onSpawn');
+    expect(text).not.toContain('relic ');
+  });
+
+  it('renders four cells for a span carrying neither', () => {
+    const tracer = createTracer({
+      logger: createLogger({
+        correlationId: ATTRIBUTION_CORRELATION_ID,
+        consoleOutput: false,
+      }),
+      metrics: createMetricsRegistry(),
+      correlationId: ATTRIBUTION_CORRELATION_ID,
+    });
+
+    tracer.startSpan(SPAN_NAMES.frameCallback).end();
+
+    const host = document.querySelector<HTMLElement>('#diagnostics-overlay');
+
+    if (host === null) {
+      throw new Error('the fixture lost the host');
+    }
+
+    const built = createDiagnosticsOverlay({
+      metrics: createMetricsRegistry(),
+      document,
+      tracer,
+    });
+
+    overlay = built;
+    built.open();
+
+    // The SPAN row, not the frame-time summary row that shares its name: a span
+    // row's second cell is a duration in milliseconds, the summary's is a
+    // histogram count.
+    const row = Array.from(host.querySelectorAll('tr')).find(
+      (candidate): boolean => {
+        const cells = Array.from(candidate.querySelectorAll('td'));
+
+        return (
+          (cells[0]?.textContent ?? '') === SPAN_NAMES.frameCallback &&
+          (cells[1]?.textContent ?? '').endsWith('ms')
+        );
+      },
+    );
+
+    expect(row).toBeDefined();
+    expect(row?.querySelectorAll('td').length).toBe(4);
   });
 });

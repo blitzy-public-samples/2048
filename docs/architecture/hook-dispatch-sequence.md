@@ -346,7 +346,7 @@ edges a played run does (`DL-MAIN-13`).
   on screen (`DL-ROUTER-04`).
 - Three names exist for one concept and must not be conflated. The engine's
   in-class flag is **`continuedPlay`**, its continue-after-win **method** is
-  **`continuePlaying()`**, and both the **input event name** and the
+  **`continueAfterWin()`**, and both the **input event name** and the
   **persisted property name** remain the frozen **`keepPlaying`**
   (`DL-ENGINE-04`). The Won to Stage transition is driven by the frozen input
   event name.

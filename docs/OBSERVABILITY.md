@@ -317,8 +317,8 @@ displaced, reordered or informed.
 
 That is the mechanical reason **`attachEngineTracing(events, tracer)` needs no
 engine-side call site at all**: it subscribes through the same `on` any other
-consumer uses, opens a turn span on `move:before` and closes it on
-`state:commit`, and nothing in `src/engine` knows it exists. A suite asserts the
+consumer uses, opens a turn span on `move:before` and closes it when the caller
+settles the attempt, and nothing in `src/engine` knows it exists. A suite asserts the
 non-interference directly, in
 `tests/unit/engine/engine-observer-non-interference.test.ts`.
 
@@ -470,7 +470,7 @@ before the reload. A correlation identifier therefore ties a log line to a
 **reproducible run** rather than to an opaque session, which is the property a
 seeded game wants and an opaque session identifier cannot give. Two *fresh* runs
 of one seed do not share an identifier, by design; to line those up, compare the
-seed, which the envelope holds. The seed-grouping form is what a harness passes
+seed, which the envelope holds. The seed-only form is what a harness passes
 when it deliberately wants every run of one seed under one value — it is unsalted
 and recoverable, so it must not be attached to a logger whose records leave the
 machine (`DL-LOG-09`).
@@ -487,7 +487,7 @@ frozen and declares nine, and `SpanName` is its value union. Seven of them are
 | `SpanName` | Boundary it measures | In the V8 chain |
 |---|---|---|
 | `input.dispatch` | one key, gesture or on-screen control | yes |
-| `engine.turn` | one turn, `move:before` through `state:commit` | yes |
+| `engine.turn` | one turn, `move:before` through the caller's settle | yes |
 | `engine.move.resolve` | the traversal walk and merge resolution inside a turn | yes |
 | `hook.dispatch` | one hook dispatch | yes |
 | `relic.handler` | one relic handler invocation, attributed by `SPAN_ATTRIBUTES.relic` | yes |
@@ -524,8 +524,8 @@ into `game2048_turn_latency_milliseconds`.
 `EngineEventEmitter.on`, so **this** tracing attaches with no engine-side call
 site — the two functions of this section are the two that are zero-touch, and the
 wrappers of the paragraph below §4.1 are the ones that are not.
-It opens the `engine.turn` span on `move:before` and closes it on
-`state:commit`, opens `engine.stage` across a stage, and returns a **callable**
+It opens the `engine.turn` span on `move:before` and closes it when the caller
+settles the attempt, opens `engine.stage` across a stage, and returns a **callable**
 `EngineTracingSubscription`: calling it detaches every listener and closes
 whatever span it left open, and calling it twice throws nothing.
 
@@ -543,11 +543,21 @@ every attempt the engine got as far as announcing leaves a record, and
 tabulated rather than summarised because the behaviour is a nine-way branch and
 a reader needs to tell a missing span from a documented outcome (`DL-DOC-10`):
 
+**`settleMove` is the one closer** (`DL-TRACE-17`). `state:commit` RECORDS the
+commit — the score, the terminated flag, the turn attribution — and `move:after`
+carrying `moved: false` records the turn number; neither closes the span, because
+neither knows the outcome. `Engine.attemptMove()`'s return is the authority for
+both the resolution and the direction that resolved, and the composition root
+settles unconditionally in a `finally`, so the close belongs there. Three safety
+nets close a span no caller settled: the next `move:before` (`superseded`),
+`settleTurn`/`closeIdleTurn` for a caller holding only the boolean, and
+detachment (`detached`).
+
 | `outcome` | The turn it closed | Closed by | In `turn_latency_milliseconds` |
 |---|---|---|---|
-| `committed` | a slide that moved at least one tile | the `state:commit` listener | yes — this is the only outcome that takes a sample |
-| `unmoved` | **an idle input: a legal direction that moved nothing.** The span is opened, attributed with `moved: false` and the score, over, won and terminated flags, and closed | the `move:after` listener, on `moved: false` | no |
-| `effect` | a turn that changed the board without sliding a tile — an `onBeforeMove` handler reseated it (an undo, a permutation, an excision) and the slide then resolved to nothing, or withdrew the move after the board had already changed | `settleMove`, from `{resolution: 'idle' \| 'cancelled', committed: true}` | no |
+| `committed` | a slide that moved at least one tile | `settleMove`, from `{resolution: 'moved'}` | yes — this is the only outcome that takes a sample |
+| `unmoved` | **an idle input: a legal direction that moved nothing.** The span is opened, attributed with `moved: false` and the score, over, won and terminated flags, and closed | `settleMove`, from `{resolution: 'idle', committed: false}`; `settleTurn()`/`closeIdleTurn()` for a caller holding only the boolean | no |
+| `effect` | a turn that changed the board without sliding a tile — an `onBeforeMove` handler reseated it (an undo, a permutation, an excision) and the slide then resolved to nothing, or withdrew the move after the board had already changed | `settleMove`, from `{resolution: 'idle' \| 'cancelled', committed: true}` — **both** production orders, the one that emits `move:after` and the one that does not | no |
 | `cancelled` | a move an `onBeforeMove` veto withdrew with no state change | the `move:before` listener where the veto was already on the payload it read, and `settleMove` where it was cast behind that listener | no |
 | `blocked` | a move the engine refused **before emitting anything** — the game is over, or the direction was outside the four | `settleMove`, and only where a span is open: no `move:before` was emitted, so ordinarily there is none and the attempt is recorded by its counter alone | no |
 | `failed` | a turn whose pipeline threw | `settleMove` | no |
@@ -567,10 +577,16 @@ actually reached, and the direction from `resolvedDirection` where the caller
 reports one, because both are decided after the span was opened: a relic may
 veto or redirect a move in a handler registered behind the tracer's own
 `move:before` listener, and the payload the tracer read on the way in is a
-snapshot from before that. A turn that COMMITTED closed its own span at
-`state:commit`, so it is the turn a caller settles — vetoed,
-redirected-and-withdrawn, blocked, idle or failed — whose attributes this
-reconciliation reaches (`DL-TRACE-16`).
+snapshot from before that. The reconciliation reaches **every** turn, the
+committed one included, because the commit no longer closes the span — so a
+redirected move that resolved is filed under the direction the board moved in
+rather than the one the player pressed (`DL-TRACE-16`, `DL-TRACE-17`).
+
+A turn also **owns its first commit and no later one**. The engine can commit
+twice inside one `attemptMove()` — the turn's own commit, then the stage-end
+commit a met goal produces — and the span is open across both, so the second is
+classified by the commit-outside-a-turn branch and recorded on the stage span,
+exactly as it was when the first commit closed the turn (`DL-TRACE-17`).
 
 **A turn span counts its own merges and spawns.** The `tile:merge` and
 `tile:spawn` events are recorded as span events and tallied into
@@ -940,14 +956,26 @@ including the recorded-gameplay run of requirement R11, which sets no flag.
 | `exportSnapshotJson()` | downloads `game2048-diagnostics.json` |
 | `destroy()` | hides, stops the refresh, releases every listener and source, and removes a host it created; idempotent |
 
-`DIAGNOSTICS_SNAPSHOT_SCHEMA_VERSION` is `1`.
+`DIAGNOSTICS_SNAPSHOT_SCHEMA_VERSION` is `2`: version 2 is version 1 plus the
+`run` section, so a reader written against version 1 finds every member it knew
+(`DL-DIAG-26`).
 `DEFAULT_DIAGNOSTICS_SNAPSHOT_FILENAME` is `game2048-diagnostics.json`.
 
 ### 7.3 Six panels and five controls
 
 The panels, in render order:
 
-1. **Run** — the run's identity, stage and correlation identifier.
+1. **Run** — the correlation identifier, then the run's **stage** (one-based,
+   with its zero-based index beside it), its **stage goal** and kind, its **goal
+   progress** as a percentage of the target, the number of **relics held** and the
+   run's **persistence verdict** — followed by the reading's own metadata
+   (generated-at, elapsed ms, rejected reports, reporter faults, schema version).
+   The run rows are present only where the composition attached a run source, and
+   they carry **neither the run identifier nor the seed**: this panel's rows are
+   also a section of a downloadable snapshot, `DL-LOG-09` keeps the run identifier
+   out of every export and `DL-LOG-07` keeps a seed out of one, so the run's
+   identity on this surface is the correlation identifier every other section is
+   keyed to (`DL-DIAG-26`).
 2. **Health** — twelve rows: the six checks each with its status and `detail`, an
    `overall` roll-up row, and five readiness rows, read from the health surface's
    accessors. **The panel's status vocabulary is `healthy` and `unhealthy` where
@@ -963,7 +991,14 @@ The panels, in render order:
    `requiresNumberOnlyFallback`. `storage` therefore appears twice, once as a check
    and once as the readiness verdict.
 3. **Traces** — the frame-time and turn-latency span summaries, the frame budget
-   and the over-budget frame count.
+   and the over-budget frame count, then the most recent span records. A span row
+   carries its name, its duration, its own identifier and its parent's, and — where
+   its attributes say so — **what it was recorded for**: `relic <id>` for a relic
+   handler, or `hook <name>` where no relic is named. That fifth cell is why
+   `docs/dashboards/dashboard.json` panel 14 can say per-relic attribution is
+   available here: `game2048_relic_handler_errors_total` is labelled by hook and
+   carries no relic identity, so this surface and the JSON snapshot are the only
+   places a failing relic is named (`DL-DIAG-26`).
 4. **Hooks** — the per-hook dispatch counts, **pulled** from the hook bus's own
    `metrics()` accessor (`DL-DIAG-04`). Six rows, in `HOOK_NAMES` order:
    `onStageStart`, `onBeforeMove`, `onMerge`, `onSpawn`, `onAfterMove`,
@@ -977,7 +1012,19 @@ The panels, in render order:
 
 The five controls are **Refresh**, **Export metrics**, **Export snapshot**,
 **Collapse diagnostics** — which becomes **Expand diagnostics** — and **Close
-diagnostics**. Collapsing renders the heading and control row alone, so the
+diagnostics**.
+
+**Each export control answers for itself.** The control row carries a status line
+of its own beneath its buttons — inside the row, because the row is pinned to the
+foot of the scrolling surface and feedback has to be where the control is — and it
+carries the outcome of the last export activation — `Export
+snapshot: the download started.`, or `Export snapshot: the download did not
+start. The console record names the cause.` — and the same sentence is spoken
+once through the **page's** live-region service. The line is furniture, so a
+render neither writes it nor clears it and the outcome survives the one-second
+cadence; it carries no `aria-live` of its own, because this surface owns no live
+region and a second one would say the outcome twice (`DL-DIAG-26`). It holds the
+newest outcome only, and it never returns to empty. Collapsing renders the heading and control row alone, so the
 surface and the board coexist on a narrow viewport; the surface stays open and
 **what is exported does not change** (`DL-DIAG-11`), because every export folds
 and reads its own sources. What the collapse does stand down is the **scheduled**
@@ -1263,8 +1310,8 @@ Tracing is on by default; `__blitzy2048.tracer.isEnabled()` returns `true` and
    been taken from a reward screen — clear a stage first, take a relic, then play
    another move and look again.
 4. Confirm the turn boundary specifically. `engine.turn` is opened on
-   `move:before` and closed on `state:commit`, so exactly one `engine.turn` record
-   exists per resolved move, and it has a `durationMs`:
+   `move:before` and closed when the caller settles the attempt, so exactly one
+   `engine.turn` record exists per resolved move, and it has a `durationMs`:
    `__blitzy2048.tracer.recent(40).filter(s => s.name === 'engine.turn')`.
 5. Confirm nesting. `engine.move.resolve` carries the `engine.turn` span's `id` as
    its `parentId`.
@@ -1283,7 +1330,7 @@ Tracing is on by default; `__blitzy2048.tracer.isEnabled()` returns `true` and
    [section 4.2](#42-reading-spans-in-the-browsers-own-timeline).
 
 **Expected observation.** One `engine.turn` `SpanRecord` per resolved move, opened
-at `move:before` and closed at `state:commit`, with `engine.move.resolve`,
+at `move:before` and closed at the caller's settle, with `engine.move.resolve`,
 `hook.dispatch` and `render.commit` nested beneath it and `input.dispatch` around
 it; plus a stream of root `render.frame` records, one per frame callback, with
 `frameStats()` reporting a non-zero `frames`. Measured on one move: the six
@@ -1576,7 +1623,7 @@ session-level limits — nothing pollable, nothing aggregated, no alerting — a
 - **Message and stack redaction covers enumerated forms, not all forms.** A
   location or an identifier written in a form outside those enumerated survives
   (`DL-LOG-08`, `DL-LOG-10`).
-- **The seed-grouping correlation form is recoverable.** It is unsalted and
+- **The seed-only correlation form is recoverable.** It is unsalted and
   deterministic, so a party holding candidate seeds can match it. It must not be
   attached to a logger whose records leave the machine, and no code prevents that
   (`DL-LOG-09`).

@@ -1,13 +1,13 @@
 // Integration suite for the composition root's EVENT TOPOLOGY, AAP R2.
 //
-// WHAT WAS WRONG
-//   `src/main.ts` subscribed the renderer, the HUD, the announcer, the sound
-//   engine, the screen router and the engine-event metrics to `engine.events`,
-//   while the hook bus dispatched only the six relic hooks. Engine events and
-//   hook dispatch were two parallel channels, where AAP Figure 2 and Figure 3
-//   declare one: the emitter fans out to the bus, and relics, renderer, UI and
-//   observability are peers on it. Nothing in the type system noticed, because
-//   both channels satisfy `EngineEvents`.
+// ONE CHANNEL, NOT TWO
+//   AAP Figure 2 and Figure 3 declare a single channel: the emitter fans out to
+//   the bus, and relics, renderer, UI and observability are peers on it. Were
+//   `src/main.ts` to subscribe the renderer, the HUD, the announcer, the sound
+//   engine, the screen router and the engine-event metrics to `engine.events`
+//   while the bus dispatched only the six relic hooks, engine events and hook
+//   dispatch would be two parallel channels — and nothing in the type system
+//   would notice, both channels satisfying `EngineEvents`.
 //
 // WHAT THIS SUITE PINS
 //   That the composed application relays the engine's seven events onto the ONE

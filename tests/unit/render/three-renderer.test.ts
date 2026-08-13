@@ -1107,8 +1107,8 @@ describe('context loss', () => {
 });
 
 /* ==========================================================================
- * ADDED: one `WebGLRenderer` per canvas, parked across an unmount and across a
- * whole renderer object, because an appearance switch destroys this renderer and
+ * One `WebGLRenderer` per canvas, parked across an unmount and across a whole
+ * renderer object, because an appearance switch destroys this renderer and
  * builds another over the SAME canvas. Ten of those switches grew the live
  * `WebGLTexture` count from 12 to 71 and the `WebGLProgram` count from 6 to 15,
  * since each construction takes its own placeholder textures and programs from
@@ -1500,7 +1500,7 @@ describe('the change of scale', () => {
     }
   });
 
-  // ADDED: the two effect controllers were created with the DESKTOP defaults and
+  // The two effect controllers were created with the DESKTOP defaults and
   // were never re-measured, so a board whose geometry differed from the desktop
   // 4x4 sprayed the wrong number of cell pitches and punched by the wrong share
   // of its own field. DL-THREE-10, DL-PARTICLE-07, DL-CAMERA-05.
@@ -1774,9 +1774,9 @@ describe('the geometry behind the scale name', () => {
 
         expect(laidOutGeometry(fixture).factoryScale).toBe('desktop');
 
-        // Cross to mobile, THEN lose and restore the context. The restore
-        // closure used to carry the size and scale `mount()` read, so the board
-        // came back desktop-sized on a mobile viewport.
+        // Cross to mobile, THEN lose and restore the context. The restore reads
+        // the size and scale in force rather than the pair `mount()` read, so
+        // the board comes back mobile-sized on a mobile viewport.
         scale.cross();
         drain(fixture.renderer);
 
@@ -2602,7 +2602,7 @@ describe('the pixel-store unpack state is left as it was found', () => {
 
     expect(fixture.renderer.mount()).toBe(true);
 
-    // CHANGED: measured across the RELEASE, where this measured across
+    // Measured across the RELEASE, where this measured across
     // `destroy()`. A destroy parks the renderer for the next mount over the
     // same canvas and disposes nothing, so it writes no pixel-store state; the
     // parked-renderer suite above pins that silence. DL-THREE-07.
@@ -2709,7 +2709,7 @@ describe('the pixel-store unpack state is left as it was found', () => {
 });
 
 /* ==========================================================================
- * ADDED: the module-level release REPORTS itself.
+ * The module-level release REPORTS itself.
  *
  * The instance-level release inside the factory counts
  * `render.three.surface.released` and warns where the unpack reset fails. The
@@ -2835,8 +2835,9 @@ describe('the release the composition root performs', () => {
     const mock = createMockWebGLContext();
 
     // A context whose `pixelStorei` raises is the case the reset's own guard
-    // exists for, and the case whose failure used to disappear here while the
-    // same failure inside the factory is a warning. DL-THREE-05, DL-THREE-12.
+    // exists for, and its failure is reported here rather than discarded, as
+    // the same failure inside the factory is a warning. DL-THREE-05,
+    // DL-THREE-12.
     (mock.gl as Record<string, unknown>)['pixelStorei'] = (): never => {
       throw new Error('the context refused the write');
     };

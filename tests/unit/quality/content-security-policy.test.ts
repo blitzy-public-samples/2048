@@ -95,7 +95,7 @@ const POLICY = parsePolicy(POLICY_TEXT);
 /**
  * Every directive name the policy states, one entry per CLAUSE.
  *
- * ADDED: the duplicate check has to count clauses rather than parsed keys.
+ * The duplicate check has to count clauses rather than parsed keys.
  * `parsePolicy` returns a `Map`, so a repeated directive collapses into one
  * entry — with the LAST clause silently winning — which made asserting that the
  * parsed keys hold no duplicate a tautology. A browser applies the *first*
@@ -203,7 +203,7 @@ describe('the policy declares exactly the intended directives', () => {
   });
 
   it('declares each directive exactly once', () => {
-    // CHANGED: read off the policy TEXT, so a directive stated twice is
+    // Read off the policy TEXT, so a directive stated twice is
     // reported. Reading the parsed keys could not fail. DL-TEST-11.
     const names = statedDirectiveNames(POLICY_TEXT);
     const seen = new Set<string>();
@@ -388,9 +388,8 @@ function isCommentLine(line: string): boolean {
 /**
  * Every code-line match of a pattern across the sources.
  *
- * ADDED: one matcher for all three refusal scans, reporting file, line and the
- * matched text so a failure names what to remove. The scans previously tested
- * whole-file `RegExp`s and reported a path alone. DL-TEST-12.
+ * One matcher for all three refusal scans, reporting file, line and the matched
+ * text so a failure names what to remove rather than a path alone. DL-TEST-12.
  *
  * @param pattern Global pattern to apply.
  * @returns One entry per match, outside comments.
@@ -424,11 +423,11 @@ describe('the sources carry nothing the policy would block', () => {
     // Worker is normally constructed from generated source. No module
     // constructs one, so the directive bounds nothing the code does.
     //
-    // CHANGED: the QUALIFIED and INDIRECT forms are covered too. The scan read
-    // `new Worker(` alone, so `new window.Worker(...)`, `new globalThis.Worker`,
+    // The QUALIFIED and INDIRECT forms are covered too. The scan read `new
+    // Worker(` alone, so `new window.Worker(...)`, `new globalThis.Worker`,
     // `Reflect.construct(Worker, ...)`, a worker reached through
-    // `navigator.serviceWorker` and `importScripts` were all invisible to a gate
-    // whose name claims to cover them. DL-TEST-12.
+    // `navigator.serviceWorker` and `importScripts` were all invisible to a
+    // gate whose name claims to cover them. DL-TEST-12.
     const offenders = offendingMatches(
       new RegExp(
         [
@@ -452,12 +451,11 @@ describe('the sources carry nothing the policy would block', () => {
     // `script-src 'self'` carries no `'unsafe-eval'`, so every one of these
     // would throw at runtime.
     //
-    // CHANGED: the scan's `[^.\w]` prefix EXCLUDED the qualified forms by
-    // construction, so `window.eval(...)` and `globalThis.eval(...)` — the two
-    // spellings a bundler is most likely to leave behind — passed a gate named
-    // 'calls no eval'. Indirect eval, a bare `Function(...)` call without `new`,
-    // and the string form of the two timer functions are covered as well.
-    // DL-TEST-12.
+    // The scan's `[^.\w]` prefix EXCLUDED the qualified forms by construction,
+    // so `window.eval(...)` and `globalThis.eval(...)` — the two spellings a
+    // bundler is most likely to leave behind — passed a gate named 'calls no
+    // eval'. Indirect eval, a bare `Function(...)` call without `new`, and the
+    // string form of the two timer functions are covered as well. DL-TEST-12.
     const offenders = offendingMatches(
       new RegExp(
         [
@@ -483,8 +481,8 @@ describe('the sources carry nothing the policy would block', () => {
     // for images alone. Every other scheme below would be refused, and each is
     // a real exfiltration or code-loading channel rather than a hypothetical.
     //
-    // ADDED: `ws:`, `wss:`, `blob:`, `filesystem:` and the protocol-relative
-    // form. The remote-origin scan read `https?://` only, so a WebSocket — which
+    // `ws:`, `wss:`, `blob:`, `filesystem:` and the protocol-relative form. The
+    // remote-origin scan read `https?://` only, so a WebSocket — which
     // `connect-src 'self'` refuses and which no `http` scan can see — was
     // outside every check. DL-TEST-12.
     const offenders = offendingMatches(

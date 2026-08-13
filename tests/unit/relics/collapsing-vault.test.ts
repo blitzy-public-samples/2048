@@ -1444,11 +1444,11 @@ describe('the collapsing-vault suite leaves no shared state behind', () => {
  * The terminal verdict the collapse leaves behind
  *
  * Every section above dispatches `onStageEnd` on a bus and asserts what the
- * handler did to the lattice. None of them asks what the ENGINE then published,
- * and that is where the defect lived: `Engine.endStage()` applied the stage-end
- * board commands and committed without re-deriving the loss flag, so a collapse
- * that left a full board with no adjacent match published `over: false` and the
- * run carried a stale playable verdict into its reward screen and its next stage.
+ * handler did to the lattice. This one asks what the ENGINE then published:
+ * `Engine.endStage()` applies the stage-end board commands and RE-DERIVES the
+ * loss flag before committing, so a collapse that leaves a full board with no
+ * adjacent match publishes `over: true` and no stale playable verdict reaches
+ * the reward screen or the next stage.
  *
  * These cases therefore drive a real `Engine` and read the verdict off the
  * commit, not off the handler. The board is a nine-tile arrangement in which no
@@ -1578,8 +1578,8 @@ describe('the terminal verdict a collapse leaves on the committed board', () => 
     expect(run.config.boardSize).toBe(SIZE_FLOOR);
 
     // And the verdict describes the board the collapse produced, not the board
-    // it replaced. Both readings are asserted, because the defect was exactly a
-    // disagreement between them.
+    // it replaced. Both readings are asserted, because the failure this guards
+    // against is exactly a disagreement between them.
     expect(
       movesAvailable(
         new Grid(committed.grid.size, committed.grid.cells),

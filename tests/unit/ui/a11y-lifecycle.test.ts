@@ -26,15 +26,19 @@ import {
   createFocusManager,
   createParallelBoardLayer,
   focusInitial,
+  formatCellCoordinates,
+  formatCellCoordinatesLeading,
 } from '../../../src/ui/a11y/focus-manager';
 import type { AnnouncerScheduler } from '../../../src/ui/a11y/live-region';
 import {
   DEFAULT_MAX_QUEUED_ANNOUNCEMENTS,
   OUTBOX_CAPACITY_MULTIPLE,
   createLiveRegionAnnouncer,
+  composeAnnouncements,
   isGameplayAnnouncementKind,
   isProtectedAnnouncementKind,
 } from '../../../src/ui/a11y/live-region';
+import { numberOnlyRendererCopy } from '../../../src/render/number-only-renderer';
 
 afterEach(() => {
   document.body.innerHTML = '';
@@ -448,7 +452,8 @@ describe('the announcement bound covers every protected kind', () => {
       });
     }
 
-    // The defect: refusing to discard a protected kind let this reach 20.
+    // A protected kind is still discardable under pressure, so this cannot
+    // reach 20.
     expect(announcer.pending()).toBeLessThanOrEqual(4);
 
     announcer.destroy();
@@ -530,7 +535,7 @@ describe('the announcement bound covers every protected kind', () => {
       announcer.flush();
     }
 
-    // The defect: the outbox had no ceiling at all, so this grew to 40.
+    // The outbox carries a ceiling, so this cannot grow to 40.
     expect(announcer.pending()).toBeLessThanOrEqual(
       capacity + capacity * OUTBOX_CAPACITY_MULTIPLE,
     );
@@ -1045,7 +1050,7 @@ describe('a trap release can decline the focus restore', () => {
 });
 
 /* ==========================================================================
- * ADDED: `release({ beforeRestore })` — the window between lifting the
+ * `release({ beforeRestore })` — the window between lifting the
  * inertness this trap applied and restoring focus, for the caller whose own
  * presentation layer withholds the restore target while the background is
  * inert. DL-FOCUS-08, and DL-ROUTER-41 for the caller that needs it.
@@ -1180,6 +1185,48 @@ describe('the two board layers agree on axis order', () => {
     expect(labels[0]).toBe('Row 1, column 1, 2');
 
     layer.unmount();
+  });
+
+  // The THIRD narration of a cell's coordinates. A review found the spawn
+  // announcement of ../../../src/ui/a11y/live-region.ts reading `at column x,
+  // row y` while both board layers read `Row y, column x`, so a listener had to
+  // reverse one of the two readings every turn. One formatter now states the
+  // order and all three resolve through or agree with it. DL-FOCUS-09.
+  it('announces a spawn in the same axis order the board is labelled in', () => {
+    const composition = composeAnnouncements([
+      { kind: 'spawn', value: 4, position: { x: 3, y: 0 } },
+    ]);
+    const line = composition.utterances[0]?.text ?? '';
+
+    // Row first, one-based, and the same words the cell label uses.
+    expect(line).toBe('New 4 at row 1, column 4.');
+    expect(line).not.toContain('column 4, row 1');
+
+    // The phrase inside it IS the shared formatter's, so the two cannot drift.
+    expect(line).toContain(formatCellCoordinates(3, 0));
+  });
+
+  it('states the axis order once, for every narration of a cell', () => {
+    // The parallel board's label, the spawn announcement and the number-only
+    // renderer's copy are the three places a cell is named. The first two share
+    // the formatter; the third is a copy table with its own strings, so it is
+    // held to the same ordering here rather than left to drift.
+    expect(formatCellCoordinates(2, 1)).toBe('row 2, column 3');
+    expect(formatCellCoordinatesLeading(2, 1)).toBe('Row 2, column 3');
+
+    // Same phrase, differing only in the first letter: the order is stated once.
+    expect(formatCellCoordinatesLeading(2, 1).toLowerCase()).toBe(
+      formatCellCoordinates(2, 1),
+    );
+
+    // The number-only renderer's default copy, on the same cell, one-based as
+    // that table takes its arguments.
+    expect(numberOnlyRendererCopy.cellLabel(2, 3, 8)).toBe(
+      `${formatCellCoordinatesLeading(2, 1)}, 8`,
+    );
+    expect(numberOnlyRendererCopy.emptyCellLabel(2, 3)).toBe(
+      `${formatCellCoordinatesLeading(2, 1)}, empty`,
+    );
   });
 });
 
@@ -1532,11 +1579,11 @@ describe('the persisted preference envelope', () => {
     ]);
   });
 
-  // CHANGED: the version this loader cannot read used to be reported as
+  // The version this loader cannot read is reported by its TYPE, never as
   // `String(version)`. The value comes from storage, so its text is content the
-  // report had no business disclosing — and the coercion ran BEFORE the safe
-  // reporter boundary, so a payload carrying a hostile `toString` threw out of
-  // the loader that promises never to throw. DL-SETTINGS-08.
+  // report has no business disclosing — and a coercion would run BEFORE the
+  // safe reporter boundary, where a payload carrying a hostile `toString` would
+  // throw out of a loader that promises never to throw. DL-SETTINGS-08.
   it('names the shape of a version it cannot read, and discloses none of it', () => {
     const fields: (UiReportFields | undefined)[] = [];
     const sink: UiReporter = {
@@ -1606,6 +1653,194 @@ describe('the persisted preference envelope', () => {
     expect(() => deserializePreferences(hostile)).not.toThrow();
     expect(deserializePreferences(hostile)).toStrictEqual({});
     expect(invoked).toStrictEqual([]);
+  });
+
+  /* ------------------------------------------------------------------------
+   * The never-throw contract is TOTAL.
+   *
+   * The loader documents that a payload it cannot read yields defaults and
+   * never throws, and a security review found the promise escapable: the shape
+   * probe called `Array.isArray`, which THROWS for a revoked Proxy, and every
+   * field was read with a bracket lookup, which runs an accessor or a Proxy
+   * `get` trap and carries its throw straight out of the loader. The boot path
+   * of src/main.ts reads the envelope during composition, so a raise there is a
+   * page that does not start. Own DATA descriptors only, every descriptor read
+   * guarded. DL-SETTINGS-09.
+   * ---------------------------------------------------------------------- */
+
+  /** Records every report so a rejection can be proved bounded. */
+  const recordingSink = (): {
+    readonly sink: UiReporter;
+    readonly levels: string[];
+    readonly counters: string[];
+    readonly fields: (UiReportFields | undefined)[];
+  } => {
+    const levels: string[] = [];
+    const counters: string[] = [];
+    const fields: (UiReportFields | undefined)[] = [];
+
+    return {
+      levels,
+      counters,
+      fields,
+      sink: {
+        log: (level: string, _message: string, reported): void => {
+          levels.push(level);
+          fields.push(reported);
+        },
+        count: (name: string): void => {
+          counters.push(name);
+        },
+        error: (): void => {
+          return;
+        },
+      },
+    };
+  };
+
+  it('yields the defaults for a revoked proxy, without throwing', () => {
+    const { proxy, revoke } = Proxy.revocable(
+      { schemaVersion: PREFERENCES_SCHEMA_VERSION, theme: 'high-contrast' },
+      {},
+    );
+
+    revoke();
+
+    // `typeof` still answers `'object'` and the value is not `null`, so the
+    // payload reaches the array probe — the one predicate that consults the
+    // handler a revoked proxy no longer has.
+    const { sink, levels, counters, fields } = recordingSink();
+
+    expect(() => deserializePreferences(proxy, sink)).not.toThrow();
+    expect(deserializePreferences(proxy)).toStrictEqual({});
+
+    // Bounded: one report, naming only that it could not be read.
+    expect(levels).toStrictEqual(['warn']);
+    expect(counters).toStrictEqual(['ui.preferences.payload_rejected']);
+    expect(fields[0]?.received).toBe('unreadable');
+  });
+
+  it('yields the defaults for a payload whose descriptor read is refused', () => {
+    const hostile = new Proxy(
+      {
+        schemaVersion: PREFERENCES_SCHEMA_VERSION,
+        theme: 'high-contrast',
+        muted: true,
+      },
+      {
+        getOwnPropertyDescriptor: (): never => {
+          throw new Error('descriptor refused');
+        },
+      },
+    );
+
+    const { sink, levels, counters, fields } = recordingSink();
+
+    expect(() => deserializePreferences(hostile, sink)).not.toThrow();
+
+    // A payload that will not answer for its own version is refused WHOLE: a
+    // version this build cannot confirm is not a shape it may read field by
+    // field.
+    expect(deserializePreferences(hostile)).toStrictEqual({});
+    expect(levels).toStrictEqual(['warn']);
+    expect(counters).toStrictEqual(['ui.preferences.payload_rejected']);
+    expect(fields[0]?.received).toBe('unreadable');
+  });
+
+  it('reads a payload without consulting its get, has or ownKeys traps', () => {
+    const invoked: string[] = [];
+    const traps = ['get', 'has', 'ownKeys'] as const;
+    const hostile = new Proxy(
+      {
+        schemaVersion: PREFERENCES_SCHEMA_VERSION,
+        theme: 'high-contrast',
+        muted: true,
+      },
+      Object.fromEntries(
+        traps.map((trap) => [
+          trap,
+          (): never => {
+            invoked.push(trap);
+
+            throw new Error(`${trap} refused`);
+          },
+        ]),
+      ),
+    );
+
+    const read = deserializePreferences(hostile);
+
+    // A descriptor read reaches none of the three traps a bracket lookup would,
+    // so the payload is read completely and none of them ran: immunity, not
+    // containment.
+    expect(invoked).toStrictEqual([]);
+    expect(read.theme).toBe('high-contrast');
+    expect(read.muted).toBe(true);
+  });
+
+  it('refuses an accessor field rather than invoking it', () => {
+    const invoked: string[] = [];
+    const hostile = {
+      schemaVersion: PREFERENCES_SCHEMA_VERSION,
+      theme: 'high-contrast',
+
+      get muted(): boolean {
+        invoked.push('muted');
+
+        throw new Error('read refused');
+      },
+    };
+
+    const { sink, levels, counters } = recordingSink();
+
+    expect(() => deserializePreferences(hostile, sink)).not.toThrow();
+
+    const read = deserializePreferences(hostile);
+
+    // NOTHING was invoked, and the readable field beside it still survived: a
+    // persisted envelope carries data, so an accessor is refused where it stands
+    // rather than being run to find out what it would have said.
+    expect(invoked).toStrictEqual([]);
+    expect(read.theme).toBe('high-contrast');
+    expect(read.muted).toBeUndefined();
+    expect(levels).toStrictEqual(['warn']);
+    expect(counters).toStrictEqual(['ui.preferences.payload_field_rejected']);
+  });
+
+  it('refuses an accessor version rather than invoking it', () => {
+    const invoked: string[] = [];
+    const hostile = {
+      get schemaVersion(): number {
+        invoked.push('schemaVersion');
+
+        throw new Error('read refused');
+      },
+      theme: 'high-contrast' as const,
+    };
+
+    const { sink, levels, counters, fields } = recordingSink();
+
+    expect(() => deserializePreferences(hostile, sink)).not.toThrow();
+    expect(deserializePreferences(hostile)).toStrictEqual({});
+    expect(invoked).toStrictEqual([]);
+    expect(levels).toStrictEqual(['warn']);
+    expect(counters).toStrictEqual(['ui.preferences.payload_rejected']);
+    expect(fields[0]?.received).toBe('accessor');
+  });
+
+  it('reads own data only, so an inherited field is not restored', () => {
+    // A payload written by this build carries own data properties, so a value
+    // reachable only through a prototype was never written by
+    // `serializePreferences` and is not read back as though it had been.
+    const hostile = Object.create({ theme: 'high-contrast', muted: true }) as {
+      schemaVersion: number;
+    };
+
+    hostile.schemaVersion = PREFERENCES_SCHEMA_VERSION;
+
+    const read = deserializePreferences(hostile);
+
+    expect(read).toStrictEqual({});
   });
 
   it('says nothing for a payload it read completely', () => {
