@@ -108,7 +108,7 @@ L37-L43, whose `if (cells.length)` guard has no else branch and so answers
 
 The stage goal is evaluated where `onAfterMove` is dispatched, and a met goal
 is resolved through the `onStageEnd` dispatch (`DL-ENGINE-07`). The screen flow
-that dispatch leads into is Figure 6b, in
+that dispatch leads into is Figure 6, in
 [`hook-dispatch-sequence.md`](hook-dispatch-sequence.md).
 
 The board on every payload the figure carries is the live lattice, passed by
@@ -246,7 +246,7 @@ gameplay and reproducibility and is reused for nothing sensitive
 - [`hook-dispatch-sequence.md`](hook-dispatch-sequence.md) — **Figure 5**,
   what happens inside each dispatch box of Figure 4, including the charge guard
   and the error isolation, and the screen-flow pair **Figure 6a** and
-  **Figure 6b**, which the `onStageEnd` dispatch leads into.
+  **Figure 6**, which the `onStageEnd` dispatch leads into.
 - [`../TRACEABILITY_MATRIX.md`](../TRACEABILITY_MATRIX.md) — **Figure 8 —
   File Transformation Map**, which is not in this folder, and the
   construct-by-construct mapping from each retired source to the module

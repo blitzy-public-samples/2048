@@ -1,189 +1,394 @@
-# Hook Dispatch Sequence
+# Hook Dispatch Sequence, and the Screen Flow
 
-The hook bus is where the roguelike layer meets the rules. It has one job that
-sounds trivial and is not: hand a payload to every relic bound to a hook, in a
-defined order, and end up with a board that is consistent whatever those handlers
-did — including throwing.
+This document carries **three figures across two topics**.
 
-`Figure 5` is that job drawn as a sequence. It is also the mechanical proof of
-three requirements at once: relics on the same hook both fire and compound, a
-relic with no charges left is skipped rather than invoked, and a throwing handler
-cannot take the turn down.
+**Part one** is the hook bus: one dispatch, drawn as a sequence, showing how a
+payload reaches every relic bound to a hook and what the board looks like
+afterwards whatever those handlers did — including throwing.
 
-The `onStageEnd` dispatch at the end of a cleared stage leads out of the bus and
-into the screen flow, so the screen-flow pair `Figure 6a` and `Figure 6b` is
-carried here too, in [section 4](#4-the-screen-flow-before-and-after).
+**Part two** is the screen flow: the seven class-toggled board states the
+pre-migration product had, and the declared state machine that replaces them.
+The screen flow is a separate subject, co-located here by the documentation
+plan because the `onStageEnd` dispatch of part one is what leads into it.
 
-Rationale is not argued here. It lives in
-[`docs/DECISION_LOG.md`](../DECISION_LOG.md), cited below by identifier.
+Nothing here argues **why**. Rationale lives in
+[`../DECISION_LOG.md`](../DECISION_LOG.md) and is cited below by identifier,
+which is the split `DL-DOC-05` sets: a document states what happens and names
+the decision, and the log carries the alternatives, the reasoning and the
+risks.
+
+**Figure numbering.** The bare numerals `1` through `8` are one sequence shared
+across `docs/architecture/` and
+[`docs/TRACEABILITY_MATRIX.md`](../TRACEABILITY_MATRIX.md), so a reference by
+name resolves to exactly one figure. Figure 5 and Figure 6 are here, together
+with Figure 6a, the before half Figure 6 is published with.
 
 ## Contents
 
-- [1. One dispatch, three relics](#1-one-dispatch-three-relics)
-- [2. Why the guard lives in the bus](#2-why-the-guard-lives-in-the-bus)
-- [3. What a throwing handler leaves behind](#3-what-a-throwing-handler-leaves-behind)
-- [4. The screen flow, before and after](#4-the-screen-flow-before-and-after)
-- [5. Where to look next](#5-where-to-look-next)
+Part one — hook dispatch:
 
-## 1. One dispatch, three relics
+- [1. One dispatch, four relics](#1-one-dispatch-four-relics)
+- [2. The four contracts Figure 5 proves](#2-the-four-contracts-figure-5-proves)
+- [3. The dispatch surface](#3-the-dispatch-surface)
 
-The bus resolves subscribers by **pickup order** — the order the player acquired
-them, assigned once at pickup and never reassigned — rather than by registration
-accident. Each handler receives the payload the previous one returned, so effects
-chain.
+Part two — screen flow:
 
-**Figure 5 — Hook Dispatch Sequence: Pickup-Order Fan-Out with Charge Guard and
-Error Isolation.**
+- [4. The screen model as it was](#4-the-screen-model-as-it-was)
+- [5. The screen flow as it is](#5-the-screen-flow-as-it-is)
+- [6. Why both figures are published](#6-why-both-figures-are-published)
+
+Both parts:
+
+- [7. Related figures](#7-related-figures)
+
+---
+
+# Part one — hook dispatch
+
+## 1. One dispatch, four relics
+
+The bus resolves the subscribers bound to a hook in **pickup order**, hands the
+first one the payload the engine dispatched, and hands every subsequent one the
+payload the handler before it returned.
+
+**Figure 5 — Hook Dispatch Sequence: Pickup-Order Fan-Out with Charge Guard
+and Error Isolation.**
 
 ```mermaid
 sequenceDiagram
-    participant E as Engine
-    participant B as Hook bus
-    participant R1 as Relic A (picked 1st)
-    participant R2 as Relic C (picked 3rd)
-    participant L as Logger
-    E->>B: dispatch onMerge (payload P0)
-    B->>B: resolve subscribers in pickup order
-    B->>B: charge guard - Relic A charges above zero
-    B->>R1: handle(P0)
-    R1-->>B: P1 (transformed)
-    B->>B: charge guard - Relic B charges at zero
-    Note over B,R2: Handler SKIPPED, nothing thrown,<br/>the zero-charge case settled in one place
-    B->>B: charge guard - Relic C charges above zero
-    B->>R2: handle(P1)
-    R2--xB: throws
-    B->>L: log the error with the run correlation id
-    B->>B: mark the relic degraded, keep P1,<br/>drop its board-effect queue unapplied
-    B-->>E: final payload returned, the turn completes
+  participant E as Engine
+  participant B as Hook Bus
+  participant R1 as Relic A picked first
+  participant R2 as Relic B picked second
+  participant R3 as Relic C picked third
+  participant R4 as Relic D picked fourth
+  participant L as Logger
+  E->>B: dispatch onMerge with payload P0
+  B->>B: resolve subscribers in pickup order
+  B->>B: charge guard, Relic A charges above zero
+  B->>R1: handle P0
+  R1-->>B: P1 transformed
+  B->>B: charge guard, Relic B charges above zero
+  B->>R2: handle P1
+  R2-->>B: P2 transformed
+  B->>B: charge guard, Relic C charges at zero
+  Note over B,R3: Handler SKIPPED, nothing thrown.<br/>The zero-charge case is settled in one place.
+  B->>B: charge guard, Relic D charges above zero
+  B->>R4: handle P2
+  R4--xB: throws
+  B->>L: log the error with the run correlation identifier
+  B->>B: mark the relic degraded, keep P2
+  B-->>E: final payload returned, the turn completes
 ```
 
-**Legend for Figure 5.** *Hook Dispatch Sequence: Pickup-Order Fan-Out with Charge
-Guard and Error Isolation.* A **solid arrow** is a synchronous call, a **dashed
-arrow** is a return value, and the **crossed arrow** is a thrown error isolated by
-the bus. A **self-call** on the bus is bookkeeping it performs before deciding
-whether to invoke a handler. Relic B never appears as a participant because it is
-never called: the guard resolves before invocation, which is the difference
-between skipping a handler and asking it to no-op. Ordering is `DL-HOOKBUS-02`,
-the compounding return protocol is `DL-HOOKBUS-03`, and the guard's placement is
-`DL-HOOKBUS-01`.
+**Legend.** *Figure 5 — Hook Dispatch Sequence: Pickup-Order Fan-Out with
+Charge Guard and Error Isolation.* A **solid arrow** is a synchronous call. A
+**dashed arrow** is a return value. The **crossed arrow** is a thrown error,
+isolated by the bus. A **self-call** on the Hook Bus lane is bookkeeping the
+bus performs before it decides whether to invoke a handler at all. The **note**
+spanning the Hook Bus and Relic C marks a handler that is never entered: the
+guard resolves before invocation, so no arrow reaches that lane. The **Logger**
+lane is where an isolated error is reported.
 
-## 2. Why the guard lives in the bus
+**On the participant set.** Figure 5 declares **four** relic lanes where the
+plan this work implements drafted two while its step list named three, leaving
+one dispatch without a lane of its own. The set was expanded so that pickup
+order, compounding, the charge skip and the error isolation are each separately
+observable rather than sharing a lane. The correction follows the practice
+`DL-DOC-04` records in [`../DECISION_LOG.md`](../DECISION_LOG.md): where the
+plan and the checkout disagree, the documentation carries the verified form and
+the divergence is recorded rather than applied silently.
 
-Five of the sixteen relics carry a charge budget. The guard that skips a spent
-relic is implemented **once, in the bus**, not sixteen times in handlers. Three
-consequences follow:
+**The before state.** Figure 5 is a to-be view, and it has no as-is analogue at
+this granularity: the pre-migration bus had no ordering contract, no concept of
+a charge, no error isolation and no compounding. Its before state is therefore
+**Figure 1 — As-Is Architecture: Layered Globals with a Push-Based Actuator**,
+in [`ARCHITECTURE.md`](ARCHITECTURE.md#1-the-architecture-as-it-was), which
+shows the three-name publish and subscribe bus this one extends. **Rule 2**'s
+both-states obligation is discharged for this architecture by that Figure 1 and
+Figure 2 pair, so no fourth figure is drawn here. That earlier bus appended
+callbacks to an array keyed by event name (`js/keyboard_input_manager.js`
+L18-L23) and iterated them synchronously with no queue and no containment
+(L25-L32).
 
-- Invoking a relic with zero charges cannot throw and cannot corrupt run state,
-  for every relic, without any handler containing that check.
-- A charge is spent by the relic's **own effect**: a handler asks through
-  `HookContext.spendCharge()`, and the bus deducts only once that handler's
-  return has validated. A dispatch that reached a handler which then did nothing
-  spends nothing.
-- Once a budget reaches zero, **every** handler that relic binds is skipped, on
-  every charge-guarded hook, so a two-hook relic cannot half-fire.
+## 2. The four contracts Figure 5 proves
 
-The second entry point is `RelicRegistry.activate()`, which a manual activation
-reaches; both paths draw on the one budget however many hooks the relic binds.
+Figure 5 is a proof rather than an illustration. Four separately stated
+acceptance conditions are mechanically readable off it.
 
-## 3. What a throwing handler leaves behind
+**Relics bound to the same hook all fire, in pickup order.** Relic A, Relic B
+and Relic D are each entered, in the order they were picked up. Neither
+replaces another and none can pre-empt another (`DL-HOOKBUS-02`).
 
-Nothing. That is enforced at five crossings rather than asserted, because each was
-a way for a failed handler to change a run:
+**Effects compound.** Relic B is handed **P1**, which is Relic A's output, and
+not the original P0; Relic D is handed **P2**. Each handler receives the
+accumulated payload and returns a possibly transformed one, and a handler that
+returns nothing leaves the payload as it stands (`DL-HOOKBUS-03`).
 
-| Crossing | How it is protected |
+**A zero-charge relic is skipped rather than invoked.** Relic C is never
+entered. The guard is implemented **once, in the bus**, rather than sixteen
+times in handlers, so no relic handler duplicates it and a zero-charge
+invocation can neither throw nor corrupt run state (`DL-HOOKBUS-01`).
+
+**A throwing handler is isolated.** Relic D throws. The error is caught,
+reported with the run correlation identifier, its subscriber is marked
+**degraded**, the accumulated payload P2 is preserved, and **the turn
+completes** (`DL-HOOKBUS-04`). Without this, one throwing relic would abort a
+turn mid-move and could leave the board inconsistent.
+
+The bus reports through an **injected reporter** rather than importing the
+observability layer, so the dependency runs one way only: nothing under
+`src/engine/` names an observability module. The correlation identifier's
+derivation, the span names, the metric names and the six health checks belong
+to [`../OBSERVABILITY.md`](../OBSERVABILITY.md#31-correlation-identifiers) and
+are not restated here.
+
+## 3. The dispatch surface
+
+- The six hook names, spelled exactly: `onStageStart`, `onBeforeMove`,
+  `onMerge`, `onSpawn`, `onAfterMove`, `onStageEnd`. There is no seventh
+  (`DL-HOOK-01`).
+- Pickup order is **monotonic and never renumbered**, and it is owned by the
+  relic registry rather than inferred from registration order. It advances only
+  on an accepted pickup, so removing a relic renumbers nothing, and a renderer
+  or a screen subscribing later cannot reorder a relic (`DL-HOOKBUS-02`).
+- A relic is **one** registration carrying its whole handler table, **one**
+  mutable charge pool and **one** `state` slot. All of its hook bindings
+  therefore share that pool and that slot, and a relic that binds two hooks
+  cannot spend a charge twice in one turn by accident (`DL-REGISTRY-02`).
+- Because **hook dispatch order determines RNG consumption order**,
+  deterministic dispatch order is itself part of the reproducibility contract.
+  **Figure 7 — Seeded Determinism: One Run Seed Fanned into Named RNG
+  Substreams**, in
+  [`data-flow.md`](data-flow.md#3-the-seed-and-its-substreams), is the
+  substream view; it is not redrawn here.
+- The bus surface is `register(subscription)`, `unregister(id)` and
+  `dispatch(name, payload, environment)`, plus a per-hook and per-subscriber
+  **dispatch-count snapshot accessor**. The metrics layer and the diagnostics
+  overlay read that snapshot, which is what lets them count dispatches with no
+  engine-to-observability import.
+- **No engine code branches on any individual relic identifier.** The registry
+  is the only construct that knows a relic exists (`DL-REGISTRY-01`).
+- The relic catalogue — sixteen relics across four families, with their
+  identifiers, rarities, bound hooks and charge counts, and which five are
+  charge-based — belongs to [`../RELICS.md`](../RELICS.md). No individual
+  relic identifier is named in this document.
+
+---
+
+# Part two — screen flow
+
+Part two is a different subject from part one. It is carried here because the
+`onStageEnd` dispatch that closes a cleared stage in Figure 5 is the event the
+screen flow resolves, so the two are read together.
+
+## 4. The screen model as it was
+
+The pre-migration product had **one screen**. Seven board states were produced
+on that single markup tree by toggling CSS classes, and nothing declared which
+transitions between them were legal.
+
+**Figure 6a — As-Is Screen Model: One Screen with Seven CSS-Class-Governed
+Board States.**
+
+```mermaid
+stateDiagram-v2
+  [*] --> ColdStart : ten script tags loaded, boot deferred to an animation frame
+  ColdStart --> FreshGame : no saved snapshot
+  ColdStart --> RestoredGame : saved snapshot present
+  FreshGame --> InPlay : two start tiles added
+  RestoredGame --> InPlay : grid rehydrated from the saved size
+  InPlay --> InPlay : move that changed the board
+  InPlay --> Won : a merged value reached 2048
+  Won --> ContinuedWin : keep-playing control, message cleared
+  ContinuedWin --> InPlay : play resumes above 2048
+  InPlay --> Lost : no moves available
+  Lost --> FreshGame : retry control
+  Won --> FreshGame : restart control
+  note right of Won
+    game-won added to .game-message.
+    Overlay displayed, keep-playing
+    control made visible.
+  end note
+  note right of Lost
+    game-over added to .game-message.
+    Clearing removes one class at a time.
+  end note
+```
+
+**Legend.** *Figure 6a — As-Is Screen Model: One Screen with Seven
+CSS-Class-Governed Board States.* Each node is a **board state of the single
+existing screen**, not a state of any machine. Each labelled transition is the
+event that caused it. The two **notes** record the CSS class mechanism that
+governed each terminal state.
+
+Figure 6a asserts only what the pre-migration checkout verifiably did:
+
+- `.game-message` is `display: none` by default (`style/main.scss` L197) and
+  becomes displayed **only** through the `&.game-won, &.game-over` selector
+  (L246-L248). `.game-won` additionally swaps the overlay background and
+  reveals the keep-playing control, which is otherwise `display: none`
+  (L229-L244). Win, loss and continued win were therefore distinguished purely
+  by **two CSS class toggles**.
+- Those toggles were written by the actuator. `message()` added `game-won` or
+  `game-over` and wrote the verdict into the overlay's first `<p>`
+  (`js/html_actuator.js` L127-L133); `clearMessage()` removed one class at a
+  time (L135-L139, with the in-file note that IE takes only one value at a
+  time).
+- The overlay cadence was `fade-in` **800 ms** `ease` after a **1200 ms** delay
+  (`style/main.scss` L234, where the delay is `$transition-speed * 12` and
+  `$transition-speed` is `100ms` at L22), with fill mode `both`.
+- **There was no router, no hash handling and no History API usage anywhere.** A
+  grep of the pre-migration tree returns zero matches for `location.hash`,
+  `history.pushState`, `popstate`, `pushState` or `replaceState` across every
+  `.js`, `.html` and `.scss` file. That absence is the whole reason a before
+  half is needed: there was no navigation model for Figure 6 to be compared
+  against, only class toggles.
+- The three controls were bare `<a>` elements with no `href` — restart at
+  `index.html` L31, keep-playing at L38 and retry at L39 — which is why they
+  were unreachable by keyboard.
+
+## 5. The screen flow as it is
+
+Figure 6 is the product's **first navigation model of any kind**, superseding
+the seven-state class-toggle model of Figure 6a.
+
+**Figure 6 — Screen Flow State Machine: Run Start to Run Summary.**
+
+```mermaid
+stateDiagram-v2
+  [*] --> RunStart : cold load
+  RunStart --> Stage : begin run, seed assigned or entered
+  Stage --> Stage : move that changed the board
+  Stage --> StageClear : stage goal met
+  StageClear --> Reward : onStageEnd
+  Reward --> Stage : relic selected, next stage starts
+  Stage --> Won : configured win value reached
+  Won --> Stage : keep playing
+  Won --> RunSummary : end run
+  Stage --> GameOver : no moves available
+  GameOver --> RunSummary : acknowledge
+  RunSummary --> RunStart : new run
+  Stage --> Stage : restart within run
+  note right of Reward
+    Three cards drawn without replacement
+    from the relic-draw substream, so no
+    duplicate can appear in one set.
+  end note
+  note right of GameOver
+    The terminal overlay honours the existing
+    cadence of a 1200ms delay then an 800ms fade.
+  end note
+```
+
+**Legend.** *Figure 6 — Screen Flow State Machine: Run Start to Run Summary.*
+Each node is a **screen or board state**. Each labelled transition is the event
+that causes it, and the two self-transitions on `Stage` are two distinct events
+that leave the state unchanged. The two **notes** carry constraints inherited
+from the existing system.
+
+### 5.1 Figure 6 is normative for the transition table
+
+Figure 6 is the specification for the `TRANSITIONS` table declared in
+`src/ui/screen-router.ts`. Its state labels correspond **one to one** with that
+module's `SCREEN_NAMES` members:
+
+| Figure 6 label | `SCREEN_NAMES` member |
 |---|---|
-| The payload | The handler is given its own copy, so an in-place write reaches that copy alone |
-| The state slot | Copied in and copied back out, so a write at **any depth** reaches a copy |
-| The charge | Requested during the handler, deducted only after its return validates |
-| The board and its tiles | Reached only as a query-only facade; commands are recorded on a queue and applied only on a validated return |
-| Randomness | The handler draws from forks, and the run's substreams advance only on commit, so a handler that draws and then throws perturbs no later spawn |
+| RunStart | `runStart` |
+| Stage | `stage` |
+| StageClear | `stageClear` |
+| Reward | `reward` |
+| Won | `won` |
+| GameOver | `gameOver` |
+| RunSummary | `runSummary` |
 
-A relic that throws is logged with the run correlation identifier and marked
-**degraded**, and `RelicRegistry.degradedIds()` is what the HUD reads to tell the
-player that a relic it is still showing has stopped firing. The turn completes
-with the payload as it stood before that handler.
+The table was checked against the figure at this commit and **agrees with it
+exactly**: twelve state-keyed edges plus the cold load, matching Figure 6's
+thirteen transitions, with both `Stage` self-edges present. A state name that
+drifts from this figure is a code defect, not a documentation one.
 
-## 4. The screen flow, before and after
+### 5.2 What the machine changes
 
-The pre-migration product had **one** screen. There was no router, no hash
-handling and no History API use anywhere: seven visual states were produced by
-toggling CSS classes on a single markup tree, and nothing distinguished a legal
-transition from an illegal one — any state could show anything.
+- The screen router is an **explicit state machine**, not ad-hoc show and hide.
+  It subsumes the retained `.game-message` overlay, so win, continued win, loss
+  and stage clear all resolve through one machine rather than through the two
+  class toggles of Figure 6a.
+- A trigger the state in force does not declare **takes no edge**: it is
+  reported and the state stands, so there is no imperative way to put a state
+  on screen (`DL-ROUTER-04`).
+- Three names exist for one concept and must not be conflated. The engine's
+  in-class flag is **`continuedPlay`**, its continue-after-win **method** is
+  **`continuePlaying()`**, and both the **input event name** and the
+  **persisted property name** remain the frozen **`keepPlaying`**
+  (`DL-ENGINE-04`). The Won to Stage transition is driven by the frozen input
+  event name.
+- The z-index ladder is extended upward rather than renumbered: the existing
+  `1 / 2 / 10 / 20 / 100` gains HUD 200, screen overlays 300, modal and reward
+  400, and the diagnostics overlay 500.
+- The stage goal is config-driven, evaluated at `onAfterMove` and resolved at
+  `onStageEnd` (`DL-ENGINE-07`). Its schema is the subject of
+  [`../CONFIGURATION.md`](../CONFIGURATION.md#4-the-stage-configuration).
+- The reward draw's three cards are sampled without replacement from the
+  `relic-draw` substream, which is what makes the no-duplicate rule structural
+  rather than a retry loop (`DL-DRAW-01`).
+- The canvas is `aria-hidden` and semantics arrive through a parallel focusable
+  DOM layer with a live region; **Figure 3 — Component Interaction: Input,
+  Engine, Hook Bus, Relics, Renderer, Persistence**, in
+  [`component-interaction.md`](component-interaction.md), shows that layer
+  beside the canvas and is not redrawn here.
 
-**Figure 6a — Before: Seven Board States Produced by CSS Class Toggles on One
-Screen.**
+## 6. Why both figures are published
 
-```mermaid
-stateDiagram-v2
-    [*] --> ColdStart : page load
-    ColdStart --> FreshGame : no stored board
-    ColdStart --> RestoredGame : stored board parsed
-    FreshGame --> InPlay
-    RestoredGame --> InPlay
-    InPlay --> InPlay : move
-    InPlay --> Won : 2048 reached, .game-won
-    InPlay --> Lost : no moves, .game-over
-    Won --> ContinuedWin : keep playing
-    ContinuedWin --> InPlay
-    Lost --> FreshGame : restart
-    Won --> FreshGame : restart
-```
+**Rule 2** of this project's governing rules, Visual Architecture
+Documentation, requires that where a deliverable modifies an existing
+architecture, **both states be shown, never the target state alone**. Figure 6
+depicts a screen model that supersedes an existing one rather than adding to a
+blank page: the single class-toggled screen of Figure 6a is replaced by a
+declared machine, and its two class toggles are replaced by transitions a table
+either declares or refuses.
 
-**Legend for Figure 6a.** *Before: Seven Board States Produced by CSS Class
-Toggles on One Screen.* Each node is a **visual** state of the one screen, not a
-state of any machine — the transitions were the side effects of two class
-toggles and a `JSON.parse`, and no table declared them. There was no state a
-player could be in that the markup refused to render, which is exactly what
-`Figure 6b` fixes.
+Figure 6a and Figure 6 are therefore a **mandatory pair**. Neither is published
+alone, neither is removed without the other, and a change that adds or removes
+a state in one is incomplete until the other shows what became of it. Read
+together they answer one question — what states can the player be in, and what
+moves between them — in the before state and in the after state. Read apart,
+Figure 6 would claim a first navigation model without showing what there was
+instead, and Figure 6a would document a screen that no longer exists.
 
-**Figure 6b — After: The Screen Flow as a Declared State Machine.**
+The same obligation is discharged for the module architecture by the Figure 1
+and Figure 2 pair in [`ARCHITECTURE.md`](ARCHITECTURE.md), which is also the
+before state Figure 5 relies on.
 
-```mermaid
-stateDiagram-v2
-    [*] --> runStart : initial
-    runStart --> stage : beginRun
-    stage --> stage : move
-    stage --> stage : restart
-    stage --> stageClear : stageGoalMet
-    stage --> won : winReached
-    stage --> gameOver : noMovesAvailable
-    stageClear --> reward : stageEnd
-    reward --> stage : rewardSelected
-    won --> stage : keepPlaying
-    won --> runSummary : endRun
-    gameOver --> runSummary : acknowledge
-    runSummary --> runStart : newRun
-    note right of reward
-        Three cards drawn without replacement
-        from the relic-draw substream, so no
-        duplicate can appear in one offer
-    end note
-    note right of gameOver
-        The terminal overlay keeps the
-        pre-migration cadence: a 1200ms
-        delay, then an 800ms fade
-    end note
-```
+---
 
-**Legend for Figure 6b.** *After: The Screen Flow as a Declared State Machine.*
-Each node is one of the seven states of `SCREEN_NAMES`, each labelled edge is a
-trigger of `ROUTER_TRIGGERS`, and the whole edge set is the frozen `TRANSITIONS`
-table of `src/ui/screen-router.ts` — twelve state-keyed edges plus the cold load.
-A **note** carries a constraint inherited from elsewhere in the system. The
-decisive difference from `Figure 6a` is that a trigger the state in force does
-not declare **takes no edge**: it is refused and counted rather than applied, so
-there is no imperative way to put a state on screen (`DL-ROUTER-12`,
-`DL-ROUTER-19`). The `stageClear` state is rendered by
-`src/ui/screens/stage-progress.ts`, and it is reachable only because
-`stage:end` takes exactly one edge rather than two (`DL-ROUTER-36`).
+## 7. Related figures
 
-## 5. Where to look next
+Each document below owns its figures and is the authority on its own subject.
+Nothing here restates them.
 
-- [`data-flow.md`](data-flow.md) — `Figure 4`, where each dispatch sits inside a
-  turn, and `Figure 7`, the substream forks named above.
-- [`component-interaction.md`](component-interaction.md) — `Figure 3`, the bus as
-  one boundary among the running components.
-- [`ARCHITECTURE.md`](ARCHITECTURE.md) — `Figure 2`, why relics and the renderer
-  are peers on this bus.
-- [`../RELICS.md`](../RELICS.md) — which five relics carry charges, and what each
-  hook does.
+- [`ARCHITECTURE.md`](ARCHITECTURE.md) — **Figure 1 — As-Is Architecture:
+  Layered Globals with a Push-Based Actuator**, the before state for Figure 5,
+  and **Figure 2 — To-Be Architecture: Event-Driven Engine with Subscribed
+  Renderer and Hook Bus**, where relics and the renderer become peers on this
+  bus.
+- [`component-interaction.md`](component-interaction.md) — **Figure 3 —
+  Component Interaction: Input, Engine, Hook Bus, Relics, Renderer,
+  Persistence**, the bus as one boundary among the running components.
+- [`data-flow.md`](data-flow.md) — **Figure 4 — Turn Data Flow: From
+  Keystroke to Composited Frame and Persisted Run State**, where each dispatch
+  of Figure 5 sits inside a turn, and **Figure 7 — Seeded Determinism: One Run
+  Seed Fanned into Named RNG Substreams**, the substreams named above.
+- [`../TRACEABILITY_MATRIX.md`](../TRACEABILITY_MATRIX.md) — **Figure 8 —
+  File Transformation Map**, and the construct-by-construct bidirectional
+  mapping from each retired `js/` source to the module carrying it now. Figure
+  8 is not in this folder and is not reproduced here.
+- [`../RELICS.md`](../RELICS.md) — the relic catalogue: sixteen relics across
+  four families, the hooks each binds, and which five carry charges.
+- [`../CONFIGURATION.md`](../CONFIGURATION.md) — the rules and stage
+  configuration reference, including the stage-goal schema.
+- [`../OBSERVABILITY.md`](../OBSERVABILITY.md) — the observability signal
+  path, the correlation-identifier derivation behind the Logger lane of Figure
+  5, and the six health checks.
+- [`../DECISION_LOG.md`](../DECISION_LOG.md) — all rationale, for every
+  decision any of these three figures shows.

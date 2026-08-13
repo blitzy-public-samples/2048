@@ -146,10 +146,6 @@ import type { ScorePanel } from '../components/score-panel';
 import { createScorePanel } from '../components/score-panel';
 import type { Screen, ScreenContext } from '../screen-router';
 
-/* ==========================================================================
- * 1. Selectors, classes, attributes and copy
- * ========================================================================== */
-
 /** Selector of the terminal overlay. index.html. */
 const MESSAGE_SELECTOR = '.game-message';
 
@@ -352,10 +348,6 @@ export const hudCopy = Object.freeze({
 
 export type HudCopy = typeof hudCopy;
 
-/* ==========================================================================
- * 2. Report names
- * ========================================================================== */
-
 /** Counter raised once per completed construction. */
 const MOUNTED_METRIC = 'ui.hud.mounted';
 
@@ -429,10 +421,6 @@ const ANNOUNCED_METRIC = 'ui.hud.announced';
 
 /** Counter raised per injected reader that raised or answered badly. */
 const READER_FAULT_METRIC = 'ui.hud.reader.faulted';
-
-/* ==========================================================================
- * 3. Public API
- * ========================================================================== */
 
 /** Which terminal state the overlay is showing, and `null` for none. */
 export type HudTerminalState = 'won' | 'over' | null;
@@ -1186,10 +1174,6 @@ export function createHud(options: HudOptions = {}): Hud {
     seenRelics = true;
   };
 
-  /* ------------------------------------------------------------------------
-   * The run-status group
-   * ---------------------------------------------------------------------- */
-
   /** Releases the run-status group's `hidden`, once, on the first write. */
   const revealGroup = (): void => {
     if (hudGroup !== null && hudGroup.hidden) {
@@ -1232,10 +1216,6 @@ export function createHud(options: HudOptions = {}): Hud {
 
     return degraded;
   };
-
-  /* ------------------------------------------------------------------------
-   * The stage indicator
-   * ---------------------------------------------------------------------- */
 
   /**
    * Shows or clears the run-not-saved notice, and announces a CHANGE of it
@@ -1345,9 +1325,6 @@ export function createHud(options: HudOptions = {}): Hud {
   /**
    * Builds the goal track, whose fill the reported fraction drives.
    *
-   * DECORATIVE: the track carries `aria-hidden`, and the quantity it depicts
-   * is announced by the `.hud-value` sibling beside it. See `DL-HUD-10`.
-   *
    * @param doc Document the nodes are created in.
    * @param fraction Fraction of the goal reached, in [0, 1].
    * @returns The track.
@@ -1408,9 +1385,6 @@ export function createHud(options: HudOptions = {}): Hud {
     const goal = view.goal;
     const fraction = view.goalFraction;
 
-    // The measured quantity as the payload stated it, and otherwise derived
-    // from the target and the reported fraction, so the readout carries exactly
-    // the progress the run reported and cannot disagree with it.
     const measured =
       goal === null
         ? 0
@@ -1545,12 +1519,6 @@ export function createHud(options: HudOptions = {}): Hud {
 
   /**
    * Builds a held record from a payload's relic entry.
-   *
-   * A payload's slice carries an identifier and a charge count, so the name and
-   * the tier come from the two resolvers and the remaining declaration members
-   * are the neutral ones a tray row does not render. `pickupOrder` is the
-   * entry's position in the slice, which the provider supplies in pickup
-   * order.
    *
    * @param entry Entry to build from.
    * @param index Position in the slice.
@@ -1922,22 +1890,9 @@ export function createHud(options: HudOptions = {}): Hud {
     return ids;
   };
 
-  /* ------------------------------------------------------------------------
-   * The score outlets and the terminal overlay
-   * ---------------------------------------------------------------------- */
-
   /**
    * Writes the score pair through `ScorePanel`, which is the only component
    * that touches either outlet.
-   *
-   * The best score is handed over EXACTLY as it arrived: never coerced,
-   * never compared, never cached and never formatted.
-   * js/local_storage_manager.js L43-L45 returns the raw stored string when a
-   * value is present and the number `0` when it is absent, and
-   * js/game_manager.js L80-L82 relies on the relational coercion of that
-   * string.
-   * The value rendered is the one js/game_manager.js L95 re-read from storage
-   * after the possible write, so what is shown equals what is persisted.
    *
    * @param score Score the payload carried.
    * @param best Best score the payload carried.
@@ -2022,10 +1977,6 @@ export function createHud(options: HudOptions = {}): Hud {
     overlay.classList.remove(WON_CLASS);
     overlay.classList.remove(OVER_CLASS);
   };
-
-  /* ------------------------------------------------------------------------
-   * The single write path
-   * ---------------------------------------------------------------------- */
 
   /**
    * Writes one normalised view and records what it put on screen.
@@ -2283,10 +2234,6 @@ export function createHud(options: HudOptions = {}): Hud {
     });
   };
 
-  /* ------------------------------------------------------------------------
-   * Teardown
-   * ---------------------------------------------------------------------- */
-
   /** Removes every node this screen created and releases its collaborators. */
   const destroy = (): void => {
     if (destroyed) {
@@ -2348,9 +2295,6 @@ export function createHud(options: HudOptions = {}): Hud {
 
       mountedHost = host;
 
-      // The router is the authority that resolves and injects the container, so
-      // the outlets that did not resolve at construction are resolved INSIDE it
-      // rather than through a second document-wide lookup.
       hudGroup = hudGroup ?? asHtmlElement(host);
       stageOutlet =
         stageOutlet ??

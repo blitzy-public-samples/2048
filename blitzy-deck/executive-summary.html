@@ -5,332 +5,770 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>2048 Roguelike — Executive Summary</title>
 
-    <!-- Pinned CDN versions. No local file dependency: the Blitzy theme is
-         inlined below rather than linked, so this file is self-contained and is
-         deliberately outside the Vite entry graph. -->
+    <!-- Single self-contained artifact. Every external reference below is an
+         absolute, version-pinned CDN URL; the Blitzy theme is inlined rather
+         than linked, so this file carries no local dependency and stays
+         outside the Vite entry graph. -->
+
+    <!-- reveal.js 5.1.0, base stylesheet only: it supplies layout, scaling and
+         transitions. No bundled reveal theme is loaded, so nothing competes
+         with the inlined Blitzy identity below. -->
     <link
       rel="stylesheet"
       href="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reveal.css"
     />
-    <link
-      rel="preconnect"
-      href="https://fonts.googleapis.com"
-    />
+
+    <!-- Inter, Space Grotesk and Fira Code at the weights the Blitzy type
+         system uses. -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
       rel="stylesheet"
-      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&family=Space+Grotesk:wght@500;700&family=Fira+Code:wght@400;500&display=swap"
+      href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500&family=Inter:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap"
     />
 
     <style>
       /* ==================================================================
-       * Blitzy visual identity, inlined.
+       * Blitzy reveal.js theme, inlined.
        * ================================================================== */
-      :root {
-        --blitzy-purple-900: #1b0f38;
-        --blitzy-purple-800: #2a1259;
-        --blitzy-purple-700: #3d1a7a;
-        --blitzy-purple-500: #6d3ce8;
-        --blitzy-purple-300: #a98bf7;
-        --blitzy-teal-500: #12c7c0;
-        --blitzy-teal-300: #62e6df;
-        --blitzy-ink: #f4f1fb;
-        --blitzy-ink-dim: #c6bce0;
-        --blitzy-ink-faint: #9a8fbc;
-        --blitzy-surface: rgba(255, 255, 255, 0.05);
-        --blitzy-surface-strong: rgba(255, 255, 255, 0.09);
-        --blitzy-border: rgba(169, 139, 247, 0.28);
-        --blitzy-good: #34d399;
-        --blitzy-warn: #fbbf24;
-        --blitzy-bad: #fb7185;
-        --blitzy-hero-gradient: linear-gradient(
-          135deg,
-          #1b0f38 0%,
-          #3d1a7a 55%,
-          #0f4f6b 100%
-        );
-        --blitzy-divider-gradient: linear-gradient(
-          120deg,
-          #2a1259 0%,
-          #6d3ce8 60%,
-          #12c7c0 100%
-        );
-        --blitzy-accent-bar-gradient: linear-gradient(
-          90deg,
-          var(--blitzy-purple-500) 0%,
-          var(--blitzy-teal-500) 100%
-        );
-        --blitzy-font-body: "Inter", "Helvetica Neue", Arial, sans-serif;
-        --blitzy-font-display: "Space Grotesk", "Inter", sans-serif;
-        --blitzy-font-mono: "Fira Code", "SFMono-Regular", Consolas, monospace;
-        --blitzy-space-1: 8px;
-        --blitzy-space-2: 16px;
-        --blitzy-space-3: 24px;
-        --blitzy-space-4: 40px;
-        --blitzy-radius: 14px;
-      }
 
-      .reveal {
-        font-family: var(--blitzy-font-body);
-        color: var(--blitzy-ink);
-        font-size: 30px;
-      }
+:root {
+  --blitzy-primary: #5B39F3;
+  --blitzy-primary-dark: #2D1C77;
+  --blitzy-primary-navy: #1A105F;
+  --blitzy-primary-light: #7A6DEC;
+  --blitzy-primary-deep: #4101DB;
+  --blitzy-accent-teal: #94FAD5;
+  --blitzy-surface-0: #FFFFFF;
+  --blitzy-surface-1: #F4EFF6;
+  --blitzy-surface-2: #F2F0FE;
+  --blitzy-surface-3: #F5F5F5;
+  --blitzy-border: #D9D9D9;
+  --blitzy-border-soft: rgba(91, 57, 243, 0.18);
+  --blitzy-text: #333333;
+  --blitzy-text-muted: #999999;
+  --blitzy-text-invert: #FFFFFF;
+  --ff-body: 'Inter', system-ui, sans-serif;
+  --ff-display: 'Space Grotesk', 'Inter', sans-serif;
+  --ff-mono: 'Fira Code', 'Courier New', monospace;
+  --gradient-hero: linear-gradient(68deg, #7A6DEC 15.56%, #5B39F3 62.74%, #4101DB 84.44%);
+  --gradient-divider: linear-gradient(135deg, #2D1C77 0%, #5B39F3 100%);
+  --gradient-accent-bar: linear-gradient(90deg, #5B39F3 0%, #94FAD5 100%);
+}
 
-      /* `.reveal-viewport` is a class reveal.js adds to `<body>` at runtime, so
-         the page background is declared on the document as well: without it a
-         deck whose scripts did not load draws light text on the browser's
-         default white. DL-DOC-07. */
+      /* ---------------------------------------------------------------- *
+       * Stage and typography
+       * ---------------------------------------------------------------- */
+
       html,
       body,
       .reveal-viewport {
-        background: var(--blitzy-purple-900);
+        background: var(--blitzy-surface-3);
       }
 
-      /* reveal.js paints its own chrome in its stylesheet's default ink, which
-         is black on the dark slides and unreadable on the bright dividers, so
-         both surfaces are themed here. DL-DOC-07. */
-      .reveal .controls {
-        color: var(--blitzy-teal-300);
+      .reveal {
+        font-family: var(--ff-body);
+        font-size: 28px;
+        font-weight: 400;
+        color: var(--blitzy-text);
       }
 
-      .reveal .progress {
-        color: var(--blitzy-teal-500);
+      .reveal .slides {
+        text-align: left;
+      }
+
+      /* Each section is exactly the configured 1920x1080 stage, so a slide
+         background fills the visible frame and vertical centring resolves to a
+         zero offset. reveal.js writes `display` as an inline style on the
+         slides it shows, so the section cannot itself be the layout box: the
+         inner wrapper owns the column instead, and reveal keeps control of
+         which sections are displayed. */
+      .reveal .slides section {
+        box-sizing: border-box;
+        width: 100%;
+        height: 1080px;
+        padding: 0;
+        background: var(--blitzy-surface-0);
+        overflow: hidden;
+      }
+
+      .slide-inner {
+        box-sizing: border-box;
+        display: flex;
+        flex-direction: column;
+        width: 100%;
+        height: 100%;
+        padding: 76px 104px;
       }
 
       .reveal h1,
       .reveal h2,
-      .reveal h3 {
-        font-family: var(--blitzy-font-display);
-        color: var(--blitzy-ink);
+      .reveal h3,
+      .reveal h4 {
+        margin: 0;
+        font-family: var(--ff-display);
+        font-weight: 600;
+        color: var(--blitzy-primary-dark);
+        letter-spacing: -0.015em;
+        line-height: 1.1;
         text-transform: none;
-        letter-spacing: -0.01em;
-        margin: 0 0 var(--blitzy-space-2);
+        text-shadow: none;
       }
 
       .reveal h1 {
         font-size: 92px;
-        line-height: 1.05;
+        font-weight: 700;
       }
 
       .reveal h2 {
-        font-size: 58px;
-      }
-
-      .reveal h3 {
-        font-size: 40px;
-        color: var(--blitzy-teal-300);
-      }
-
-      .reveal p,
-      .reveal li {
-        line-height: 1.45;
-      }
-
-      .reveal section {
-        text-align: left;
-      }
-
-      /* Opaque rather than transparent: the counter sits over both the dark
-         content slides and the bright divider gradient. DL-DOC-07. */
-      .reveal .slide-number {
-        font-family: var(--blitzy-font-mono);
-        background: var(--blitzy-purple-900);
-        color: var(--blitzy-ink-faint);
-      }
-
-      /* ---------- Slide type: title ---------- */
-      .slide-title {
-        background: var(--blitzy-hero-gradient);
-        padding: var(--blitzy-space-4);
-      }
-
-      .slide-title .eyebrow {
-        font-family: var(--blitzy-font-mono);
-        font-size: 24px;
-        letter-spacing: 0.18em;
-        text-transform: uppercase;
-        color: var(--blitzy-teal-300);
-        margin: 0 0 var(--blitzy-space-2);
-      }
-
-      .slide-title .lede {
-        font-size: 34px;
-        color: var(--blitzy-ink-dim);
-        max-width: 26ch;
-      }
-
-      /* ---------- Slide type: divider ---------- */
-      .slide-divider {
-        background: var(--blitzy-divider-gradient);
-        padding: var(--blitzy-space-4);
-      }
-
-      .slide-divider h2 {
-        font-size: 74px;
-      }
-
-      .slide-divider .step {
-        font-family: var(--blitzy-font-mono);
-        font-size: 26px;
-        color: rgba(255, 255, 255, 0.72);
-      }
-
-      /* ---------- Slide type: content ---------- */
-      .slide-content {
-        padding: var(--blitzy-space-3) var(--blitzy-space-4);
-      }
-
-      .slide-content h2 {
         font-size: 52px;
       }
 
-      /* ---------- Slide type: closing ---------- */
-      .slide-closing {
-        background: var(--blitzy-hero-gradient);
-        padding: var(--blitzy-space-4);
-      }
-
-      /* ---------- Components ---------- */
-      .accent-bar {
-        width: 220px;
-        height: 8px;
-        border-radius: 999px;
-        background: var(--blitzy-accent-bar-gradient);
-        margin: 0 0 var(--blitzy-space-3);
-      }
-
-      .icon-row {
-        display: flex;
-        gap: var(--blitzy-space-3);
-        margin: 0 0 var(--blitzy-space-3);
-      }
-
-      .icon-badge {
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        width: 76px;
-        height: 76px;
-        border-radius: var(--blitzy-radius);
-        background: var(--blitzy-surface-strong);
-        border: 1px solid var(--blitzy-border);
-      }
-
-      .icon-badge svg {
-        width: 40px;
-        height: 40px;
-        stroke: var(--blitzy-teal-300);
-        stroke-width: 1.8;
-      }
-
-      .bullets {
-        list-style: none;
-        margin: 0;
-        padding: 0;
-      }
-
-      .bullets li {
-        display: flex;
-        align-items: flex-start;
-        gap: var(--blitzy-space-2);
-        margin: 0 0 var(--blitzy-space-2);
+      .reveal h3 {
         font-size: 30px;
+        font-weight: 600;
       }
 
-      .bullets svg {
-        flex: 0 0 auto;
-        width: 30px;
-        height: 30px;
-        margin-top: 6px;
-        stroke: var(--blitzy-purple-300);
+      .reveal p {
+        margin: 0 0 16px;
+        line-height: 1.5;
+      }
+
+      .reveal ul {
+        margin: 0 0 18px;
+        padding: 0;
+        list-style: none;
+      }
+
+      .reveal ul li {
+        position: relative;
+        margin: 0 0 14px;
+        padding-left: 34px;
+        line-height: 1.45;
+      }
+
+      .reveal ul li::before {
+        content: '';
+        position: absolute;
+        top: 0.52em;
+        left: 4px;
+        width: 12px;
+        height: 12px;
+        border-radius: 3px;
+        background: var(--gradient-accent-bar);
+      }
+
+      .reveal strong {
+        font-weight: 600;
+        color: var(--blitzy-primary-deep);
+      }
+
+      .reveal code {
+        font-family: var(--ff-mono);
+        font-size: 0.88em;
+        font-weight: 500;
+        padding: 2px 8px;
+        border: 1px solid var(--blitzy-border-soft);
+        border-radius: 6px;
+        background: var(--blitzy-surface-2);
+        color: var(--blitzy-primary-deep);
+        white-space: nowrap;
+      }
+
+      .reveal .controls {
+        color: var(--blitzy-primary);
+      }
+
+      .reveal .progress {
+        height: 6px;
+        color: var(--blitzy-primary);
+      }
+
+      /* ---------------------------------------------------------------- *
+       * Components
+       * ---------------------------------------------------------------- */
+
+      .eyebrow {
+        display: inline-flex;
+        align-items: center;
+        gap: 12px;
+        margin: 0 0 22px;
+        font-family: var(--ff-mono);
+        font-size: 22px;
+        font-weight: 500;
+        letter-spacing: 0.16em;
+        text-transform: uppercase;
+        color: var(--blitzy-primary);
+      }
+
+      .eyebrow svg {
+        width: 26px;
+        height: 26px;
         stroke-width: 2;
       }
 
-      .two-up {
+      .accent-bar {
+        flex: none;
+        width: 260px;
+        height: 10px;
+        margin: 26px 0 0;
+        border-radius: 999px;
+        background: var(--gradient-accent-bar);
+      }
+
+      .hero-icon {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 132px;
+        height: 132px;
+        margin: 0 0 34px;
+        border: 1px solid rgba(255, 255, 255, 0.42);
+        border-radius: 30px;
+        background: rgba(255, 255, 255, 0.14);
+        color: var(--blitzy-accent-teal);
+      }
+
+      .hero-icon svg {
+        width: 72px;
+        height: 72px;
+        stroke-width: 1.6;
+      }
+
+      .kpi-grid {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 26px;
+        margin: 12px 0 0;
+      }
+
+      .kpi-card {
+        display: flex;
+        flex-direction: column;
+        padding: 34px 30px 32px;
+        border: 1px solid var(--blitzy-border-soft);
+        border-radius: 20px;
+        background: var(--blitzy-surface-2);
+      }
+
+      .kpi-icon {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 66px;
+        height: 66px;
+        margin: 0 0 20px;
+        border-radius: 16px;
+        background: var(--gradient-divider);
+        color: var(--blitzy-text-invert);
+      }
+
+      .kpi-icon svg {
+        width: 34px;
+        height: 34px;
+        stroke-width: 2;
+      }
+
+      .kpi-value {
+        font-family: var(--ff-display);
+        font-size: 78px;
+        font-weight: 700;
+        line-height: 1;
+        color: var(--blitzy-primary-deep);
+      }
+
+      .kpi-label {
+        margin: 14px 0 0;
+        font-size: 23px;
+        font-weight: 500;
+        line-height: 1.35;
+        color: var(--blitzy-text);
+      }
+
+      .kpi-card .kpi-note {
+        margin: 10px 0 0;
+        font-family: var(--ff-mono);
+        font-size: 18px;
+        color: var(--blitzy-text-muted);
+      }
+
+      .icon-row {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 22px;
+        margin: 10px 0 0;
+      }
+
+      .icon-row .step {
+        display: flex;
+        flex-direction: column;
+        padding: 26px 24px;
+        border: 1px solid var(--blitzy-border);
+        border-radius: 18px;
+        background: var(--blitzy-surface-0);
+      }
+
+      .icon-row .step-icon {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 56px;
+        height: 56px;
+        margin: 0 0 16px;
+        border-radius: 14px;
+        background: var(--blitzy-surface-2);
+        color: var(--blitzy-primary);
+      }
+
+      .icon-row .step-icon svg {
+        width: 30px;
+        height: 30px;
+        stroke-width: 2;
+      }
+
+      .icon-row .step-title {
+        font-family: var(--ff-display);
+        font-size: 24px;
+        font-weight: 600;
+        color: var(--blitzy-primary-dark);
+      }
+
+      .icon-row .step-body {
+        margin: 10px 0 0;
+        font-size: 21px;
+        line-height: 1.4;
+        color: var(--blitzy-text);
+      }
+
+      .brand-lockup {
+        display: flex;
+        align-items: center;
+        gap: 18px;
+        margin: 0;
+        font-family: var(--ff-display);
+        font-size: 32px;
+        font-weight: 700;
+        letter-spacing: 0.02em;
+        color: var(--blitzy-text-invert);
+      }
+
+      .brand-lockup .brand-mark {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 62px;
+        height: 62px;
+        border-radius: 16px;
+        background: var(--gradient-accent-bar);
+        color: var(--blitzy-primary-navy);
+      }
+
+      .brand-lockup .brand-mark svg {
+        width: 34px;
+        height: 34px;
+        stroke-width: 2.2;
+      }
+
+      .brand-lockup .brand-note {
+        font-family: var(--ff-mono);
+        font-size: 20px;
+        font-weight: 400;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--blitzy-accent-teal);
+      }
+
+      /* ---------------------------------------------------------------- *
+       * Styled tables
+       * ---------------------------------------------------------------- */
+
+      .styled-table {
+        width: 100%;
+        border-collapse: separate;
+        border-spacing: 0;
+        border: 1px solid var(--blitzy-border-soft);
+        border-radius: 16px;
+        overflow: hidden;
+        font-size: 21px;
+        line-height: 1.35;
+      }
+
+      .styled-table caption {
+        margin: 0 0 12px;
+        font-family: var(--ff-display);
+        font-size: 25px;
+        font-weight: 600;
+        text-align: left;
+        color: var(--blitzy-primary-dark);
+      }
+
+      .styled-table th {
+        padding: 14px 18px;
+        background: var(--gradient-divider);
+        font-family: var(--ff-mono);
+        font-size: 17px;
+        font-weight: 500;
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+        text-align: left;
+        color: var(--blitzy-text-invert);
+      }
+
+      .styled-table td {
+        padding: 13px 18px;
+        border-top: 1px solid var(--blitzy-border);
+        vertical-align: top;
+        color: var(--blitzy-text);
+      }
+
+      .styled-table tbody tr:nth-child(even) td {
+        background: var(--blitzy-surface-1);
+      }
+
+      .styled-table td.was {
+        color: var(--blitzy-text-muted);
+      }
+
+      .styled-table td.now {
+        font-weight: 500;
+        color: var(--blitzy-primary-dark);
+      }
+
+      .styled-table td code,
+      .icon-row code {
+        font-size: 0.84em;
+        padding: 1px 6px;
+      }
+
+      .styled-table.compact {
+        font-size: 19px;
+      }
+
+      .styled-table.compact th {
+        padding: 11px 14px;
+        font-size: 15px;
+      }
+
+      .styled-table.compact td {
+        padding: 10px 14px;
+      }
+
+      /* ---------------------------------------------------------------- *
+       * Mermaid container
+       * ---------------------------------------------------------------- */
+
+      /* reveal.js styles every `pre` as a code listing — shadowed, boxed and
+         shrunk to 0.55em. A Mermaid host is not a code listing, so all of that
+         is unwound here and the produced SVG is bounded to the stage. */
+      .reveal pre.mermaid {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        box-sizing: border-box;
+        width: 100%;
+        max-width: 100%;
+        flex: 1 1 auto;
+        min-height: 0;
+        margin: 0 0 18px;
+        padding: 0;
+        border-radius: 0;
+        background: none;
+        box-shadow: none;
+        font-family: var(--ff-mono);
+        font-size: 17px;
+        line-height: 1.4;
+        text-align: center;
+        white-space: pre-wrap;
+        word-wrap: break-word;
+        overflow: hidden;
+        color: var(--blitzy-text-muted);
+      }
+
+      /* The raw diagram source is hidden until Mermaid has drawn it, so a
+         figure never flashes its own text. If the library never arrives, the
+         fallback class below puts the source back on screen. */
+      .reveal pre.mermaid:not([data-processed]) {
+        visibility: hidden;
+      }
+
+      html.mermaid-unavailable .reveal pre.mermaid {
+        visibility: visible;
+      }
+
+      /* Mermaid writes an inline `max-width` on the SVG it produces, so the
+         fit-to-slide constraints have to outrank it. A viewBox-only SVG has no
+         intrinsic width, so `width: auto` stretches it to the column and the
+         height follows the aspect ratio: `max-height` is therefore the control
+         that decides the size. It is bound to the host rather than to a fixed
+         number, because the room a figure has left depends on how many lines
+         its title and legend take, and a host clips what it cannot show. */
+      .reveal pre.mermaid svg {
+        display: block;
+        width: auto !important;
+        height: auto !important;
+        max-width: 100% !important;
+        max-height: 100% !important;
+        margin: 0 auto;
+      }
+
+      /* The legend and its note share one row beneath a full-width figure, so
+         the figure keeps the height that stacking them would have cost. */
+      .figure-foot {
+        flex: none;
+        display: flex;
+        gap: 30px;
+        align-items: stretch;
+      }
+
+      .figure-foot .diagram-legend {
+        flex: 1 1 58%;
+      }
+
+      .figure-foot .figure-note {
+        flex: 1 1 42%;
+        display: flex;
+        align-items: center;
+        margin: 0;
+      }
+
+      /* Layout for a tall diagram: the figure takes the full slide height in
+         one column and its legend sits beside it rather than beneath it. */
+      .figure-split {
+        display: grid;
+        grid-template-columns: 1.12fr 0.88fr;
+        gap: 40px;
+        flex: 1 1 auto;
+        min-height: 0;
+        align-items: stretch;
+      }
+
+      .figure-split .figure-pane {
+        display: flex;
+        flex-direction: column;
+        min-height: 0;
+      }
+
+      .figure-split .figure-side {
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        min-height: 0;
+      }
+
+      /* In the side column the legend and its note stack, because the column is
+         narrow: only a full-width figure puts them side by side. */
+      .figure-split .figure-foot {
+        display: block;
+      }
+
+      .figure-split .figure-note {
+        display: block;
+        margin: 18px 0 0;
+      }
+
+      /* A figure in its own column keeps the height the legend would otherwise
+         have taken; the host-bound cap above sizes it to that column. */
+
+      .diagram-legend {
+        flex: none;
+        margin: 0;
+        padding: 16px 22px;
+        border-left: 6px solid var(--blitzy-primary);
+        border-radius: 0 12px 12px 0;
+        background: var(--blitzy-surface-1);
+        font-size: 21px;
+        line-height: 1.4;
+      }
+
+      .diagram-legend .legend-title {
+        font-family: var(--ff-mono);
+        font-size: 16px;
+        font-weight: 500;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        color: var(--blitzy-primary);
+      }
+
+      .diagram-legend p {
+        margin: 6px 0 0;
+      }
+
+      .figure-note {
+        flex: none;
+        margin: 14px 0 0;
+        font-size: 22px;
+        line-height: 1.4;
+        color: var(--blitzy-text);
+      }
+
+      .slide-head {
+        flex: none;
+        margin: 0 0 20px;
+      }
+
+      .slide-head h2 {
+        font-size: 42px;
+      }
+
+      .two-column {
         display: grid;
         grid-template-columns: 1fr 1fr;
-        gap: var(--blitzy-space-3);
+        gap: 34px;
         align-items: start;
       }
 
-      .metric-grid {
-        display: grid;
-        grid-template-columns: repeat(4, 1fr);
-        gap: var(--blitzy-space-2);
+      .column-title {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        margin: 0 0 16px;
+        font-family: var(--ff-display);
+        font-size: 27px;
+        font-weight: 600;
+        color: var(--blitzy-primary-dark);
       }
 
-      .metric {
-        padding: var(--blitzy-space-2);
-        border-radius: var(--blitzy-radius);
-        background: var(--blitzy-surface);
-        border: 1px solid var(--blitzy-border);
+      .column-title svg {
+        width: 30px;
+        height: 30px;
+        stroke-width: 2;
+        color: var(--blitzy-primary);
       }
 
-      .metric .value {
-        display: block;
-        font-family: var(--blitzy-font-display);
-        font-size: 54px;
-        color: var(--blitzy-teal-300);
-      }
-
-      .metric .label {
-        display: block;
-        font-size: 20px;
-        color: var(--blitzy-ink-dim);
-      }
-
-      .risk-table {
-        width: 100%;
-        border-collapse: collapse;
+      .lede {
+        flex: none;
+        margin: 0 0 22px;
         font-size: 26px;
+        line-height: 1.45;
+        color: var(--blitzy-text);
       }
 
-      .risk-table th,
-      .risk-table td {
-        padding: 10px 14px;
-        text-align: left;
-        border-bottom: 1px solid var(--blitzy-border);
+      .source-note {
+        flex: none;
+        margin: auto 0 0;
+        font-family: var(--ff-mono);
+        font-size: 18px;
+        letter-spacing: 0.02em;
+        color: var(--blitzy-text-muted);
       }
 
-      .risk-table th {
-        font-size: 20px;
-        letter-spacing: 0.06em;
-        text-transform: uppercase;
-        color: var(--blitzy-ink-faint);
+      /* ---------------------------------------------------------------- *
+       * Slide types
+       * ---------------------------------------------------------------- */
+
+      .reveal .slides section.slide-title {
+        background: var(--gradient-hero);
+        color: var(--blitzy-text-invert);
       }
 
-      .risk-table svg {
-        width: 26px;
-        height: 26px;
-        stroke: var(--blitzy-warn);
-        vertical-align: -5px;
+      .slide-title .slide-inner {
+        justify-content: center;
       }
 
-      .command {
-        display: inline-block;
-        padding: 10px 18px;
-        border-radius: 8px;
-        background: rgba(0, 0, 0, 0.35);
-        border: 1px solid var(--blitzy-border);
-        font-family: var(--blitzy-font-mono);
-        font-size: 30px;
-        color: var(--blitzy-teal-300);
+      .slide-title h1,
+      .slide-title h2 {
+        color: var(--blitzy-text-invert);
       }
 
-      .caption {
+      .slide-title .eyebrow {
+        color: var(--blitzy-accent-teal);
+      }
+
+      .slide-title .subtitle {
+        max-width: 1320px;
+        margin: 30px 0 0;
+        font-size: 34px;
+        font-weight: 400;
+        line-height: 1.4;
+        color: rgba(255, 255, 255, 0.94);
+      }
+
+      .slide-title .audience {
+        margin: 22px 0 0;
+        font-family: var(--ff-mono);
         font-size: 22px;
-        color: var(--blitzy-ink-faint);
-        margin: var(--blitzy-space-1) 0 0;
+        letter-spacing: 0.06em;
+        color: var(--blitzy-accent-teal);
       }
 
-      .mermaid {
-        background: var(--blitzy-surface);
-        border: 1px solid var(--blitzy-border);
-        border-radius: var(--blitzy-radius);
-        padding: var(--blitzy-space-2);
+      .reveal .slides section.slide-divider {
+        background: var(--blitzy-primary-dark);
+        color: var(--blitzy-text-invert);
       }
 
-      .mermaid svg {
-        max-height: 620px;
+      .slide-divider .slide-inner {
+        align-items: center;
+        justify-content: center;
+        text-align: center;
+      }
+
+      .slide-divider h2 {
+        font-size: 84px;
+        color: var(--blitzy-text-invert);
+      }
+
+      .slide-divider .divider-icon {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 124px;
+        height: 124px;
+        margin: 0 0 36px;
+        border: 1px solid rgba(255, 255, 255, 0.34);
+        border-radius: 28px;
+        background: rgba(255, 255, 255, 0.12);
+        color: var(--blitzy-accent-teal);
+      }
+
+      .slide-divider .divider-icon svg {
+        width: 66px;
+        height: 66px;
+        stroke-width: 1.7;
+      }
+
+      .slide-divider .divider-note {
+        max-width: 1180px;
+        margin: 26px 0 0;
+        font-size: 27px;
+        line-height: 1.45;
+        color: rgba(255, 255, 255, 0.86);
+      }
+
+      .slide-divider .accent-bar {
+        margin: 34px auto 0;
+      }
+
+      .reveal .slides section.slide-closing {
+        background: var(--blitzy-primary-navy);
+        color: var(--blitzy-text-invert);
+      }
+
+      .slide-closing .slide-inner {
+        justify-content: center;
+      }
+
+      .slide-closing h2 {
+        font-size: 76px;
+        color: var(--blitzy-text-invert);
+      }
+
+      .slide-closing ul {
+        margin: 34px 0 0;
+        max-width: 1340px;
+        font-size: 30px;
+      }
+
+      .slide-closing ul li {
+        color: rgba(255, 255, 255, 0.94);
+      }
+
+      .slide-closing .closing-foot {
+        margin: 54px 0 0;
+      }
+
+      .slide-closing .accent-bar {
+        width: 420px;
+        margin: 22px 0 0;
       }
     </style>
   </head>
@@ -340,439 +778,1104 @@
       <div class="slides">
         <!-- 1. Title -->
         <section class="slide-title">
-          <div class="accent-bar"></div>
-          <p class="eyebrow">Delivery summary</p>
-          <h1>2048, rebuilt as a roguelike</h1>
-          <p class="lede">
-            A twelve-year-old browser game is now a run-based game with relics,
-            a 3D board, and the tests it never had.
-          </p>
-          <div class="icon-row" aria-hidden="true">
-            <span class="icon-badge"><i data-lucide="dices"></i></span>
-            <span class="icon-badge"><i data-lucide="boxes"></i></span>
-            <span class="icon-badge"><i data-lucide="shield-check"></i></span>
-            <span class="icon-badge"><i data-lucide="gauge"></i></span>
+          <div class="slide-inner">
+            <span class="hero-icon" aria-hidden="true"
+              ><i data-lucide="layers"></i
+            ></span>
+            <p class="eyebrow">
+              <i data-lucide="presentation" aria-hidden="true"></i>
+              Executive summary
+            </p>
+            <h1>2048, Rebuilt As A Roguelike</h1>
+            <p class="subtitle">
+              The rules engine was separated from the screen, then extended into a
+              run-based game of 2.5D blocks and collectable relics.
+            </p>
+            <p class="audience">Prepared for non-technical leadership</p>
+            <div class="accent-bar"></div>
           </div>
         </section>
 
-        <!-- 2. Divider -->
+        <!-- 2. Content — headline findings and KPI summary -->
+        <section>
+          <div class="slide-inner">
+            <div class="slide-head">
+              <p class="eyebrow">
+                <i data-lucide="gauge" aria-hidden="true"></i>
+                Headline findings
+              </p>
+              <h2>Four Numbers Summarise What Shipped</h2>
+            </div>
+            <div class="kpi-grid">
+              <div class="kpi-card">
+                <span class="kpi-icon" aria-hidden="true"
+                  ><i data-lucide="package"></i
+                ></span>
+                <span class="kpi-value">11</span>
+                <p class="kpi-label">Pinned dependencies</p>
+                <p class="kpi-note">previously none</p>
+              </div>
+              <div class="kpi-card">
+                <span class="kpi-icon" aria-hidden="true"
+                  ><i data-lucide="blocks"></i
+                ></span>
+                <span class="kpi-value">16</span>
+                <p class="kpi-label">Relics, four families</p>
+                <p class="kpi-note">six engine hooks</p>
+              </div>
+              <div class="kpi-card">
+                <span class="kpi-icon" aria-hidden="true"
+                  ><i data-lucide="activity"></i
+                ></span>
+                <span class="kpi-value">6</span>
+                <p class="kpi-label">Health checks reported</p>
+                <p class="kpi-note">five ran unseen before</p>
+              </div>
+              <div class="kpi-card">
+                <span class="kpi-icon" aria-hidden="true"
+                  ><i data-lucide="list-checks"></i
+                ></span>
+                <span class="kpi-value">5</span>
+                <p class="kpi-label">Automated gates</p>
+                <p class="kpi-note">review by eye was the only one</p>
+              </div>
+            </div>
+            <p class="source-note">
+              One runtime dependency and ten for development
+            </p>
+          </div>
+        </section>
+
+        <!-- 3. Content — architecture, before.
+             Figure 1 is reproduced verbatim from docs/architecture/ARCHITECTURE.md,
+             which is its canonical home. -->
+        <section>
+          <div class="slide-inner">
+            <div class="slide-head">
+              <p class="eyebrow">
+                <i data-lucide="history" aria-hidden="true"></i>
+                Architecture, before
+              </p>
+              <h2>
+                Figure 1 — As-Is Architecture: Layered Globals with a Push-Based
+                Actuator
+              </h2>
+            </div>
+<pre class="mermaid">
+graph TD
+  subgraph DocShell["Document shell - index.html"]
+    SCRIPTS["Ten ordered script tags<br/>at L88 to L97"]
+    MARKUP["Eight contract selectors<br/>and sixteen static grid cells"]
+    CSSLINK["Stylesheet link at L7<br/>to the committed CSS"]
+  end
+  subgraph GlobalScope["Ambient global scope - no modules, no exports"]
+    BOOT["application.js<br/>four-line composition root"]
+    GM["game_manager.js<br/>rules, state and orchestration"]
+    GRID["grid.js"]
+    TILE["tile.js"]
+    KIM["keyboard_input_manager.js<br/>three-name publish and subscribe bus"]
+    ACT["html_actuator.js<br/>DOM writer"]
+    LSM["local_storage_manager.js"]
+    SHIMS["Three polyfills"]
+  end
+  STORE[("localStorage<br/>bestScore and gameState,<br/>both unprefixed")]
+  SCRIPTS -->|"load order is the only contract"| GlobalScope
+  BOOT -->|"injects constructors"| GM
+  KIM -->|"emits move, restart, keepPlaying"| GM
+  GM -->|"PUSH of the grid plus metadata"| ACT
+  GM --> GRID
+  GRID --> TILE
+  GM --> LSM
+  LSM --> STORE
+  ACT --> MARKUP
+  CSSLINK --> MARKUP
+  SHIMS -.->|"mutates shared prototypes"| GlobalScope
+</pre>
+            <div class="figure-foot">
+              <div class="diagram-legend">
+                <span class="legend-title">Legend for Figure 1</span>
+                <p>
+                  Solid arrow · a direct call. Dotted arrow · a shared-scope side
+                  effect. Cylinder · browser storage.
+                </p>
+              </div>
+              <p class="figure-note">
+                Figure 1 is where we started; Figure 2 next is its counterpart.
+              </p>
+            </div>
+          </div>
+        </section>
+
+        <!-- 4. Content — architecture, after.
+             Figure 2 is reproduced verbatim from docs/architecture/ARCHITECTURE.md. -->
+        <section>
+          <div class="slide-inner">
+            <div class="slide-head">
+              <p class="eyebrow">
+                <i data-lucide="workflow" aria-hidden="true"></i>
+                Architecture, after
+              </p>
+              <h2>
+                Figure 2 — To-Be Architecture: Event-Driven Engine with Subscribed
+                Renderer and Hook Bus
+              </h2>
+            </div>
+<pre class="mermaid">
+graph TD
+  subgraph Shell["Document shell and build"]
+    ENTRY["main.ts<br/>single module entry"]
+    VITE["Vite build to static output"]
+  end
+  subgraph Core["Pure engine - zero DOM references"]
+    ENG["engine.ts"]
+    MR["move-resolver.ts"]
+    TERM["terminal-state.ts"]
+    G2["grid.ts"]
+    T2["tile.ts"]
+    EV["engine-events.ts<br/>typed emitter, seven events"]
+    BE["board-effects.ts<br/>transactional write channel"]
+  end
+  BUS["hook-bus.ts<br/>six hooks, pickup order,<br/>charge guard, error isolation"]
+  CFG["config layer<br/>boardSize, winValue, startTiles,<br/>spawn, merge"]
+  RNG["rng layer<br/>one seed to four named substreams"]
+  subgraph Subscribers["Independent subscribers - peers on one bus"]
+    REL["relic modules<br/>sixteen relics in four families"]
+    REND["render modules<br/>Three.js renderer and<br/>number-only fallback"]
+    UI["ui modules<br/>screen router, HUD,<br/>parallel accessibility layer"]
+    OBS["observability modules<br/>logger, tracer, metrics, health"]
+  end
+  RUN["run modules<br/>versioned run state"]
+  IN["input modules<br/>keys, touch, on-screen"]
+  STORE2[("localStorage<br/>bestScore UNCHANGED<br/>plus namespaced run keys")]
+  ENTRY --> CFG
+  ENTRY --> RNG
+  ENTRY --> ENG
+  ENTRY --> Subscribers
+  VITE --> ENTRY
+  IN -->|"typed input events"| ENG
+  ENG --> MR
+  ENG --> TERM
+  ENG --> G2
+  G2 --> T2
+  CFG --> ENG
+  CFG --> REL
+  RNG --> ENG
+  RNG --> REL
+  ENG --> EV
+  EV -->|"emits, holds no view reference"| BUS
+  BUS -->|"dispatches in pickup order"| REL
+  BUS --> REND
+  BUS --> UI
+  BUS --> OBS
+  REL -->|"transformed payload"| BUS
+  REL -->|"records commands"| BE
+  BE -->|"applied on a validated return"| G2
+  ENG --> RUN
+  RUN --> STORE2
+</pre>
+            <div class="figure-foot">
+              <div class="diagram-legend">
+                <span class="legend-title">Legend for Figure 2</span>
+                <p>
+                  Solid arrow · a typed call or event. Multi-line box · a module
+                  group. Cylinder · browser storage.
+                </p>
+              </div>
+              <p class="figure-note">
+                Figure 2 answers Figure 1: the engine names no screen, and every
+                view listens.
+              </p>
+            </div>
+          </div>
+        </section>
+
+        <!-- 5. Section divider -->
         <section class="slide-divider">
-          <p class="step">01</p>
-          <div class="accent-bar"></div>
-          <h2>What we did</h2>
-          <div class="icon-row" aria-hidden="true">
-            <span class="icon-badge"><i data-lucide="hammer"></i></span>
+          <div class="slide-inner">
+            <span class="divider-icon" aria-hidden="true"
+              ><i data-lucide="hammer"></i
+            ></span>
+            <h2>What Was Done</h2>
+            <p class="divider-note">
+              Twelve requirements, delivered in four phases, on a code base that
+              had no build, no tests and no dependencies.
+            </p>
+            <div class="accent-bar"></div>
           </div>
         </section>
 
-        <!-- 3. Content -->
-        <section class="slide-content">
-          <h2>Four things shipped</h2>
-          <div class="accent-bar"></div>
-          <ul class="bullets">
-            <li><i data-lucide="split" aria-hidden="true"></i>Game rules separated from the screen.</li>
-            <li><i data-lucide="box" aria-hidden="true"></i>The board now renders as animated 3D blocks.</li>
-            <li><i data-lucide="gem" aria-hidden="true"></i>Sixteen relics, chosen one per stage.</li>
-            <li><i data-lucide="flask-conical" aria-hidden="true"></i>Six thousand automated tests.</li>
-          </ul>
-        </section>
-
-        <!-- 4. Content -->
-        <section class="slide-content">
-          <h2>One change unlocked the rest</h2>
-          <div class="accent-bar"></div>
-          <div class="two-up">
-            <ul class="bullets">
-              <li><i data-lucide="unplug" aria-hidden="true"></i>The rules no longer touch the screen.</li>
-              <li><i data-lucide="radio" aria-hidden="true"></i>They announce what happened instead.</li>
-              <li><i data-lucide="layers" aria-hidden="true"></i>Anything can listen: 3D, relics, sound.</li>
-              <li><i data-lucide="plus-circle" aria-hidden="true"></i>New features stop touching old code.</li>
+        <!-- 6. Content — scope, mapping summary and delivery timeline -->
+        <section>
+          <div class="slide-inner">
+            <div class="slide-head">
+              <p class="eyebrow">
+                <i data-lucide="route" aria-hidden="true"></i>
+                Scope and sequence
+              </p>
+              <h2>What Replaced What, And In What Order</h2>
+            </div>
+            <ul>
+              <li>Every phase left a game that ran.</li>
+              <li>Each retired file has one named successor.</li>
+              <li>
+                Row-by-row coverage lives in
+                <code>docs/TRACEABILITY_MATRIX.md</code>.
+              </li>
             </ul>
-            <div class="mermaid">
-              graph TD
-                R["Game rules"] --> E["Announcement"]
-                E --> V["3D board"]
-                E --> L["Relics"]
-                E --> U["Screens"]
-                E --> O["Monitoring"]
+            <div class="two-column">
+              <table class="styled-table compact">
+                <caption>
+                  Mapping summary
+                </caption>
+                <thead>
+                  <tr>
+                    <th scope="col">Retired</th>
+                    <th scope="col">Replaced by</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td class="was">
+                      <code>application.js</code> · four lines that wired the whole
+                      game
+                    </td>
+                    <td class="now">Single module entry point</td>
+                  </tr>
+                  <tr>
+                    <td class="was"><code>game_manager.js</code></td>
+                    <td class="now">
+                      Engine group with no screen access, plus run management
+                    </td>
+                  </tr>
+                  <tr>
+                    <td class="was">
+                      <code>grid.js</code> · <code>tile.js</code>
+                    </td>
+                    <td class="now">Typed engine grid and tile</td>
+                  </tr>
+                  <tr>
+                    <td class="was"><code>html_actuator.js</code></td>
+                    <td class="now">
+                      Rendering group: 2.5D renderer and accessible fallback
+                    </td>
+                  </tr>
+                  <tr>
+                    <td class="was"><code>keyboard_input_manager.js</code></td>
+                    <td class="now">
+                      Input group: keyboard, touch, remapping, on-screen controls
+                    </td>
+                  </tr>
+                  <tr>
+                    <td class="was"><code>local_storage_manager.js</code></td>
+                    <td class="now">
+                      Storage group, with the best-score format unchanged
+                    </td>
+                  </tr>
+                  <tr>
+                    <td class="was">Three browser compatibility shims</td>
+                    <td class="now">
+                      Removed; the modern baseline supersedes them
+                    </td>
+                  </tr>
+                  <tr>
+                    <td class="was">The committed generated stylesheet</td>
+                    <td class="now">Produced by the build instead</td>
+                  </tr>
+                </tbody>
+              </table>
+              <table class="styled-table compact">
+                <caption>
+                  Delivery timeline
+                </caption>
+                <thead>
+                  <tr>
+                    <th scope="col">Phase</th>
+                    <th scope="col">What it left running</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td class="now">Foundation</td>
+                    <td>
+                      Typed engine split from the screen, rules moved into
+                      configuration, replay from a seed, first test suites. Plays
+                      identically to the original.
+                    </td>
+                  </tr>
+                  <tr>
+                    <td class="now">2.5D</td>
+                    <td>
+                      Subscribing renderer, animated block merges, camera and
+                      lighting.
+                    </td>
+                  </tr>
+                  <tr>
+                    <td class="now">Roguelike</td>
+                    <td>
+                      Relic system, stage goals, reward screen, run summary.
+                    </td>
+                  </tr>
+                  <tr>
+                    <td class="now">Polish</td>
+                    <td>
+                      Full screen flow, themes, sound and accessibility.
+                    </td>
+                  </tr>
+                  <tr>
+                    <td class="now">Stretch</td>
+                    <td class="was">
+                      Deferred by decision, and not implemented.
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
             </div>
           </div>
-          <p class="caption">Every listener is independent and optional.</p>
         </section>
 
-        <!-- 5. Divider -->
+        <!-- 7. Section divider -->
         <section class="slide-divider">
-          <p class="step">02</p>
-          <div class="accent-bar"></div>
-          <h2>Why it matters</h2>
-          <div class="icon-row" aria-hidden="true">
-            <span class="icon-badge"><i data-lucide="trending-up"></i></span>
+          <div class="slide-inner">
+            <span class="divider-icon" aria-hidden="true"
+              ><i data-lucide="trending-up"></i
+            ></span>
+            <h2>Why It Matters</h2>
+            <p class="divider-note">
+              The value is reproducibility, regression safety and reach — none of
+              which the product had before.
+            </p>
+            <div class="accent-bar"></div>
           </div>
         </section>
 
-        <!-- 6. Content -->
-        <section class="slide-content">
-          <h2>Hosting still costs nothing</h2>
-          <div class="accent-bar"></div>
-          <div class="two-up">
-            <ul class="bullets">
-              <li><i data-lucide="cloud-off" aria-hidden="true"></i>No servers, no databases, no accounts.</li>
-              <li><i data-lucide="folder-up" aria-hidden="true"></i>Deployment stays a folder copy.</li>
-              <li><i data-lucide="shield" aria-hidden="true"></i>Nothing to breach, nothing to patch.</li>
-              <li><i data-lucide="infinity" aria-hidden="true"></i>The same free hosting as before.</li>
+        <!-- 8. Content — business value -->
+        <section>
+          <div class="slide-inner">
+            <div class="slide-head">
+              <p class="eyebrow">
+                <i data-lucide="target" aria-hidden="true"></i>
+                Business value
+              </p>
+              <h2>What The Business Gets</h2>
+            </div>
+            <ul>
+              <li>
+                A run replays exactly from its seed; a defect travels as one
+                number.
+              </li>
+              <li>Five automated gates replace review by eye.</li>
+              <li>The board is reachable by keyboard and screen reader.</li>
+              <li>Hosting stays free and static.</li>
             </ul>
-            <div class="mermaid">
-              graph LR
-                B["One build command"] --> D["Output folder"]
-                D --> H["Any static host"]
-                H --> P["Players"]
-            </div>
+            <table class="styled-table">
+              <caption>
+                Verified before and after
+              </caption>
+              <thead>
+                <tr>
+                  <th scope="col">Area</th>
+                  <th scope="col">Before</th>
+                  <th scope="col">Now</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td class="now">Testing</td>
+                  <td class="was">
+                    None at all, across 181 commits of history
+                  </td>
+                  <td>Unit, seeded-replay and recorded-run gates</td>
+                </tr>
+                <tr>
+                  <td class="now">Stylesheet</td>
+                  <td class="was">
+                    758 generated lines committed beside 549 of source, with
+                    nothing checking they matched
+                  </td>
+                  <td>Generated by the build, so the drift cannot recur</td>
+                </tr>
+                <tr>
+                  <td class="now">Accessibility</td>
+                  <td class="was">
+                    No language or screen-reader markup, and three controls no
+                    keyboard could reach
+                  </td>
+                  <td>Labelled, focusable and announced</td>
+                </tr>
+                <tr>
+                  <td class="now">Page contract</td>
+                  <td class="was">
+                    Eight lookups into the page, none of them checked
+                  </td>
+                  <td>Guarded, so a rename is no longer fatal</td>
+                </tr>
+                <tr>
+                  <td class="now">Hosting cost</td>
+                  <td class="was">Free static host</td>
+                  <td>Unchanged, and protected by mandate</td>
+                </tr>
+              </tbody>
+            </table>
           </div>
         </section>
 
-        <!-- 7. Content -->
-        <section class="slide-content">
-          <h2>The safety net we added</h2>
-          <div class="accent-bar"></div>
-          <div class="metric-grid">
-            <div class="metric">
-              <span class="value">0</span>
-              <span class="label">Tests before this work</span>
-            </div>
-            <div class="metric">
-              <span class="value">5994</span>
-              <span class="label">Automated checks now</span>
-            </div>
-            <div class="metric">
-              <span class="value">136</span>
-              <span class="label">Replay checks now</span>
-            </div>
-            <div class="metric">
-              <span class="value">6</span>
-              <span class="label">Startup health checks</span>
-            </div>
-          </div>
-          <p class="caption">
-            Every change is now checked before it reaches a player.
-          </p>
-        </section>
-
-        <!-- 8. Divider -->
+        <!-- 9. Section divider -->
         <section class="slide-divider">
-          <p class="step">03</p>
-          <div class="accent-bar"></div>
-          <h2>What changed inside</h2>
-          <div class="icon-row" aria-hidden="true">
-            <span class="icon-badge"><i data-lucide="workflow"></i></span>
+          <div class="slide-inner">
+            <span class="divider-icon" aria-hidden="true"
+              ><i data-lucide="network"></i
+            ></span>
+            <h2>Inside The New Design</h2>
+            <p class="divider-note">
+              Two views of the running game: which parts talk to which, and what
+              one turn actually does.
+            </p>
+            <div class="accent-bar"></div>
           </div>
         </section>
 
-        <!-- 9. Content -->
-        <section class="slide-content">
-          <h2>Before: everything tangled</h2>
-          <div class="accent-bar"></div>
-          <div class="mermaid">
-            graph TD
-              S["Ten script files&lt;br/&gt;loaded in a fixed order"] --> C["Rules file"]
-              C -->|"writes directly"| P["Page"]
-              C --> G["Board data"]
-              C --> ST["Saved score"]
-              P --> PL["Player"]
-          </div>
-          <p class="caption">
-            The rules wrote to the page, so neither could change alone.
-          </p>
-        </section>
-
-        <!-- 10. Content -->
-        <section class="slide-content">
-          <h2>After: one publisher, many listeners</h2>
-          <div class="accent-bar"></div>
-          <div class="mermaid">
-            graph TD
-              I["Keys, touch, buttons"] --> E["Rules engine"]
-              E --> B["Announcement bus"]
-              B --> R["Relics"]
-              B --> T["3D board"]
-              B --> U["Screens and audio"]
-              B --> M["Monitoring"]
-              E --> SV["Saved run"]
-          </div>
-          <p class="caption">
-            The engine holds no reference to the screen. Adding a relic edits nothing.
-          </p>
-        </section>
-
-        <!-- 11. Content -->
-        <section class="slide-content">
-          <h2>The board reaches players twice</h2>
-          <div class="accent-bar"></div>
-          <div class="two-up">
-            <div class="mermaid">
-              graph LR
-                B["Board state"] --> C["3D canvas"]
-                B --> A["Readable layer"]
-                C --> P["Sighted play"]
-                A --> S["Screen readers"]
+        <!-- 10. Content — component interaction.
+             Figure 3 is reproduced verbatim from
+             docs/architecture/component-interaction.md, its canonical home. -->
+        <section>
+          <div class="slide-inner">
+            <div class="slide-head">
+              <p class="eyebrow">
+                <i data-lucide="boxes" aria-hidden="true"></i>
+                Component interaction
+              </p>
+              <h2>
+                Figure 3 — Component Interaction: Input, Engine, Hook Bus, Relics,
+                Renderer, Persistence
+              </h2>
             </div>
-            <ul class="bullets">
-              <li><i data-lucide="eye" aria-hidden="true"></i>Pixels for players who can see them.</li>
-              <li><i data-lucide="ear" aria-hidden="true"></i>Spoken labels for players who cannot.</li>
-              <li><i data-lucide="keyboard" aria-hidden="true"></i>Every action reachable by keyboard.</li>
-              <li><i data-lucide="pause" aria-hidden="true"></i>Motion can be switched off.</li>
-            </ul>
-          </div>
-        </section>
-
-        <!-- 12. Content -->
-        <section class="slide-content">
-          <h2>Same seed, same run</h2>
-          <div class="accent-bar"></div>
-          <div class="two-up">
-            <div class="mermaid">
-              graph LR
-                SD["Run seed"] --> S1["Tile values"]
-                SD --> S2["Tile places"]
-                SD --> S3["Relic offers"]
-                S1 --> RUN["Identical replay"]
-                S2 --> RUN
-                S3 --> RUN
+<pre class="mermaid">
+graph LR
+  P((Player))
+  P --> IN2["Input adapter<br/>keys, touch, on-screen controls"]
+  IN2 -->|"direction, restart,<br/>relic activation"| ENG2["Engine"]
+  ENG2 -->|"six hook dispatches"| BUS2["Hook bus"]
+  BUS2 -->|"accumulated payload in"| REL2["Relic registry<br/>pickup-ordered"]
+  REL2 -->|"compounded payload back"| BUS2
+  BUS2 --> REND2["Three.js renderer"]
+  BUS2 --> RT["Screen router"]
+  BUS2 --> OBS2["Observability"]
+  REND2 -->|"frames"| CANVAS["Canvas<br/>aria-hidden"]
+  RT --> DOMUI["Screens plus HUD"]
+  RT --> A11Y["Parallel a11y DOM<br/>plus live region"]
+  ENG2 -->|"engine events"| RUNC["Run controller"]
+  RUNC --> STOR["Storage adapter"]
+  STOR --> LS[("localStorage")]
+  CANVAS -->|"pixels"| P
+  DOMUI --> P
+  A11Y -->|"announcements"| P
+</pre>
+            <div class="figure-foot">
+              <div class="diagram-legend">
+                <span class="legend-title">Legend for Figure 3</span>
+                <p>
+                  Circle · the player. Rectangle · a module. Cylinder · storage. The
+                  paired arrows are relics compounding.
+                </p>
+              </div>
+              <p class="figure-note">
+                Figure 3 shows one picture reaching the player two ways: on screen
+                and spoken.
+              </p>
             </div>
-            <ul class="bullets">
-              <li><i data-lucide="repeat" aria-hidden="true"></i>A seed replays a run exactly.</li>
-              <li><i data-lucide="bug-off" aria-hidden="true"></i>Bugs become reproducible reports.</li>
-              <li><i data-lucide="share-2" aria-hidden="true"></i>Shareable daily runs become possible later.</li>
-              <li><i data-lucide="lock" aria-hidden="true"></i>Seeds are public, and labelled so.</li>
-            </ul>
           </div>
         </section>
 
-        <!-- 13. Divider -->
+        <!-- 11. Content — turn data flow.
+             Figure 4 is reproduced verbatim from
+             docs/architecture/data-flow.md, its canonical home. -->
+        <section>
+          <div class="slide-inner">
+            <div class="slide-head">
+              <p class="eyebrow">
+                <i data-lucide="git-branch" aria-hidden="true"></i>
+                Data flow
+              </p>
+              <h2>
+                Figure 4 — Turn Data Flow: From Keystroke to Composited Frame and
+                Persisted Run State
+              </h2>
+            </div>
+            <div class="figure-split">
+              <div class="figure-pane">
+<pre class="mermaid">
+flowchart TD
+  SS["onStageStart dispatch<br/>as the stage board is prepared"]
+  SS --> K["Key, swipe or on-screen control"]
+  K --> D["Direction 0 to 3"]
+  D --> BM["onBeforeMove dispatch<br/>cancellable"]
+  BM -->|"vetoed"| END1["Turn ends, no state change"]
+  BM -->|"allowed"| PREP["prepareTiles<br/>clear mergedFrom, snapshot position"]
+  PREP --> TRAV["Traversal walk<br/>over the configured board size"]
+  TRAV --> MG{"Merge condition<br/>from config.merge.canMerge?"}
+  MG -->|"yes"| MH["onMerge dispatch<br/>score delta applied"]
+  MG -->|"no"| MV["Reposition tile"]
+  MH --> CHK["Win check against<br/>config.winValue"]
+  MV --> CHK
+  CHK --> MOVED{"Any position changed?"}
+  MOVED -->|"no"| END2["Turn ends, no spawn"]
+  MOVED -->|"yes"| SP["onSpawn dispatch<br/>value and position from<br/>named RNG substreams"]
+  SP --> AF["onAfterMove dispatch<br/>stage goal evaluated here"]
+  AF --> LOSS{"Moves still available?"}
+  LOSS -->|"no"| OVER["Game over"]
+  LOSS -->|"yes"| COMMIT["state:commit"]
+  OVER --> COMMIT
+  COMMIT --> R["Renderer tweens<br/>and composites a frame"]
+  COMMIT --> PERSIST["Run state written<br/>under a namespaced key"]
+  COMMIT --> BEST["Best score promoted,<br/>then re-read from storage"]
+  COMMIT --> SG{"Stage goal met?"}
+  SG -->|"yes"| SE["onStageEnd dispatch<br/>to the reward screen"]
+  SG -->|"no"| WAIT["Await next input"]
+</pre>
+              </div>
+              <div class="figure-side">
+                <div class="figure-foot">
+                  <div class="diagram-legend">
+                    <span class="legend-title">Legend for Figure 4</span>
+                    <p>
+                      Rectangle · a step. Diamond · a decision. The six hook names
+                      mark where a relic may act.
+                    </p>
+                  </div>
+                  <p class="figure-note">
+                    Figure 4 traces one turn: a tile appears only when something
+                    actually moved.
+                  </p>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- 12. Section divider -->
         <section class="slide-divider">
-          <p class="step">04</p>
-          <div class="accent-bar"></div>
-          <h2>Risks we accepted</h2>
-          <div class="icon-row" aria-hidden="true">
-            <span class="icon-badge"><i data-lucide="triangle-alert"></i></span>
+          <div class="slide-inner">
+            <span class="divider-icon" aria-hidden="true"
+              ><i data-lucide="life-buoy"></i
+            ></span>
+            <h2>Risks And Mitigations</h2>
+            <p class="divider-note">
+              Five risks were taken knowingly. Each one ships with the thing that
+              answers it.
+            </p>
+            <div class="accent-bar"></div>
           </div>
         </section>
 
-        <!-- 14. Content -->
-        <section class="slide-content">
-          <h2>Four risks, four answers</h2>
-          <div class="accent-bar"></div>
-          <table class="risk-table">
-            <thead>
-              <tr>
-                <th>Risk</th>
-                <th>Mitigation</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr>
-                <td><i data-lucide="monitor-off" aria-hidden="true"></i> 3D needs modern hardware</td>
-                <td>Numbered board takes over</td>
-              </tr>
-              <tr>
-                <td><i data-lucide="history" aria-hidden="true"></i> Old browsers dropped</td>
-                <td>Deliberate, documented choice</td>
-              </tr>
-              <tr>
-                <td><i data-lucide="terminal" aria-hidden="true"></i> Developers need a build</td>
-                <td>One install, one command</td>
-              </tr>
-              <tr>
-                <td><i data-lucide="video" aria-hidden="true"></i> Video can record blank</td>
-                <td>Check fails unless visible</td>
-              </tr>
-            </tbody>
-          </table>
+        <!-- 13. Content — risks and mitigations -->
+        <section>
+          <div class="slide-inner">
+            <div class="slide-head">
+              <p class="eyebrow">
+                <i data-lucide="shield" aria-hidden="true"></i>
+                Risk register
+              </p>
+              <h2>What Could Go Wrong, And What Answers It</h2>
+            </div>
+            <table class="styled-table compact">
+              <caption>
+                Accepted risks and their mitigations
+              </caption>
+              <thead>
+                <tr>
+                  <th scope="col">Risk</th>
+                  <th scope="col">Mitigation</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td class="was">
+                    Older browsers lose support: three compatibility shims are
+                    gone and hardware-accelerated rendering is now required, which
+                    drops a long tail of legacy devices.
+                  </td>
+                  <td class="now">
+                    A number-only mode ships as a first-class, fully playable
+                    path, not a degraded fallback.
+                  </td>
+                </tr>
+                <tr>
+                  <td class="was">
+                    Development no longer starts by double-clicking the page,
+                    because module-based delivery needs a served origin.
+                  </td>
+                  <td class="now">
+                    One documented command serves the built bundle locally, and
+                    the deployment story is unchanged.
+                  </td>
+                </tr>
+                <tr>
+                  <td class="was">
+                    Rendering now depends on graphics support being present on the
+                    player's machine.
+                  </td>
+                  <td class="now">
+                    A capability probe at startup, a handler for a lost rendering
+                    context, and an automatic switch to the fallback renderer.
+                  </td>
+                </tr>
+                <tr>
+                  <td class="was">
+                    The recorded gameplay proof could silently capture a black
+                    screen, passing a file-exists check while proving nothing.
+                  </td>
+                  <td class="now">
+                    Verified software-rendering flags, plus an assertion on real
+                    rendered content rather than on duration alone.
+                  </td>
+                </tr>
+                <tr>
+                  <td class="was">
+                    The project's historical design freeze is deliberately
+                    superseded by this work.
+                  </td>
+                  <td class="now">
+                    The governing contribution guide is updated, and the original
+                    palette, colour ramp and animation timings remain the default
+                    theme.
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+            <p class="source-note">
+              Every decision behind these, with the alternatives weighed and the
+              risk carried, is recorded in docs/DECISION_LOG.md
+            </p>
+          </div>
         </section>
 
-        <!-- 15. Content -->
-        <section class="slide-content">
-          <h2>How the team starts</h2>
-          <div class="accent-bar"></div>
-          <div class="two-up">
-            <ul class="bullets">
-              <li><i data-lucide="download" aria-hidden="true"></i>Install once with <span class="command">npm install</span></li>
-              <li><i data-lucide="play" aria-hidden="true"></i>Play locally with <span class="command">npm run dev</span></li>
-              <li><i data-lucide="package" aria-hidden="true"></i>Ship with <span class="command">npm run build</span></li>
-              <li><i data-lucide="book-open" aria-hidden="true"></i>Every choice is written down.</li>
-            </ul>
-            <div class="mermaid">
-              graph TD
-                N["npm install"] --> DV["npm run dev"]
-                DV --> T["npm test"]
-                T --> BD["npm run build"]
-                BD --> SH["Static host"]
+        <!-- 14. Section divider -->
+        <section class="slide-divider">
+          <div class="slide-inner">
+            <span class="divider-icon" aria-hidden="true"
+              ><i data-lucide="rocket"></i
+            ></span>
+            <h2>Readiness And Onboarding</h2>
+            <p class="divider-note">
+              The game reports on itself, and a new machine reaches a deployable
+              folder in two commands.
+            </p>
+            <div class="accent-bar"></div>
+          </div>
+        </section>
+
+        <!-- 15. Content — operational readiness and onboarding -->
+        <section>
+          <div class="slide-inner">
+            <div class="slide-head">
+              <p class="eyebrow">
+                <i data-lucide="gauge" aria-hidden="true"></i>
+                Handover
+              </p>
+              <h2>Ready To Run, Ready To Hand Over</h2>
+            </div>
+            <div class="two-column">
+              <div>
+                <table class="styled-table compact">
+                  <caption>
+                    Operational readiness
+                  </caption>
+                  <tbody>
+                    <tr>
+                      <td class="now">Health</td>
+                      <td>
+                        Six checks reported, five of which previously ran unseen
+                      </td>
+                    </tr>
+                    <tr>
+                      <td class="now">Logs</td>
+                      <td>Structured, each carrying a per-run identifier</td>
+                    </tr>
+                    <tr>
+                      <td class="now">Traces</td>
+                      <td>
+                        Input through to the renderer, including the frame
+                        boundary nothing measured before
+                      </td>
+                    </tr>
+                    <tr>
+                      <td class="now">Metrics</td>
+                      <td>A portable snapshot, plus a dashboard template</td>
+                    </tr>
+                    <tr>
+                      <td class="now">Delivery</td>
+                      <td>
+                        In the page rather than over a network, because there is
+                        no server
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+              <div>
+                <p class="column-title">
+                  <i data-lucide="rocket" aria-hidden="true"></i>
+                  Onboarding
+                </p>
+                <div class="icon-row">
+                  <div class="step">
+                    <span class="step-icon" aria-hidden="true"
+                      ><i data-lucide="download"></i
+                    ></span>
+                    <span class="step-title">Install</span>
+                    <p class="step-body"><code>npm install</code></p>
+                  </div>
+                  <div class="step">
+                    <span class="step-icon" aria-hidden="true"
+                      ><i data-lucide="package"></i
+                    ></span>
+                    <span class="step-title">Build</span>
+                    <p class="step-body"><code>npm run build</code></p>
+                  </div>
+                  <div class="step">
+                    <span class="step-icon" aria-hidden="true"
+                      ><i data-lucide="upload"></i
+                    ></span>
+                    <span class="step-title">Deploy</span>
+                    <p class="step-body">Copy the folder to any host</p>
+                  </div>
+                </div>
+                <ul>
+                  <li>
+                    No server, no server-side rendering, no API routes, no
+                    serverless functions.
+                  </li>
+                  <li>
+                    <code>docs/OBSERVABILITY.md</code> is the full account.
+                  </li>
+                  <li>
+                    <code>npm run preview</code> serves the bundle locally.
+                  </li>
+                </ul>
+              </div>
             </div>
           </div>
         </section>
 
         <!-- 16. Closing -->
         <section class="slide-closing">
-          <div class="accent-bar"></div>
-          <h2>Ready for the next stage</h2>
-          <div class="two-up">
-            <ul class="bullets">
-              <li><i data-lucide="check-circle-2" aria-hidden="true"></i>Playable, tested and documented.</li>
-              <li><i data-lucide="rocket" aria-hidden="true"></i>New relics cost hours, not weeks.</li>
-              <li><i data-lucide="calendar" aria-hidden="true"></i>Daily seeded runs are the natural next step.</li>
-              <li><i data-lucide="users" aria-hidden="true"></i>Onboarding is two commands.</li>
+          <div class="slide-inner">
+            <p class="eyebrow">
+              <i data-lucide="flag" aria-hidden="true"></i>
+              Takeaway
+            </p>
+            <h2>Shipped, Observable, Ready To Extend</h2>
+            <ul>
+              <li>Take the recorded run as the acceptance artifact.</li>
+              <li>Quote a seed whenever a defect is reported.</li>
+              <li>Stretch scope stays deferred until it is prioritised.</li>
             </ul>
-            <div class="icon-row" aria-hidden="true">
-              <span class="icon-badge"><i data-lucide="flag"></i></span>
-              <span class="icon-badge"><i data-lucide="sparkles"></i></span>
+            <div class="closing-foot">
+              <p class="brand-lockup">
+                <span class="brand-mark" aria-hidden="true"
+                  ><i data-lucide="zap"></i
+                ></span>
+                Blitzy
+                <span class="brand-note">2048 roguelike</span>
+              </p>
+              <div class="accent-bar"></div>
             </div>
           </div>
         </section>
       </div>
     </div>
 
+    <!-- Classic, non-module builds throughout: a module script would be
+         blocked by the file:// scheme, and this deck is opened from disk. -->
     <script src="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reveal.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/mermaid@10.9.1/dist/mermaid.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/lucide@0.417.0/dist/umd/lucide.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@11.4.0/dist/mermaid.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/lucide@0.460.0/dist/umd/lucide.min.js"></script>
 
     <script>
-      "use strict";
+      (function () {
+        'use strict';
 
-      // Mermaid draws on demand, never on load: automatic start would run
-      // before reveal.js has laid the deck out. Diagrams and icons are drawn
-      // after `ready` and offered again after every `slidechanged`.
-      if (typeof mermaid !== "undefined") {
-        mermaid.initialize({
-          startOnLoad: false,
-          securityLevel: "strict",
-          theme: "base",
-          themeVariables: {
-            background: "#1b0f38",
-            primaryColor: "#2a1259",
-            primaryBorderColor: "#a98bf7",
-            primaryTextColor: "#f4f1fb",
-            secondaryColor: "#3d1a7a",
-            tertiaryColor: "#0f4f6b",
-            lineColor: "#12c7c0",
-            fontFamily: "Inter, Helvetica Neue, Arial, sans-serif",
-            fontSize: "20px"
-          }
-        });
-      }
-
-      // Diagrams are drawn away from the slide that holds them and the finished
-      // markup is injected, rather than drawn in place: reveal.js keeps every
-      // slide but the current one at `display: none`, mermaid measures label
-      // text through the layout box of the node it is handed, and a box inside a
-      // hidden subtree measures zero, which collapses the drawing to an empty
-      // 16x16 viewBox. `mermaid.render` measures inside a temporary element
-      // mermaid attaches to the document itself, so it is unaffected by which
-      // slide is on screen. `data-diagram-drawn` records the outcome; mermaid's
-      // own `data-processed` is not consulted, because mermaid sets that on a
-      // failed drawing too and a deck that trusted it would never retry.
-      // DL-DOC-07.
-      var DIAGRAM_DRAWN = "data-diagram-drawn";
-      var diagramSources = null;
-
-      function diagramNodes() {
-        return Array.prototype.slice.call(
-          document.querySelectorAll(".mermaid")
-        );
-      }
-
-      // Runs before the first drawing, while every node still holds its source.
-      function captureDiagramSources() {
-        if (diagramSources === null) {
-          diagramSources = diagramNodes().map(function (node) {
-            return node.textContent.trim();
+        // Mermaid renders on demand rather than on load, so reveal.js decides
+        // when a figure is drawn.
+        if (window.mermaid) {
+          window.mermaid.initialize({
+            startOnLoad: false,
+            theme: 'base',
+            themeVariables: {
+              primaryColor: '#F2F0FE',
+              primaryTextColor: '#333333',
+              primaryBorderColor: '#5B39F3',
+              lineColor: '#999999',
+              secondaryColor: '#F4EFF6',
+            },
           });
         }
-      }
 
-      function drawDiagram(node, source, index) {
-        var drawing;
+        var MERMAID_SELECTOR = 'pre.mermaid';
 
-        node.setAttribute(DIAGRAM_DRAWN, "pending");
+        // Each figure's source, kept so a host that failed to draw can be
+        // restored and drawn again on a later visit.
+        var figureSource = [];
 
-        try {
-          drawing = mermaid.render("blitzy-diagram-" + index, source);
-        } catch (error) {
-          node.removeAttribute(DIAGRAM_DRAWN);
-          return;
-        }
+        // The offscreen box a figure is drawn in. reveal.js scales its slide
+        // stage with a CSS transform, and Mermaid sizes each label from a
+        // client-rectangle reading while writing the result as untransformed
+        // SVG units, so a figure measured inside the stage is built to the
+        // scale factor and its text is then clipped by its own label box.
+        // Drawing in an untransformed box, at the same width the figure will
+        // occupy, makes every label box come out at its true size.
+        var sandbox = null;
 
-        if (!drawing || typeof drawing.then !== "function") {
-          node.removeAttribute(DIAGRAM_DRAWN);
-          return;
-        }
+        (function captureFigureSource() {
+          var hosts = document.querySelectorAll(MERMAID_SELECTOR);
+          var index = 0;
 
-        drawing
-          .then(function (result) {
-            node.innerHTML = result.svg;
-            node.setAttribute(DIAGRAM_DRAWN, "true");
+          for (index = 0; index < hosts.length; index += 1) {
+            figureSource.push({ host: hosts[index], source: hosts[index].innerHTML });
+          }
+        })();
 
-            if (typeof result.bindFunctions === "function") {
-              result.bindFunctions(node);
+        /** The source originally authored inside one figure host. */
+        function sourceOf(host) {
+          var index = 0;
+
+          for (index = 0; index < figureSource.length; index += 1) {
+            if (figureSource[index].host === host) {
+              return figureSource[index].source;
             }
-          })
-          .catch(function () {
-            // A diagram that cannot be drawn must not take the deck down and
-            // must not leave a broken frame behind: the node keeps its source
-            // text and is offered again on the next slide change.
-            node.removeAttribute(DIAGRAM_DRAWN);
-          });
-      }
-
-      function drawDiagrams() {
-        if (typeof mermaid === "undefined") {
-          return;
-        }
-
-        captureDiagramSources();
-
-        diagramNodes().forEach(function (node, index) {
-          var source = diagramSources[index];
-
-          if (source && !node.hasAttribute(DIAGRAM_DRAWN)) {
-            drawDiagram(node, source, index);
           }
-        });
-      }
 
-      function drawIcons() {
-        if (typeof lucide !== "undefined") {
-          lucide.createIcons();
+          return null;
         }
-      }
 
-      if (typeof Reveal !== "undefined") {
-        Reveal.initialize({
-          width: 1920,
-          height: 1080,
-          margin: 0.04,
-          minScale: 0.2,
-          maxScale: 1.6,
-          hash: true,
-          slideNumber: "c/t",
-          transition: "fade",
-          controls: true,
-          progress: true
-        });
+        /** Re-measures the stage once a figure has changed size. */
+        function relayout() {
+          try {
+            if (window.Reveal && typeof window.Reveal.layout === 'function') {
+              window.Reveal.layout();
+            }
+          } catch (error) {
+            /* A layout pass is cosmetic; a failure must not stop the deck. */
+          }
+        }
 
-        Reveal.on("ready", function () {
-          drawIcons();
-          drawDiagrams();
-        });
+        /**
+         * Figures on the slide currently on screen that have not been drawn.
+         *
+         * Scoping the batch this way is load-bearing rather than an
+         * optimisation: Mermaid measures edge geometry in the live document, and
+         * a host inside a hidden slide measures zero, which makes label
+         * placement fail. Only a slide that is actually displayed can be
+         * measured, so only its figures are handed over.
+         */
+        function pendingFigures() {
+          var slide = null;
 
-        Reveal.on("slidechanged", function () {
-          drawIcons();
-          drawDiagrams();
-        });
-      } else {
-        // Without reveal.js the markup is still a readable document, so the
-        // icons and diagrams are drawn anyway.
-        drawIcons();
-        drawDiagrams();
-      }
+          if (!window.Reveal || typeof window.Reveal.getCurrentSlide !== 'function') {
+            return [];
+          }
+
+          slide = window.Reveal.getCurrentSlide();
+
+          if (!slide) {
+            return [];
+          }
+
+          return Array.prototype.slice.call(
+            slide.querySelectorAll(MERMAID_SELECTOR + ':not([data-processed])'),
+          );
+        }
+
+        /**
+         * Returns a host to its undrawn state when Mermaid left an error graphic
+         * behind, so the next visit to that slide can draw it again instead of
+         * being skipped forever by the processed marker.
+         */
+        function recover(hosts) {
+          var index = 0;
+          var host = null;
+          var source = null;
+
+          for (index = 0; index < hosts.length; index += 1) {
+            host = hosts[index];
+
+            if (!host.querySelector('[aria-roledescription="error"], .error-icon')) {
+              continue;
+            }
+
+            source = sourceOf(host);
+
+            if (source === null) {
+              continue;
+            }
+
+            host.removeAttribute('data-processed');
+            host.innerHTML = source;
+          }
+        }
+
+        /**
+         * Binds each drawn figure to the height its own host offers.
+         *
+         * The host is a flex item that takes whatever the title and the legend
+         * leave, so the room available differs from figure to figure and is
+         * known only once the slide is laid out. Reading it and writing it back
+         * as an explicit bound means the drawing can never be taller than the
+         * box that clips it, whatever the surrounding copy does.
+         */
+        function fitToHosts(hosts) {
+          var index = 0;
+          var host = null;
+          var figure = null;
+          var room = 0;
+
+          for (index = 0; index < hosts.length; index += 1) {
+            host = hosts[index];
+            figure = host.querySelector('svg');
+            // The used height is fractional, so it is read from the computed
+            // style and rounded down: an integer height that rounded up would
+            // hand the drawing a fraction of a pixel more room than the box
+            // that clips it actually has.
+            room = Math.floor(
+              Number.parseFloat(window.getComputedStyle(host).height),
+            );
+
+            if (figure === null || !isFinite(room) || room <= 0) {
+              room = host.clientHeight;
+            }
+
+            if (figure === null || room <= 0) {
+              continue;
+            }
+
+            figure.style.setProperty('max-height', room + 'px', 'important');
+          }
+        }
+
+        /** The offscreen, untransformed box figures are measured in. */
+        function measuringBox() {
+          if (sandbox !== null && sandbox.parentNode !== null) {
+            return sandbox;
+          }
+
+          sandbox = document.createElement('div');
+          sandbox.setAttribute('aria-hidden', 'true');
+          sandbox.style.position = 'absolute';
+          sandbox.style.top = '0';
+          sandbox.style.left = '-20000px';
+          document.body.appendChild(sandbox);
+
+          return sandbox;
+        }
+
+        /**
+         * Draws the given figures outside the scaled slide stage and returns
+         * each one to the exact position it came from.
+         *
+         * A comment node marks the place a host is lifted out of, so the host
+         * goes back between the same two siblings whether the drawing succeeded
+         * or threw.
+         */
+        function draw(hosts) {
+          var box = measuringBox();
+          var markers = [];
+          var index = 0;
+          var host = null;
+
+          function restore() {
+            var at = 0;
+            var marker = null;
+
+            for (at = 0; at < hosts.length; at += 1) {
+              marker = markers[at];
+              marker.parentNode.insertBefore(hosts[at], marker);
+              marker.parentNode.removeChild(marker);
+            }
+
+            recover(hosts);
+            fitToHosts(hosts);
+            relayout();
+          }
+
+          for (index = 0; index < hosts.length; index += 1) {
+            host = hosts[index];
+            markers.push(document.createComment('figure'));
+            host.parentNode.insertBefore(markers[index], host);
+            // Read the width before the move, while the host is still in the
+            // column it has to fit: the figure is then laid out to the same
+            // measure it will be displayed at.
+            box.style.width = host.offsetWidth + 'px';
+            box.appendChild(host);
+          }
+
+          return window.mermaid.run({ nodes: hosts }).then(restore, restore);
+        }
+
+        /**
+         * Draws every visual that needs a live DOM: the Lucide icons, which
+         * replace their host elements outright, and the figures belonging to the
+         * slide on screen.
+         */
+        function paintVisuals() {
+          var hosts = [];
+
+          if (window.lucide && typeof window.lucide.createIcons === 'function') {
+            window.lucide.createIcons();
+          }
+
+          if (!window.mermaid || typeof window.mermaid.run !== 'function') {
+            document.documentElement.classList.add('mermaid-unavailable');
+            relayout();
+
+            return;
+          }
+
+          hosts = pendingFigures();
+
+          if (hosts.length === 0) {
+            // The call still happens on every event, so a figure added to the
+            // slide later is picked up without any other change.
+            window.mermaid.run({ nodes: hosts }).then(relayout, relayout);
+
+            return;
+          }
+
+          draw(hosts);
+        }
+
+        /**
+         * Defers one frame so the slide reveal.js just displayed has been laid
+         * out, which is the condition Mermaid needs in order to measure it.
+         */
+        function paintWhenLaidOut() {
+          if (typeof window.requestAnimationFrame === 'function') {
+            window.requestAnimationFrame(paintVisuals);
+
+            return;
+          }
+
+          paintVisuals();
+        }
+
+        if (window.Reveal) {
+          // Registered before initialize: reveal.js queues API calls made
+          // ahead of it, so neither event can be missed.
+          window.Reveal.on('ready', paintWhenLaidOut);
+          window.Reveal.on('slidechanged', paintWhenLaidOut);
+
+          window.Reveal.initialize({
+            hash: true,
+            transition: 'slide',
+            controlsTutorial: false,
+            width: 1920,
+            height: 1080,
+          });
+        } else {
+          // Without reveal.js the slides stack as a plain document; the icons
+          // and figures are still worth drawing.
+          paintVisuals();
+        }
+      })();
     </script>
   </body>
 </html>

@@ -28,10 +28,9 @@
 //
 //   The substream fan-out the cursor assertions here read is to be drawn as
 //   Figure 7, "Seeded Determinism: One Run Seed Fanned into Named RNG
-//   Substreams", in docs/architecture/data-flow.md. THAT DOCUMENT HAS NOT
-//   LANDED, so nothing below rests on it: src/rng/rng-streams.ts is the
-//   authority for the substream set, and the cursor expectations in this file
-//   are asserted against it directly.
+//   Substreams", in docs/architecture/data-flow.md, carries the substream
+//   fan-out the cursor assertions here read, and labels its `spawn-value` edge
+//   with the js/game_manager.js L71 call site it replaces.
 //
 //   Decision-log pointers, named only so each construct can be found from
 //   docs/DECISION_LOG.md: DL-SPAWN-01 for this family acting through the

@@ -288,9 +288,6 @@ describe('the metrics registry is wired', () => {
     press('ArrowUp', 'ArrowUp');
 
     for (const series of application.metrics.snapshot().series) {
-      // A dotted report name would be rejected by a scrape, so the sink
-      // carries it as a label of a namespaced family rather than as a name.
-      // Anything unnamespaced here means a bypass.
       expect(series.name.startsWith('game2048_')).toBe(true);
       expect(series.name).toMatch(/^[a-zA-Z_:][a-zA-Z0-9_:]*$/);
     }

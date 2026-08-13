@@ -406,7 +406,6 @@ function toLogLevel(level: RenderDiagnostic['level']): LogLevel {
  */
 function createSink(logger: Logger, metrics: MetricsRegistry): RenderReporter {
   // `# HELP` and `# TYPE` for the collapsed counter family, recorded once.
-  // DL-MAIN-11.
   metrics.describe(REPORT_COUNTER_NAME, REPORT_COUNTER_HELP, 'counter');
 
   return createRenderReporter({
@@ -433,8 +432,6 @@ function createSink(logger: Logger, metrics: MetricsRegistry): RenderReporter {
     },
 
     onCount: (count: RenderCount): void => {
-      // One family, the report's dotted name carried as a label rather than
-      // rendered into a family name of its own. DL-METRIC-04, DL-MAIN-11.
       metrics
         .counter(REPORT_COUNTER_NAME, readCountLabels(count))
         .inc(count.value);
@@ -451,10 +448,6 @@ function createSink(logger: Logger, metrics: MetricsRegistry): RenderReporter {
 
 /**
  * Reads the subsystem a dotted report name belongs to: its leading segment.
- *
- * `'render.webgl.probe'` reads as `'render'`. A name carrying no separator
- * reads whole, and an empty one reads as `UNKNOWN_SUBSYSTEM`, so the label is
- * always present and always non-empty.
  *
  * @param name Report name to read.
  * @returns The subsystem label value.
@@ -754,15 +747,6 @@ interface RunSinkObservers {
 /**
  * Adapts the render reporter to the run folder's sink.
  *
- * Every member of `RunReporter` is routed: the four failure and resolution
- * reports as diagnostics, the four lifecycle reports as counted events. The
- * board-size reconciliation and the refused payload are the reports the guarded
- * loader produces, and this is the sink they reach.
- *
- * No seed is forwarded. None of these report shapes carries one:
- * `RunStartedReport` carries `seedProvided`, and `RunEndedReport` carries the
- * summary with the seed already redacted out of it. DL-LOG-06.
- *
  * @param reporter The one sink of the composition.
  * @param observers The composition's reactions to specific reports.
  * @returns A complete `RunReporter`.
@@ -1022,10 +1006,6 @@ function createRngSink(reporter: RenderReporter): RngReporter {
   };
 }
 
-/* --------------------------------------------------------------------------
- * Boundary tracing, injected rather than imported
- * ----------------------------------------------------------------------- */
-
 // The seven boundaries validation gate V8 names — input, engine turn, move
 // resolution, hook dispatch, relic handler, renderer and the frame callback —
 // are each spanned by a collaborator this root injects, so no module under
@@ -1060,12 +1040,6 @@ const SEED_RADIX = 36;
 
 /**
  * Creates one random run token.
- *
- * Called twice per page load, once for the run seed and once for the
- * run-instance identifier; the two draws are independent. Web Crypto is the
- * source where it is available, and the two clocks combined where it is not.
- * `Math.random()` is called by no module under src/, and a test asserts the
- * global is never replaced. DL-MAIN-02.
  *
  * @returns A token string. The seed form is used verbatim by the substreams.
  */
@@ -1211,12 +1185,6 @@ function readContextLost(renderer: BoardRenderer): boolean {
 
 /**
  * Selects the board rendering mode from the capability and the preference.
- *
- * Two distinct inputs produce number-only rendering and the selection reports
- * which: an absent WebGL context, which the probe pushes into the store as a
- * force (implicit requirement I6), and the player's own choice of number-only
- * as a rendering mode (R9). The store holds both as the one effective value
- * `isNumberOnlyMode()`, and the probe is consulted before this call.
  *
  * @param support The probe result.
  * @param preferences The store holding the effective number-only value.
@@ -1487,13 +1455,6 @@ function createSwappableRngStreams(
 
 /**
  * Builds and starts the application.
- *
- * The order is a chain: storage -> run identity -> correlation identifier ->
- * logger, metrics, tracer and health -> run controller -> substreams -> hook
- * bus -> engine -> engine tracing -> subscribers -> the board. The board opens
- * last, after every subscriber has attached, which is where js/game_manager.js
- * L13 called `setup()` from its own constructor instead. DL-MAIN-03,
- * DL-MAIN-04, DL-MAIN-06.
  *
  * @param ownerDocument Document to mount into.
  * @returns The composed application.
@@ -2486,8 +2447,6 @@ export function start(ownerDocument: Document): Application {
       return;
     }
 
-    // The rebuild did not complete and the context still reads as lost, so the
-    // number-only board takes over now rather than at the deadline.
     contextRebuildFailed = true;
 
     reporter.onCount({
@@ -2621,8 +2580,6 @@ export function start(ownerDocument: Document): Application {
   /**
    * Falls back to the number-only board where the 2.5D one did not mount: the
    * probe reporting a context available is not the same as one being acquired.
-   * Recorded in the store as a force, so the settings surface reflects that the
-   * choice is no longer available.
    *
    * @param reason Why the fallback was applied, carried into the store.
    * @returns Whether a fallback was applied.
@@ -3464,8 +3421,6 @@ export function start(ownerDocument: Document): Application {
   function takeReward(relicId: string): RewardSelection {
     const selection = run.selectReward(relicId, engine);
 
-    // Counted by outcome, in two series rather than one, so each can be summed.
-    // DL-METRIC-04.
     reporter.onCount({
       name:
         selection.outcome === 'accepted'

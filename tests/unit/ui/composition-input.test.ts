@@ -468,8 +468,6 @@ describe('the settings dialog', () => {
     // of which the dialog knows — and the dialog defers (N7).
     const subject = startPlaying();
 
-    // Read by the `report` label, because every generic report is counted on
-    // one family rather than under a family name of its own. DL-MAIN-11.
     const valueOf = (report: string): number =>
       subject.metrics
         .snapshot()
