@@ -516,7 +516,7 @@ a construct this document does not account for.
 | `TR-CI-02` | the single `ci` job, its runner and the timeout that lets a recording finish | **target-only** — no pre-migration construct |
 | `TR-CI-03` | the pinned-runtime setup read from `.nvmrc` and the locked `npm ci` install | **target-only** — no pre-migration construct |
 | `TR-CI-04` | the Playwright browser cache and the unconditional `--with-deps` install of the browser and its system libraries | **target-only** — no pre-migration construct |
-| `TR-CI-05` | the seven quality stages, in the order they run: type check, stylesheet deprecation gate, unit suite, seeded snapshot gate, dashboard template gate, static build, and the recorded gameplay proof together with the browser variants | **target-only** — no pre-migration construct |
+| `TR-CI-05` | the nine quality stages, in the order they run: dependency advisory gate, type check, stylesheet deprecation gate, unit suite, seeded snapshot gate, dashboard template gate, executive deck gate, static build, and the recorded gameplay proof together with the browser variants. One stage runs one `package.json` script apiece except the advisory gate, which runs `npm audit` directly, so the count here is the count of `run:` steps between the browser provisioning and the uploads | **target-only** — no pre-migration construct |
 | `TR-CI-06` | the three artifact uploads — the recorded video, the static bundle and the Playwright report — and their retention policy | **target-only** — no pre-migration construct |
 
 ### `playwright.config.ts` — 4 rows, 4 target-only

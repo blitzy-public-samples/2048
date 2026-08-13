@@ -1274,7 +1274,6 @@ describe('reporter fault containment (reporterFaults)', () => {
 
     expect(manager.strategy).toBe('injected');
     expect(manager.reporterFaults).toBe(1);
-    expect(manager.reporterFailures).toBe(1);
     // A contained reporter fault is described by the same allowlist: a plain
     // `Error` is not one of the names this module reports, and the sink's own
     // text is not carried into a field an export publishes.
@@ -1315,7 +1314,6 @@ describe('reporter fault containment (reporterFaults)', () => {
     expect(expectNoThrow(() => manager.setGameState(board))).toBe(true);
     expect(expectPersistedBoard(manager.getGameState())).toStrictEqual(board);
     expect(manager.reporterFaults).toBe(faultsBefore + 1);
-    expect(manager.reporterFailures).toBe(manager.reporterFaults);
   });
 
   it('reports zero reporterFaults for a reporter that behaves', () => {
@@ -1328,7 +1326,6 @@ describe('reporter fault containment (reporterFaults)', () => {
     expect(manager.setGameState(createEmptyBoard())).toBe(true);
     expect(manager.clearGameState()).toBe(true);
     expect(manager.reporterFaults).toBe(0);
-    expect(manager.reporterFailures).toBe(0);
     expect(manager.lastReporterFault).toBeUndefined();
   });
 });

@@ -1689,6 +1689,164 @@ describe('emitted records are bounded and carry no source location', () => {
     expect(records[0].error?.message).toContain('Unexpected end of JSON input');
   });
 
+  // A `data:` URI carries its payload INLINE, which is the whole reason it is
+  // one of the enumerated forms: the value is in the message rather than behind
+  // a locator. The forms below are the ones a caught value actually carries —
+  // a decode failure, a refused document, a load failure mid-sentence — and the
+  // media type with its `type/subtype` slash is what every one of them has.
+  // `DL-LOG-10` and `docs/OBSERVABILITY.md` both state that this form is
+  // redacted, and these cases are what holds the two documents to it.
+  // DL-LOG-11.
+  describe('a data: URI in a message', () => {
+    /**
+     * The message of the one record emitted for a thrown `Error`.
+     *
+     * @param message Message to throw.
+     * @returns The message the record carries.
+     */
+    const messageFor = (message: string): string => {
+      const { logger, records } = createCapturingLogger();
+
+      logger.error('a caught value carried a data URI', undefined, new Error(
+        message,
+      ));
+
+      expect(records).toHaveLength(1);
+
+      return records[0].error?.message ?? '';
+    };
+
+    /** Every conventional form, with the payload each must not keep. */
+    const CONVENTIONAL: ReadonlyArray<readonly [string, string, string]> = [
+      [
+        'a base64 image',
+        'failed to decode data:image/png;base64,iVBORw0KGgoAAAA',
+        'iVBORw0KGgoAAAA',
+      ],
+      [
+        'an inline document',
+        'refused data:text/html,<script>alert(1)</script>',
+        'alert(1)',
+      ],
+      ['plain text', 'read data:text/plain,my-private-seed', 'my-private-seed'],
+      [
+        'a parameterised media type',
+        'parsed data:application/json;charset=utf-8,{seed:abc}',
+        '{seed:abc}',
+      ],
+      [
+        'a percent-escaped media type',
+        'loaded data:text/vnd%2Dabc;base64,QUJDRA',
+        'QUJDRA',
+      ],
+    ];
+
+    for (const [name, thrown, payload] of CONVENTIONAL) {
+      it(`redacts ${name}`, () => {
+        const message = messageFor(thrown);
+
+        expect(message).not.toContain(payload);
+        expect(message).not.toContain('data:');
+        expect(message).toContain(logRecordBounds.redactedLocation);
+      });
+    }
+
+    it('keeps the wording either side of one it replaces', () => {
+      const message = messageFor(
+        'failed to load data:image/svg+xml;base64,QUJD then stopped',
+      );
+
+      // A redacted message must still say what went wrong, so the URI is
+      // replaced in place rather than the message being discarded.
+      expect(message).toContain('failed to load');
+      expect(message).toContain('then stopped');
+      expect(message).not.toContain('QUJD');
+    });
+
+    it('redacts the three typeless forms as well', () => {
+      for (const thrown of [
+        'saw data:,plain-payload',
+        'saw data:base64,QUJDRQ',
+        'saw data:;base64,QUJDRg',
+      ]) {
+        const message = messageFor(thrown);
+
+        expect(message).not.toContain('data:');
+        expect(message).toContain(logRecordBounds.redactedLocation);
+      }
+    });
+
+    it('leaves a word merely ENDING in `data:` alone', () => {
+      // The pattern opens on a word boundary, so a scheme this is not must not
+      // be replaced: over-redaction destroys the diagnostic the record exists
+      // for just as surely as under-redaction leaks a payload.
+      const message = messageFor('metadata:image/png;base64,AAA was read');
+
+      expect(message).toContain('metadata:image/png;base64,AAA');
+      expect(message).not.toContain(logRecordBounds.redactedLocation);
+    });
+
+    it('completes on an input built to make the pattern backtrack', () => {
+      // Redaction runs on the message BEFORE the record is clamped, so the
+      // pattern sees text of arbitrary length. This input is a run of
+      // parameter separators with no terminating comma, which is the shape that
+      // makes an ambiguous parameter group backtrack: the case passes by
+      // COMPLETING inside the suite's own timeout rather than by a measured
+      // duration, which is what keeps it a fact about the pattern rather than
+      // about the machine. DL-LOG-11.
+      const hostile = `data:${';a'.repeat(160)}`;
+
+      const message = messageFor(`load failed for ${hostile}`);
+
+      // No comma, so nothing matched: the message is carried as it was thrown.
+      expect(message).toContain('load failed for');
+      expect(message).not.toContain(logRecordBounds.redactedLocation);
+    });
+
+    it('removes it from the STACK as well, where the header repeats it', () => {
+      const { logger, records } = createCapturingLogger();
+
+      // A thrown value's `stack` opens with its own `<name>: <message>` header,
+      // so the payload is present twice in one record. Redacting the message
+      // alone left the second copy in the ring buffer and in the diagnostics
+      // export — the surface built to be downloaded and shared.
+      logger.error(
+        'a decode failed',
+        undefined,
+        new Error('failed on data:image/png;base64,UEFZTE9BRA'),
+      );
+
+      expect(records[0].error?.message).not.toContain('UEFZTE9BRA');
+      expect(records[0].error?.stack).not.toContain('UEFZTE9BRA');
+      expect(logger.toJsonLines()).not.toContain('UEFZTE9BRA');
+      expect(logger.snapshot().records[0].error?.stack).not.toContain(
+        'UEFZTE9BRA',
+      );
+
+      // The frame names the stack is read for are still there.
+      expect(records[0].error?.stack).toContain(
+        logRecordBounds.redactedLocation,
+      );
+    });
+
+    it('redacts one carried by a cause, and on the export surfaces', () => {
+      const { logger } = createCapturingLogger();
+
+      logger.error(
+        'a load failed',
+        undefined,
+        new Error('outer', {
+          cause: new Error('inner data:image/png;base64,SEVMTE8'),
+        }),
+      );
+
+      expect(logger.toJsonLines()).not.toContain('SEVMTE8');
+      expect(
+        logger.snapshot().records[0].error?.cause?.message,
+      ).not.toContain('SEVMTE8');
+    });
+  });
+
   it('redacts a credential-like assignment, keeping its key', () => {
     const { logger, records } = createCapturingLogger();
 

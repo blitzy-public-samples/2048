@@ -16,15 +16,16 @@
 # Decisions behind this file are recorded in docs/DECISION_LOG.md: DL-CI-01 the
 # single sequential job, DL-CI-02 the stage order, DL-CI-03 the locked install,
 # DL-CI-04 the browser cache and its unconditional install, DL-CI-05 the
-# artifact retention policy, and DL-CI-06 the commit-pinned actions with a
-# read-only token that is not persisted.
+# artifact retention policy, DL-CI-06 the commit-pinned actions with a
+# read-only token that is not persisted, and DL-CI-07 the dependency advisory
+# gate and its threshold.
 #
 # Constructs of this file are mapped in docs/TRACEABILITY_MATRIX.md:
 # TR-CI-01 the trigger surface and permissions, TR-CI-02 the job and its
 # timeout, TR-CI-03 the pinned runtime and locked install, TR-CI-04 the browser
-# provisioning, TR-CI-05 the seven quality stages — type-check, stylesheet,
-# unit, seeded snapshot, dashboard template, static build and recorded gameplay
-# proof — and TR-CI-06 the uploads.
+# provisioning, TR-CI-05 the nine quality stages — dependency advisory,
+# type-check, stylesheet, unit, seeded snapshot, dashboard template, executive
+# deck, static build and recorded gameplay proof — and TR-CI-06 the uploads.
 #
 # THIRD-PARTY ACTIONS ARE PINNED TO A COMMIT, NOT A TAG. Every `uses:` below
 # names the full 40-character commit SHA of one published release, and the tag
@@ -113,6 +114,16 @@ jobs:
         # run on a cache hit as well as a miss.
         run: npm run e2e:install
 
+      - name: Dependency advisory gate
+        # Audits the tree the locked install above produced, against the
+        # advisory database as it stands on the day of the run rather than on
+        # the day the lockfile was written. `--audit-level=moderate` is the
+        # threshold: a moderate or worse advisory fails the run, and a low or
+        # informational one is reported in the log without failing it. The
+        # command reaches the registry, so it belongs after the install and
+        # before every gate that reads only the working tree. DL-CI-07.
+        run: npm audit --audit-level=moderate
+
       - name: Type-check
         # One script, two projects: package.json runs tsconfig.json for the
         # sources and the suites, then tsconfig.node.json for the four root
@@ -141,7 +152,7 @@ jobs:
         # the log rather than folded into the unit suite.
         run: npm run test:dashboard
 
-      - name: Executive deck security gate
+      - name: Executive deck gate
         # Named as its own step for the same reason, and for one more: the deck
         # keeps a Mermaid pin that published advisories place in an affected
         # range, and DL-DOC-09 grants that exception on premises which are all
@@ -150,6 +161,11 @@ jobs:
         # level stated, and the counts the row itself states. This step is where
         # those premises are checked, so a release that voided one is visible in
         # the log rather than folded into a suite of six thousand. DL-TEST-18.
+        # The same step holds the deck's presentational budget — its section
+        # count and slide types, one non-text visual per slide, the bullet and
+        # body-copy caps, the emoji ban, the theme's property and class sets,
+        # the typefaces, the reveal.js configuration and the two paint calls —
+        # so an editorial edit that broke the budget fails here too. DL-DOC-14.
         run: npm run test:deck
 
       - name: Static build

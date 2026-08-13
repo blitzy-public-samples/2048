@@ -29,6 +29,16 @@ merged.
    host would. `index.html` no longer opens over `file://`, because the page
    loads a single ES module and a module graph needs a served origin.
 
+   Dependencies are pinned exactly — no range, no `latest` — and
+   `package-lock.json` is committed, so please commit the lockfile change with
+   the manifest change that caused it and keep the two in step; CI installs with
+   `npm ci`, which fails when they disagree (`DL-CI-03`). One transitive package
+   is held at a version of its own through `package.json`'s `overrides` block
+   (`DL-BUILD-19`). CI also runs `npm audit --audit-level=moderate` as its first
+   quality stage, so an advisory published against anything in the tree fails
+   the build rather than waiting for a review to find it (`DL-CI-07`); run
+   `npm audit` yourself after any dependency change.
+
  - If you want to modify the CSS, please edit the SCSS files present in
    `style/`: `main.scss`, `helpers.scss` and the partials. No compiled
    stylesheet is committed any more, so there is no generated file to avoid
@@ -69,10 +79,12 @@ merged.
    `--fatal-deprecation`, so a deprecation warning fails the command, where the
    plain invocation prints the same warning and still exits `0`
    (`DL-BUILD-17`). Reach for plain `sass` when you want to read the compiled
-   CSS, not to clear the gate. `.github/workflows/ci.yml` runs the type check,
-   the stylesheet deprecation gate, the unit suite, the snapshot gate, the
-   dashboard gate, the build and the recorded proof against every push and
-   every Pull Request to `master`.
+   CSS, not to clear the gate. `.github/workflows/ci.yml` runs nine quality
+   stages against every push and every Pull Request to `master`, in this order:
+   the dependency advisory gate, the type check, the stylesheet deprecation
+   gate, the unit suite, the snapshot gate, the dashboard gate, the executive
+   deck gate, the build, and the recorded proof with the browser variants
+   (`DL-CI-02`).
 
    `npm run test:snapshot` is its own command because the seeded snapshot suite
    is a separate regression gate, with its own configuration in
@@ -137,6 +149,18 @@ merged.
    the registry declares. `npm test` collects it as well, so run it on its own
    only when you have touched either template, the metrics vocabulary or the
    health check ids.
+
+   `npm run test:deck` is the executive-deck gate: it holds
+   `blitzy-deck/executive-summary.html` to the security premises the pinned
+   Mermaid release is accepted under (`DL-DOC-09`), and to the presentational
+   shape its governing rule fixes (`DL-DOC-14`) — the section count and the
+   four slide types, one non-text visual per slide, the four-bullet and
+   forty-word body-copy caps, no emoji and no fenced code block, the theme's
+   custom-property and component-class sets, the three typefaces at their
+   weights, the reveal.js configuration literal, and the figures and icons
+   painted on both reveal.js events. Editing a slide can therefore fail this
+   gate on a budget rather than on a premise. `npm test` collects it as well,
+   so run it on its own only when you have touched the deck.
 
    The observability surfaces are exercisable: `src/observability/` carries the
    structured logger, the metrics registry, the diagnostics overlay, the tracer

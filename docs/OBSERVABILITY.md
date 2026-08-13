@@ -428,8 +428,10 @@ So `message` is the caller's text in every ordinary record and in every record
 this product emits today, and the one thing that shortens it is that budget.
 Two things it is **not**: it is not redacted, and it is not a place to put a
 value that must not be published. `redactMessage` — the `data:` URI, the
-credential-like assignment and the over-long quoted run of `DL-LOG-10` — is
-applied to the **message of a caught value**, on the emission path unless the
+credential-like assignment and the over-long quoted run of `DL-LOG-10`, over a
+media-type class that spans a conventional `type/subtype` (`DL-LOG-11`) — is
+applied to the **message of a caught value** and to its **stack**, whose first
+line repeats that message, on the emission path unless the
 logger carries `errorDetail: 'full'` and on `toJsonLines` and `snapshot`
 regardless; it is never applied to this member. A caller with something to say
 about a failure puts the value in the third argument, where `failure` serialises
@@ -1622,7 +1624,8 @@ session-level limits — nothing pollable, nothing aggregated, no alerting — a
   (`DL-LOG-06`).
 - **Message and stack redaction covers enumerated forms, not all forms.** A
   location or an identifier written in a form outside those enumerated survives
-  (`DL-LOG-08`, `DL-LOG-10`).
+  (`DL-LOG-08`, `DL-LOG-10`, `DL-LOG-11`). Both take the same pass, so a form the
+  message loses is lost from the stack beside it as well.
 - **The seed-only correlation form is recoverable.** It is unsalted and
   deterministic, so a party holding candidate seeds can match it. It must not be
   attached to a logger whose records leave the machine, and no code prevents that

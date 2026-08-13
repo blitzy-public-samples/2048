@@ -668,6 +668,11 @@ export class LocalStorageManager {
    * behaves. A non-zero count means instrumentation is failing while
    * persistence is not: the storage operations themselves returned their true
    * results.
+   *
+   * The ONE name this count is published under, matching the member of the same
+   * name on `Engine`, `HookBusMetrics`, the health surface and the audio
+   * totals, which is the name src/observability/diagnostics-overlay.ts reads.
+   * Decision DL-STORE-10.
    */
   get reporterFaults(): number {
     return this.faultCount;
@@ -713,16 +718,6 @@ export class LocalStorageManager {
     }
 
     this.reportProbe();
-  }
-
-  /**
-   * Number of reporter invocations this manager contained because the reporter
-   * threw, under the name a diagnostics surface reads it by. `0` for a
-   * reporter that never throws; a non-zero value means reports have been lost
-   * and the sink is faulty.
-   */
-  get reporterFailures(): number {
-    return this.faultCount;
   }
 
   /**

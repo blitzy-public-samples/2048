@@ -572,6 +572,14 @@ export class InputManager implements InputEmitter {
         { event, listener: index },
       );
     } catch {
+      // A faulty sink is contained here and is not reported back through
+      // itself. `count` and `failure` are the only calls above, so what this
+      // swallows is a reporter that throws while being told a listener threw —
+      // re-raising it would abort the publish loop over the remaining
+      // listeners, which is the containment this method exists to protect, and
+      // reporting it would go to the sink that just failed. The caught
+      // listener error is not lost by this: the loop continues, and the sink
+      // that received the `count` before the `failure` still carries the count.
     }
   }
 

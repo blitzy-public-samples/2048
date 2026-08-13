@@ -6,13 +6,28 @@ import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { compile } from 'sass';
 
-import { fieldWidth } from '../../../src/theme/tokens';
 import {
+  fieldWidth,
+  gridRowCells,
+  mobileThreshold,
+  tileFontSize,
+} from '../../../src/theme/tokens';
+import {
+  DEFAULT_THEME_ID,
   defaultTheme,
   rarityCardLift,
   rarityCardLiftStep,
   rarityTiers,
+  resolveTileTheme,
+  themeIds,
 } from '../../../src/theme/themes';
+import type { ThemeId } from '../../../src/theme/themes';
+import {
+  getTileTheme,
+  rampValue,
+  tileRampConstants,
+} from '../../../src/theme/tile-ramp';
+import type { TileTheme } from '../../../src/theme/tile-ramp';
 
 const ROOT = resolve(import.meta.dirname, '..', '..', '..');
 
@@ -922,5 +937,462 @@ describe('the diagnostics surface width is one number in two places', () => {
 
     expect(expected).toBe(400);
     expect(compiled).toContain(`inline-size: ${String(expected)}px`);
+  });
+});
+
+/* ==========================================================================
+ * The ramp-comparison gate AAP 0.5.3 mandates.
+ * ========================================================================== */
+
+// AAP 0.5.3 states the compliance requirement for the tile ramp in two halves:
+// the generative function is PORTED rather than its twelve compiled rows copied
+// into a table, and "a test compares the compiled SCSS output against the
+// TypeScript ramp". The port landed; this is the comparison, which had not.
+//
+// What was unguarded until it existed: four generative rules were written twice,
+// once in the `@while` loop of style/main.scss and the `palette-ramp` mixin of
+// style/_themes.scss, and once in `computeTileTheme` of src/theme/tile-ramp.ts —
+// the 55% accent weight, the 1.8 and 3 glow divisors, the exponent the glow
+// begins from, and the eleven-entry accent list. The two sides agree today, and
+// nothing else in the repository would notice if they stopped.
+//
+// The comparison is made on the values the browser resolves: every ramp
+// declaration is a custom property, so it is read from the compiled sheet and
+// held against the theme the module computes for the same tile value under the
+// same palette. Decisions DL-RAMP-01, DL-RAMP-02, DL-RAMP-04, DL-TEST-21.
+describe('the compiled tile ramp equals the TypeScript ramp', () => {
+  /** Every ramp value in exponent order, derived rather than listed. */
+  const RAMP_VALUES: readonly number[] = Array.from(
+    { length: tileRampConstants.limit },
+    (_unused, index): number =>
+      rampValue(index + tileRampConstants.exponentStart),
+  );
+
+  /** The first value above the ramp, which takes the super rule. */
+  const SUPER_VALUE = tileRampConstants.superThreshold * 2;
+
+  /** Every value the ramp resolves, the super band included. */
+  const ALL_VALUES: readonly number[] = [...RAMP_VALUES, SUPER_VALUE];
+
+  /** Escapes a selector for use inside an expression. */
+  const escapeSelector = (selector: string): string =>
+    selector.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+
+  /** The class one tile value carries: its own, or the super band's. */
+  const rampClass = (value: number): string =>
+    value > tileRampConstants.superThreshold ? 'super' : String(value);
+
+  /**
+   * The selector the compiled sheet emits for one value under one palette.
+   *
+   * The default palette's rules are style/main.scss's own and carry no
+   * activation attribute; an additive palette's are `palette-ramp`'s and carry
+   * one more selector, which is the nesting style/_themes.scss documents.
+   *
+   * @param value Tile value.
+   * @param themeId Palette the rule belongs to.
+   * @returns The selector, without its brace.
+   */
+  const rampSelector = (value: number, themeId: ThemeId): string => {
+    const prefix =
+      themeId === DEFAULT_THEME_ID ? '' : `[data-theme=${themeId}] `;
+
+    return `${prefix}.tile.tile-${rampClass(value)} .tile-inner`;
+  };
+
+  /**
+   * The declarations of one top-level rule.
+   *
+   * Anchored to the start of a line, because a rule the compiler nests inside a
+   * media block is indented and is read by `mobileRule` below instead.
+   *
+   * @param selector Selector to read.
+   * @returns The declarations between its braces, or `null` where the sheet
+   *   emits no such rule.
+   */
+  const topLevelRule = (selector: string): string | null =>
+    new RegExp(`^${escapeSelector(selector)} \\{([^}]*)\\}`, 'mu').exec(
+      compiled,
+    )?.[1] ?? null;
+
+  /**
+   * The compiled sheet's blocks for the single breakpoint, concatenated.
+   *
+   * Matched by brace counting rather than by an expression, because a media
+   * block holds nested rules and the compound queries — `and (hover: hover)`,
+   * `and (prefers-reduced-motion: no-preference)` — must not be collected here.
+   */
+  const mobileBlocks = ((): string => {
+    const opener = `@media screen and (max-width: ${String(mobileThreshold)}px) {`;
+    const collected: string[] = [];
+    let from = compiled.indexOf(opener);
+
+    while (from !== -1) {
+      let depth = 0;
+      let index = from + opener.length - 1;
+
+      do {
+        const character = compiled[index];
+
+        if (character === '{') {
+          depth += 1;
+        } else if (character === '}') {
+          depth -= 1;
+        }
+
+        index += 1;
+      } while (depth > 0 && index < compiled.length);
+
+      collected.push(compiled.slice(from + opener.length, index - 1));
+      from = compiled.indexOf(opener, index);
+    }
+
+    return collected.join('\n');
+  })();
+
+  /**
+   * The declarations of one rule nested in a breakpoint block.
+   *
+   * @param selector Selector to read.
+   * @returns The declarations between its braces, or `null` where no breakpoint
+   *   block carries that rule.
+   */
+  const mobileRule = (selector: string): string | null =>
+    new RegExp(`^\\s+${escapeSelector(selector)} \\{([^}]*)\\}`, 'mu').exec(
+      mobileBlocks,
+    )?.[1] ?? null;
+
+  /**
+   * One custom property of a rule, rendered as a browser resolves it.
+   *
+   * A colour interpolated into a custom property keeps fractional channels and
+   * is written as percentages, so each channel is taken back to its 8-bit value
+   * — which is what `quantised()` of style/_tokens.scss and `colorHex` of
+   * src/theme/tile-ramp.ts both produce.
+   *
+   * @param body Declarations to read.
+   * @param property Property name, without its leading dashes.
+   * @returns The colour as six-digit lower-case hex, or `null` where the rule
+   *   declares no such property.
+   */
+  const declaredColor = (body: string, property: string): string | null => {
+    const declared = new RegExp(`--${property}:\\s*([^;]+);`, 'u').exec(
+      body,
+    )?.[1];
+
+    if (declared === undefined) {
+      return null;
+    }
+
+    const text = declared.trim();
+
+    if (text.startsWith('#')) {
+      return text.length === 4
+        ? `#${text[1] ?? ''}${text[1] ?? ''}${text[2] ?? ''}${text[2] ?? ''}` +
+            `${text[3] ?? ''}${text[3] ?? ''}`.toLowerCase()
+        : text.toLowerCase();
+    }
+
+    const channels = /rgba?\(([^)]*)\)/u.exec(text)?.[1] ?? '';
+    const rendered = channels
+      .split(',')
+      .slice(0, 3)
+      .map((channel): number => {
+        const value = channel.trim();
+
+        return value.endsWith('%')
+          ? (Number.parseFloat(value) / 100) * 255
+          : Number.parseFloat(value);
+      })
+      .map((value): string => Math.round(value).toString(16).padStart(2, '0'))
+      .join('');
+
+    return `#${rendered}`;
+  };
+
+  /** The `box-shadow` a rule declares, `null` where it declares none. */
+  const declaredShadow = (body: string): string | null =>
+    /box-shadow:\s*([^;]+);/u.exec(body)?.[1]?.trim() ?? null;
+
+  /** Every alpha channel of a rule's `rgba()` operands, in order. */
+  const declaredAlphas = (body: string): readonly number[] =>
+    [...body.matchAll(/rgba\([^)]*?,\s*([0-9.]+)\)/gu)].map((match): number =>
+      Number(match[1]),
+    );
+
+  /** The numeral size a rule declares, in px, `null` where it declares none. */
+  const declaredNumeralSize = (body: string): number | null => {
+    const declared = /--tile-numeral-size-compiled:\s*(\d+)px;/u.exec(
+      body,
+    )?.[1];
+
+    return declared === undefined ? null : Number(declared);
+  };
+
+  /** Longest difference two alphas may carry and still be called equal. */
+  const ALPHA_TOLERANCE = 1e-9;
+
+  /** One value's compiled ramp declarations under one palette. */
+  interface CompiledEntry {
+    readonly fill: string | null;
+    readonly numeral: string | null;
+    readonly shadow: string | null;
+    readonly alphas: readonly number[];
+  }
+
+  /**
+   * Reads one value's compiled entry.
+   *
+   * @param value Tile value.
+   * @param themeId Palette to read.
+   * @returns The entry, or `null` where the sheet emits no rule for it.
+   */
+  const compiledEntry = (
+    value: number,
+    themeId: ThemeId,
+  ): CompiledEntry | null => {
+    const body = topLevelRule(rampSelector(value, themeId));
+
+    if (body === null) {
+      return null;
+    }
+
+    return {
+      fill: declaredColor(body, 'tile-fill-compiled'),
+      numeral: declaredColor(body, 'tile-numeral-compiled'),
+      shadow: declaredShadow(body),
+      alphas: declaredAlphas(body),
+    };
+  };
+
+  /**
+   * Every way one value's compiled entry departs from a theme, as sentences.
+   *
+   * Returned as a list rather than asserted inside, so the same comparison can
+   * be run against a deliberately wrong theme to prove it has teeth.
+   *
+   * @param value Tile value.
+   * @param themeId Palette to compare under.
+   * @param theme Theme to hold the compiled entry against.
+   * @returns One sentence per difference, empty where the two agree.
+   */
+  const differences = (
+    value: number,
+    themeId: ThemeId,
+    theme: TileTheme,
+  ): readonly string[] => {
+    const entry = compiledEntry(value, themeId);
+    const where = `${themeId} tile-${rampClass(value)}`;
+
+    if (entry === null) {
+      return [`${where}: the compiled sheet emits no rule`];
+    }
+
+    const found: string[] = [];
+
+    if (entry.fill !== theme.colorHex) {
+      found.push(
+        `${where}: fill ${String(entry.fill)} against ${theme.colorHex}`,
+      );
+    }
+
+    // The default palette emits a numeral colour only where the bright flag is
+    // set, inheriting otherwise; `palette-ramp` emits one for every value.
+    if (entry.numeral === null) {
+      if (theme.isBright) {
+        found.push(`${where}: no numeral colour, expected ${theme.numeralColor}`);
+      }
+    } else if (entry.numeral !== theme.numeralColor.toLowerCase()) {
+      found.push(
+        `${where}: numeral ${entry.numeral} against ${theme.numeralColor}`,
+      );
+    }
+
+    // Suppressed means the rule carries no shadow at all — `main.scss` emits
+    // nothing and `ramp-shadow` returns `none`. That is a different state from
+    // an alpha of zero, which values 2 and 4 do emit.
+    if (theme.glowSuppressed) {
+      if (entry.shadow !== null && entry.shadow !== 'none') {
+        found.push(`${where}: a suppressed glow declares ${entry.shadow}`);
+      }
+
+      return found;
+    }
+
+    if (entry.alphas.length !== 2) {
+      found.push(
+        `${where}: ${String(entry.alphas.length)} shadow alphas, expected 2`,
+      );
+
+      return found;
+    }
+
+    const [halo, inset] = entry.alphas as readonly [number, number];
+
+    if (Math.abs(halo - theme.haloAlpha) > ALPHA_TOLERANCE) {
+      found.push(
+        `${where}: halo ${String(halo)} against ${String(theme.haloAlpha)}`,
+      );
+    }
+
+    if (Math.abs(inset - theme.insetAlpha) > ALPHA_TOLERANCE) {
+      found.push(
+        `${where}: inset ${String(inset)} against ${String(theme.insetAlpha)}`,
+      );
+    }
+
+    return found;
+  };
+
+  /**
+   * The theme one palette resolves for one value.
+   *
+   * @param value Tile value.
+   * @param themeId Palette to resolve under.
+   * @returns The theme.
+   */
+  const themeFor = (value: number, themeId: ThemeId): TileTheme =>
+    themeId === DEFAULT_THEME_ID
+      ? getTileTheme(value)
+      : resolveTileTheme(value, themeId);
+
+  it('reads a rule for every value under every palette, and enough of them',
+    () => {
+      // Anti-vacuity, first: every assertion below compares what was extracted,
+      // so an extractor that found nothing would agree with anything.
+      const missing: string[] = [];
+
+      for (const themeId of themeIds) {
+        for (const value of ALL_VALUES) {
+          const entry = compiledEntry(value, themeId);
+
+          if (entry === null || entry.fill === null) {
+            missing.push(rampSelector(value, themeId));
+          }
+        }
+      }
+
+      expect(missing).toEqual([]);
+      expect(ALL_VALUES).toHaveLength(tileRampConstants.limit + 1);
+      expect(themeIds.length).toBeGreaterThan(1);
+      expect(mobileBlocks.length).toBeGreaterThan(0);
+    });
+
+  for (const themeId of themeIds) {
+    it(`matches every fill, numeral and glow under the ${themeId} palette`,
+      () => {
+        const found = ALL_VALUES.flatMap((value): readonly string[] =>
+          differences(value, themeId, themeFor(value, themeId)),
+        );
+
+        // The whole comparison in one assertion, so a failure names every
+        // value that moved rather than stopping at the first.
+        expect(found).toEqual([]);
+      });
+  }
+
+  it('matches the numeral size at both scales', () => {
+    const found: string[] = [];
+
+    for (const value of ALL_VALUES) {
+      const theme = getTileTheme(value);
+      const selector = rampSelector(value, DEFAULT_THEME_ID);
+      const desktopBody = topLevelRule(selector);
+      const mobileBody = mobileRule(selector);
+
+      // The ramp emits a size only where it departs from the `.tile-inner`
+      // default, so an absent declaration means the default is in force.
+      const desktop =
+        desktopBody === null ? null : declaredNumeralSize(desktopBody);
+      const mobile =
+        mobileBody === null ? null : declaredNumeralSize(mobileBody);
+      const desktopExpected =
+        desktop === null ? tileFontSize(RAMP_VALUES[0] ?? 2, 'desktop') : theme.fontSize;
+      const mobileExpected =
+        mobile === null ? tileFontSize(RAMP_VALUES[0] ?? 2, 'mobile') : theme.fontSizeMobile;
+
+      if ((desktop ?? desktopExpected) !== theme.fontSize) {
+        found.push(
+          `tile-${rampClass(value)}: desktop ${String(desktop)} against ` +
+            `${String(theme.fontSize)}`,
+        );
+      }
+
+      if ((mobile ?? mobileExpected) !== theme.fontSizeMobile) {
+        found.push(
+          `tile-${rampClass(value)}: mobile ${String(mobile)} against ` +
+            `${String(theme.fontSizeMobile)}`,
+        );
+      }
+    }
+
+    expect(found).toEqual([]);
+
+    // And the breakpoint really does restate the sizes, so the mobile half of
+    // the assertion above is not passing on six absent rules.
+    const restated = ALL_VALUES.filter(
+      (value): boolean =>
+        mobileRule(rampSelector(value, DEFAULT_THEME_ID)) !== null,
+    );
+
+    expect(restated.length).toBeGreaterThan(0);
+  });
+
+  it('reports a difference when either side moves, so it is not vacuous', () => {
+    // The comparison is exercised against a theme that is wrong on purpose, one
+    // property at a time. A gate that cannot fail proves nothing, and this is
+    // the only way to show that this one can without breaking the tree.
+    const value = RAMP_VALUES[RAMP_VALUES.length - 1] ?? 2048;
+    const real = getTileTheme(value);
+
+    expect(differences(value, DEFAULT_THEME_ID, real)).toEqual([]);
+
+    const shifted: TileTheme = { ...real, colorHex: '#000000' };
+    const unlit: TileTheme = {
+      ...real,
+      haloAlpha: real.haloAlpha / 2,
+      insetAlpha: real.insetAlpha / 2,
+    };
+    const suppressed: TileTheme = { ...real, glowSuppressed: true };
+    const dimmed: TileTheme = { ...real, isBright: false, numeralColor: '#000000' };
+
+    expect(differences(value, DEFAULT_THEME_ID, shifted)).not.toEqual([]);
+    expect(differences(value, DEFAULT_THEME_ID, unlit)).not.toEqual([]);
+    expect(differences(value, DEFAULT_THEME_ID, suppressed)).not.toEqual([]);
+    expect(differences(value, DEFAULT_THEME_ID, dimmed)).not.toEqual([]);
+  });
+
+  it('is keyed by tile value alone, so no board size can change it', () => {
+    // The clause "across every board size" resolves structurally rather than by
+    // a second compile: `$grid-row-cells` cannot be moved through the token
+    // projection, because `_resolve-token()` of style/_tokens.scss raises an
+    // `@error` when a projected token disagrees with its fallback — the
+    // bidirectional token guard. What can be shown, and is stronger, is that
+    // board size reaches neither side of the ramp.
+    //
+    // On the stylesheet side the two generated families are disjoint: the ramp
+    // loop emits one rule per VALUE and the position loop emits one per CELL.
+    const rampRules = [
+      ...compiled.matchAll(/^\.tile\.tile-([\w-]+) \.tile-inner \{/gmu),
+    ].map((match): string => match[1] ?? '');
+    const positionRules = [
+      ...compiled.matchAll(/^\.tile\.tile-position-(\d+)-(\d+) \{/gmu),
+    ];
+
+    expect(new Set(rampRules)).toEqual(
+      new Set(ALL_VALUES.map((value): string => rampClass(value))),
+    );
+    expect(positionRules).toHaveLength(gridRowCells * gridRowCells);
+    expect(
+      rampRules.filter((key): boolean => key.startsWith('position-')),
+    ).toEqual([]);
+
+    // On the module side the ramp reads no board-size token at all, so there is
+    // no path by which one could enter it.
+    const source = read('src/theme/tile-ramp.ts');
+
+    expect(source).not.toContain('gridRowCells');
+    expect(source).not.toContain('boardSize');
+    expect(source).not.toContain('grid-row-cells');
   });
 });

@@ -1,4 +1,5 @@
-// Contract suite for the executive deck's security premises.
+// Contract suite for the executive deck: the premises its pinned-Mermaid
+// exception rests on, and the presentational shape its governing rule fixes.
 //
 // blitzy-deck/executive-summary.html loads three pinned libraries from a CDN and
 // draws five Mermaid figures. `DL-DOC-09` keeps the pinned Mermaid release the
@@ -29,8 +30,18 @@
 // script text is read as text, because what is asserted of it is the ABSENCE of
 // constructs, which a parser cannot report.
 //
-// Decisions behind this file are recorded in docs/DECISION_LOG.md, DL-TEST-18.
-// The premises it holds are DL-DOC-09's.
+// The second half holds the artifact's SHAPE rather than its premises: the
+// section count and the slide types, one non-text visual per slide, the bullet
+// and body-copy caps, the codepoint ceiling that stands in for the emoji ban,
+// the absence of a fenced code block, the theme's custom-property and component
+// class sets, the three typefaces with their weights, the reveal.js
+// configuration literal, and the two paint calls reached from the handler bound
+// to both reveal.js events. Words are counted over body copy alone, and the
+// paint calls are found by walking the handler's own call chain.
+//
+// Decisions behind this file are recorded in docs/DECISION_LOG.md, DL-TEST-18
+// and DL-DOC-14. The premises it holds are DL-DOC-09's; the budget it holds is
+// DL-DOC-12's.
 
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -393,5 +404,443 @@ describe('DL-DOC-09 states the deck it grants an exception to', () => {
     // stands. A row that said neither would read as compliance.
     expect(exceptionRow).toContain('DEVIATION');
     expect(exceptionRow).toContain('RESOLVED');
+  });
+});
+
+/* ==========================================================================
+ * 5. The presentational shape the executive-presentation rule fixes
+ * ========================================================================== */
+
+// The rule fixes more than the deck's security posture: it fixes its SHAPE —
+// how many slides there are, which four types they may be, that no slide is
+// text alone, how much body copy a content slide may carry, that icons are
+// Lucide SVG and never emoji, that no slide holds a fenced code block, and the
+// exact token block, component vocabulary, font weights and reveal.js
+// configuration the Blitzy identity is made of.
+//
+// Every one of those is a property of this one file, and none of them had a
+// gate: the deck satisfied all of them and nothing would have noticed if an
+// edit stopped. That is the whole reason this section exists — not a defect
+// found, but a shape held. Decision DL-DOC-14.
+
+/** Every slide, in document order. */
+const slides = [...document_.querySelectorAll('.slides > section')];
+
+/** The class the rule gives each of its four slide types. */
+const SLIDE_TYPES = Object.freeze({
+  title: 'slide-title',
+  divider: 'slide-divider',
+  closing: 'slide-closing',
+});
+
+/** Fewest and most `<section>` elements the rule admits. */
+const SECTION_RANGE = Object.freeze({ least: 12, most: 18 });
+
+/** Most bullets one slide may carry. */
+const MAX_BULLETS = 4;
+
+/**
+ * Most words of BODY COPY one slide may carry.
+ *
+ * Body copy is what the reader is asked to read: the bullets, the body
+ * paragraphs, the step bodies and the KPI notes. It is not every token on the
+ * slide — a heading, an eyebrow, a KPI figure, a step title, a diagram's own
+ * source, a figure legend and a caption are all excluded, because a cap that
+ * counted diagram source would be a cap on the diagrams.
+ */
+const MAX_BODY_WORDS = 40;
+
+/** The selectors body copy is read from. */
+const BODY_COPY_SELECTORS: readonly string[] = Object.freeze([
+  'li',
+  'p.step-body',
+  'p.kpi-note',
+]);
+
+/**
+ * The words of one slide's body copy.
+ *
+ * @param slide Slide to read.
+ * @returns Every word, in document order.
+ */
+const bodyWords = (slide: Element): readonly string[] => {
+  const collected: string[] = [];
+
+  for (const selector of BODY_COPY_SELECTORS) {
+    for (const node of slide.querySelectorAll(selector)) {
+      collected.push(...(node.textContent ?? '').split(/\s+/u).filter(Boolean));
+    }
+  }
+
+  // A bare `<p>` inside a slide head or beside a figure is body copy too, and
+  // it carries no class of its own, so it is collected by exclusion.
+  for (const node of slide.querySelectorAll('p')) {
+    if (node.className.length > 0) {
+      continue;
+    }
+
+    collected.push(...(node.textContent ?? '').split(/\s+/u).filter(Boolean));
+  }
+
+  return collected;
+};
+
+/** What counts as a non-text visual, as the rule's own vocabulary names them. */
+const VISUAL_SELECTORS: readonly string[] = Object.freeze([
+  'pre.mermaid',
+  '[data-lucide]',
+  '.kpi-card',
+  '.styled-table',
+  '.accent-bar',
+  'svg',
+  'img',
+]);
+
+/**
+ * The class the theme styles for every component the deck composes from.
+ *
+ * Enumerated here rather than read out of the file, so a class dropped from
+ * the markup or from the theme is a failure instead of a smaller list.
+ */
+const COMPONENT_CLASSES: readonly string[] = Object.freeze([
+  'accent-bar',
+  'brand-lockup',
+  'eyebrow',
+  'hero-icon',
+  'icon-row',
+  'kpi-card',
+  'kpi-grid',
+  'kpi-icon',
+  'kpi-label',
+  'kpi-value',
+  'styled-table',
+]);
+
+/** Every custom property the inlined Blitzy theme declares on `:root`. */
+const ROOT_PROPERTIES: readonly string[] = Object.freeze([
+  '--blitzy-primary',
+  '--blitzy-primary-dark',
+  '--blitzy-primary-navy',
+  '--blitzy-primary-light',
+  '--blitzy-primary-deep',
+  '--blitzy-accent-teal',
+  '--blitzy-surface-0',
+  '--blitzy-surface-1',
+  '--blitzy-surface-2',
+  '--blitzy-surface-3',
+  '--blitzy-border',
+  '--blitzy-border-soft',
+  '--blitzy-text',
+  '--blitzy-text-muted',
+  '--blitzy-text-invert',
+  '--ff-body',
+  '--ff-display',
+  '--ff-mono',
+  '--gradient-hero',
+  '--gradient-divider',
+  '--gradient-accent-bar',
+]);
+
+/** The `:root` block of the inlined theme, declarations only. */
+const rootBlock = ((): string => {
+  const opensAt = deck.indexOf(':root {');
+
+  expect(opensAt).toBeGreaterThan(-1);
+
+  const closesAt = deck.indexOf('}', opensAt);
+
+  expect(closesAt).toBeGreaterThan(opensAt);
+
+  return deck.slice(opensAt, closesAt);
+})();
+
+/**
+ * The object literal the deck passes to `Reveal.initialize`.
+ *
+ * Sliced out of the script for the reason `initializerArgument` is: the
+ * comments around the call name its options, and an assertion made against the
+ * whole script would be satisfied by the prose.
+ */
+const revealArgument = ((): string => {
+  const opensAt = inlineScript.indexOf('Reveal.initialize({');
+
+  expect(opensAt).toBeGreaterThan(-1);
+
+  const from = inlineScript.indexOf('{', opensAt);
+  const to = inlineScript.indexOf('});', from);
+
+  expect(to).toBeGreaterThan(from);
+
+  return inlineScript.slice(from, to);
+})();
+
+/**
+ * One function body of the deck's script, by name.
+ *
+ * Read by brace counting from the declaration, so a nested block does not end
+ * the body early.
+ *
+ * @param name Function to find.
+ * @returns The body, or `null` where the script declares no such function.
+ */
+const functionBody = (name: string): string | null => {
+  const declaration = `function ${name}(`;
+  const at = inlineScript.indexOf(declaration);
+
+  if (at === -1) {
+    return null;
+  }
+
+  const opensAt = inlineScript.indexOf('{', at);
+
+  if (opensAt === -1) {
+    return null;
+  }
+
+  let depth = 0;
+  let index = opensAt;
+
+  do {
+    const character = inlineScript[index];
+
+    if (character === '{') {
+      depth += 1;
+    } else if (character === '}') {
+      depth -= 1;
+    }
+
+    index += 1;
+  } while (depth > 0 && index < inlineScript.length);
+
+  return inlineScript.slice(opensAt + 1, index - 1);
+};
+
+/**
+ * Every function reachable from one, following declared names.
+ *
+ * @param entry Function to start from.
+ * @returns The bodies reached, the entry's own included.
+ */
+const reachableFrom = (entry: string): readonly string[] => {
+  const declared = [
+    ...inlineScript.matchAll(/function\s+(\w+)\s*\(/gu),
+  ].map((match): string => match[1] ?? '');
+  const seen = new Set<string>();
+  const bodies: string[] = [];
+  const pending = [entry];
+
+  while (pending.length > 0) {
+    const name = pending.pop() ?? '';
+
+    if (seen.has(name)) {
+      continue;
+    }
+
+    seen.add(name);
+
+    const body = functionBody(name);
+
+    if (body === null) {
+      continue;
+    }
+
+    bodies.push(body);
+
+    for (const candidate of declared) {
+      if (!seen.has(candidate) && body.includes(candidate)) {
+        pending.push(candidate);
+      }
+    }
+  }
+
+  return bodies;
+};
+
+describe('the executive deck keeps the shape the rule fixes', () => {
+  it('holds a slide count inside the range the rule admits', () => {
+    expect(slides.length).toBeGreaterThanOrEqual(SECTION_RANGE.least);
+    expect(slides.length).toBeLessThanOrEqual(SECTION_RANGE.most);
+
+    // Every `<section>` in the document is a slide of the deck: a nested
+    // section would be a vertical stack, which this deck does not use.
+    expect([...document_.querySelectorAll('section')]).toHaveLength(
+      slides.length,
+    );
+  });
+
+  it('opens on the title slide, closes on the closing slide, and divides', () => {
+    const typeOf = (slide: Element): string =>
+      slide.className.trim().length === 0 ? 'content' : slide.className.trim();
+
+    const types = slides.map(typeOf);
+
+    expect(types[0]).toBe(SLIDE_TYPES.title);
+    expect(types[types.length - 1]).toBe(SLIDE_TYPES.closing);
+    expect(types.filter((type): boolean => type === SLIDE_TYPES.title))
+      .toHaveLength(1);
+    expect(types.filter((type): boolean => type === SLIDE_TYPES.closing))
+      .toHaveLength(1);
+    expect(
+      types.filter((type): boolean => type === SLIDE_TYPES.divider).length,
+    ).toBeGreaterThan(0);
+
+    // Every remaining slide is a content slide, so no slide carries a type the
+    // rule does not name.
+    const named: readonly string[] = [
+      'content',
+      SLIDE_TYPES.title,
+      SLIDE_TYPES.divider,
+      SLIDE_TYPES.closing,
+    ];
+
+    expect(types.filter((type): boolean => !named.includes(type))).toEqual([]);
+  });
+
+  it('carries at least one non-text visual on every slide', () => {
+    const textOnly = slides
+      .map((slide, index): string =>
+        VISUAL_SELECTORS.some(
+          (selector): boolean => slide.querySelector(selector) !== null,
+        )
+          ? ''
+          : `slide ${String(index + 1)}`,
+      )
+      .filter((entry): boolean => entry.length > 0);
+
+    expect(textOnly).toEqual([]);
+  });
+
+  it('keeps every slide inside the bullet and body-copy caps', () => {
+    const over: string[] = [];
+
+    for (const [index, slide] of slides.entries()) {
+      const bullets = [...slide.querySelectorAll('li')].length;
+      const words = bodyWords(slide).length;
+
+      if (bullets > MAX_BULLETS) {
+        over.push(`slide ${String(index + 1)}: ${String(bullets)} bullets`);
+      }
+
+      if (words > MAX_BODY_WORDS) {
+        over.push(`slide ${String(index + 1)}: ${String(words)} body words`);
+      }
+    }
+
+    expect(over).toEqual([]);
+
+    // And the reading is not empty: a body-copy extractor that found nothing
+    // would satisfy the cap on every slide.
+    expect(
+      slides.filter((slide): boolean => bodyWords(slide).length > 0).length,
+    ).toBeGreaterThan(0);
+  });
+
+  it('draws every icon as Lucide SVG and carries no emoji', () => {
+    // The rule allows Lucide icons and no emoji at all. Read as CODEPOINTS
+    // rather than against a list of pictographs: every emoji block sits above
+    // U+2100, and the deck's own typography — the em dash — sits below it.
+    const above = [...deck].filter(
+      (character): boolean => character.codePointAt(0) !== undefined &&
+        (character.codePointAt(0) ?? 0) > 0x2100,
+    );
+
+    expect(above).toEqual([]);
+    expect([...document_.querySelectorAll('[data-lucide]')].length)
+      .toBeGreaterThan(0);
+  });
+
+  it('holds no fenced code block, and every `<pre>` is a figure host', () => {
+    expect(deck).not.toContain('```');
+
+    const hosts = [...document_.querySelectorAll('pre')];
+
+    expect(hosts.length).toBeGreaterThan(0);
+    expect(
+      hosts.filter((host): boolean => !host.classList.contains('mermaid')),
+    ).toEqual([]);
+  });
+
+  it('declares every custom property of the inlined theme', () => {
+    const missing = ROOT_PROPERTIES.filter(
+      (property): boolean => !rootBlock.includes(`${property}:`),
+    );
+
+    expect(missing).toEqual([]);
+
+    // The block declares these and nothing else, so a property added to the
+    // theme without joining this list is a failure rather than a silent extra.
+    const declared = [...rootBlock.matchAll(/(--[a-z0-9-]+):/gu)].map(
+      (match): string => match[1] ?? '',
+    );
+
+    expect(declared.sort()).toEqual([...ROOT_PROPERTIES].sort());
+  });
+
+  it('styles and uses every component class', () => {
+    const unstyled = COMPONENT_CLASSES.filter(
+      (name): boolean => !deck.includes(`.${name} {`),
+    );
+    const unused = COMPONENT_CLASSES.filter(
+      (name): boolean => document_.querySelector(`.${name}`) === null,
+    );
+
+    expect(unstyled).toEqual([]);
+    expect(unused).toEqual([]);
+  });
+
+  it('loads the three typefaces at the weights the type system uses', () => {
+    const fonts = [...document_.querySelectorAll('link[href]')]
+      .map((node): string => node.getAttribute('href') ?? '')
+      .find((href): boolean => href.includes('fonts.googleapis.com/css2'));
+
+    expect(fonts).toBeDefined();
+    expect(fonts).toContain('family=Fira+Code:wght@400;500');
+    expect(fonts).toContain('family=Inter:wght@400;500;600;700');
+    expect(fonts).toContain('family=Space+Grotesk:wght@500;600;700');
+    expect(fonts).toContain('display=swap');
+
+    // And the three families are the ones the token block names.
+    expect(rootBlock).toContain("--ff-body: 'Inter'");
+    expect(rootBlock).toContain("--ff-display: 'Space Grotesk'");
+    expect(rootBlock).toContain("--ff-mono: 'Fira Code'");
+  });
+
+  it('initialises reveal.js with the configuration the rule states', () => {
+    expect(revealArgument).toMatch(/hash:\s*true/u);
+    expect(revealArgument).toMatch(/transition:\s*'slide'/u);
+    expect(revealArgument).toMatch(/controlsTutorial:\s*false/u);
+    expect(revealArgument).toMatch(/width:\s*1920/u);
+    expect(revealArgument).toMatch(/height:\s*1080/u);
+
+    // Read from the argument and not from the script, so a comment quoting
+    // these options cannot satisfy the assertion.
+    expect(revealArgument).not.toContain('//');
+  });
+
+  it('paints the figures and the icons on both reveal.js events', () => {
+    const bindings = [
+      ...inlineScript.matchAll(/Reveal\.on\(\s*'(\w+)'\s*,\s*(\w+)\s*\)/gu),
+    ].map((match): readonly [string, string] => [
+      match[1] ?? '',
+      match[2] ?? '',
+    ]);
+    const events = bindings.map(([event]): string => event);
+
+    expect(events).toContain('ready');
+    expect(events).toContain('slidechanged');
+
+    const handlers = new Set(bindings.map(([, handler]): string => handler));
+
+    // One handler for both events, so neither can drift from the other.
+    expect(handlers.size).toBe(1);
+
+    const handler = [...handlers][0] ?? '';
+    const reached = reachableFrom(handler).join('\n');
+
+    // Following the handler's own chain rather than searching the script:
+    // the deck defers a frame before painting, so neither call sits in the
+    // bound function itself.
+    expect(reached).toContain('lucide.createIcons()');
+    expect(reached).toContain('mermaid.run(');
   });
 });

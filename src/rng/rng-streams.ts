@@ -81,6 +81,13 @@ function reportStreamRejection(
   try {
     sink(rejection);
   } catch {
+    // A faulty sink is contained here and is not reported back through itself,
+    // which is the containment `reportRejection` of src/rng/seeded-rng.ts
+    // states for the same sink. Nothing determinism-relevant is swallowed: the
+    // three callers report a REFUSED seed or cursor and each then returns its
+    // own verdict — `normaliseCursor` returns `0` and `createRngStreams`
+    // raises a `RangeError` — so the substreams are built, and the draw
+    // sequence is fixed, whether or not this notification arrives.
   }
 }
 

@@ -7,7 +7,10 @@
  *
  * The generative function is ported; the twelve compiled rows are not restated
  * as a table in this module, and are the expected values of the
- * ramp-comparison test instead.
+ * ramp-comparison test instead. That test is the ramp group of
+ * tests/unit/quality/stylesheet-contract.test.ts, which compiles the stylesheet
+ * and holds its custom properties against `computeTileTheme` for every value
+ * under every palette. Decision DL-TEST-21.
  *
  * The two glow alphas are emitted without a glow colour: the halo and inset
  * colours are palette entries, published as `--theme-tile-glow` and

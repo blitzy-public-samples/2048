@@ -27,6 +27,9 @@
     "test:e2e": "playwright test --config playwright.config.ts",
     "e2e:install": "playwright install --with-deps chromium"
   },
+  "overrides": {
+    "nanoid": "3.3.18"
+  },
   "dependencies": {
     "three": "0.185.1"
   },

@@ -332,11 +332,11 @@ const POSIX_LOCATION_PATTERN =
  * How much of a caught value a record carries — of its STACK and of its
  * MESSAGE alike, and of every cause behind it.
  *
- * `'redacted'` replaces the locations of the three forms `redactLocations`
- * matches and the further forms `redactMessage` matches, leaving the frame
- * names, the shape of the stack and the wording of the message. `'full'`
- * carries both as they were thrown, for a private development sink; the export
- * surfaces redact regardless.
+ * `'redacted'` replaces every form `redactMessage` matches — the three
+ * locations of `redactLocations` plus the three further forms — in the message
+ * and in the stack alike, leaving the frame names, the shape of the stack and
+ * the wording of the message. `'full'` carries both as they were thrown, for a
+ * private development sink; the export surfaces redact regardless.
  *
  * Named for the caught value rather than for the stack because it governs the
  * message too: a mode called after the stack alone invited a caller to select
@@ -355,9 +355,10 @@ export const DEFAULT_ERROR_DETAIL: ErrorDetail = 'redacted';
  *
  * What it is NOT is a general guarantee that no location survives. A bare file
  * name and a single-segment path match none of the three and are copied as they
- * stand, and a location a caller puts in a FIELD is untouched. A location in a
- * MESSAGE is covered, through `redactMessage` below, which applies this and
- * three further forms. Decisions DL-LOG-08, DL-LOG-10.
+ * stand, and a location a caller puts in a FIELD is untouched. A MESSAGE and a
+ * STACK are both covered through `redactMessage` below, which applies this and
+ * three further forms; this function is the location-only half and is called by
+ * that one. Decisions DL-LOG-08, DL-LOG-10, DL-LOG-11.
  *
  * @param text Text to redact.
  * @returns The text with every location of those three forms replaced.
@@ -380,9 +381,22 @@ const REDACTED_VALUE = REDACTED_LOCATION;
 /**
  * A `data:` URI, which carries its payload inline and matches no scheme pattern
  * above because it has no authority component.
+ *
+ * The three parts, in order. The MEDIA TYPE class carries `/` and `%`, so a
+ * conventional `type/subtype` — and a percent-escape inside one — is spanned
+ * rather than stopping the match at the slash before the required comma is
+ * reached. The PARAMETER group `(?:;[a-z0-9-]+=?[^\s,;]*)*` takes each
+ * `;name=value` in turn, and its value class excludes `;` as well as a comma
+ * and whitespace, so each repetition begins at a distinct semicolon. The
+ * PAYLOAD class `[^\s)'"]*` ends the match at whitespace, a closing bracket or
+ * a quote, which is what keeps the rest of a sentence the URI sits inside.
+ *
+ * Bounds it does NOT have: a media type is spanned by shape rather than
+ * validated, and a payload holding a quote or a space is redacted only as far
+ * as that character. Decisions DL-LOG-10, DL-LOG-11.
  */
 const DATA_URI_PATTERN =
-  /\bdata:[a-z0-9!#$&^_.+-]*(?:;[a-z0-9-]+=?[^\s,]*)*,[^\s)'"]*/gi;
+  /\bdata:[a-z0-9!#$&^_.+/%-]*(?:;[a-z0-9-]+=?[^\s,;]*)*,[^\s)'"]*/gi;
 
 /** The seven key words a credential-like assignment is recognised by. */
 const CREDENTIAL_KEY_WORDS = 'token|key|secret|password|passwd|auth|session';
@@ -512,11 +526,13 @@ export interface SerializedError {
   readonly message: string;
 
   /**
-   * The value's own `stack`, absent when it carries none. Every location of
-   * the three forms `redactLocations` matches is replaced with
-   * `REDACTED_LOCATION` unless the record was built by a logger carrying
-   * `errorDetail: 'full'`, and the export surfaces redact in either case. The
-   * `message` above is redacted on the same mode, by `redactMessage`.
+   * The value's own `stack`, absent when it carries none. Every form
+   * `redactMessage` matches — the three locations of `redactLocations` plus the
+   * three further forms — is replaced with `REDACTED_LOCATION` unless the
+   * record was built by a logger carrying `errorDetail: 'full'`, and the export
+   * surfaces redact in either case. The `message` above is redacted the same
+   * way, which is what keeps the header line of this stack from carrying a
+   * payload the message beside it no longer does.
    */
   readonly stack?: string;
 
@@ -609,8 +625,15 @@ function buildSerializedError(
   };
 
   if (stack !== undefined) {
+    // THE STACK TAKES THE SAME REDACTION THE MESSAGE DOES, not the narrower
+    // location-only pass. A stack's first line is the thrown value's own
+    // `<name>: <message>` header, so a payload the message redaction above
+    // removes is carried a second time inside the stack beside it — and the
+    // stack reaches the ring buffer and the diagnostics export exactly as the
+    // message does. `redactMessage` applies `redactLocations` first, so every
+    // frame location is still replaced. DL-LOG-10, DL-LOG-11.
     const resolved =
-      errorDetail === 'full' ? stack : redactLocations(stack);
+      errorDetail === 'full' ? stack : redactMessage(stack);
 
     record.stack = clamp(resolved, MAX_ERROR_STACK_LENGTH);
   }
@@ -948,8 +971,7 @@ export interface LoggerOptions {
    * message as well as its stack. Defaults to `DEFAULT_ERROR_DETAIL`, which is
    * `'redacted'`; only the exact value `'full'` selects the unredacted form,
    * and it is for a private development sink. `toJsonLines()` and `snapshot()`
-   * redact in either case, to the extent `redactLocations` and `redactMessage`
-   * cover.
+   * redact in either case, to the extent `redactMessage` covers.
    */
   readonly errorDetail?: ErrorDetail;
 }
@@ -1508,9 +1530,8 @@ function stripStack(error: SerializedError): SerializedError {
 }
 
 /**
- * Rebuilds a serialised error with every form `redactLocations` covers replaced
- * in its stack and every form `redactMessage` covers replaced in its message,
- * and the same in every cause behind it.
+ * Rebuilds a serialised error with every form `redactMessage` covers replaced
+ * in its message AND in its stack, and the same in every cause behind it.
  *
  * @param error Error to redact.
  * @returns The error itself where it carries nothing to replace, and a frozen
@@ -1522,7 +1543,7 @@ function redactSerializedError(error: SerializedError): SerializedError {
       ? undefined
       : redactSerializedError(error.cause);
   const stack =
-    error.stack === undefined ? undefined : redactLocations(error.stack);
+    error.stack === undefined ? undefined : redactMessage(error.stack);
   const message = redactMessage(error.message);
 
   if (
@@ -1555,10 +1576,9 @@ function redactSerializedError(error: SerializedError): SerializedError {
  * Redacts the reported error of one record for an export surface.
  *
  * Applied by `toJsonLines()` and by `snapshot()` whatever the logger's
- * `errorDetail` is, so an export carries no location of the three forms
- * `redactLocations` covers and no form `redactMessage` covers, even where the
- * sinks were given the value as it was thrown. A form outside those is not
- * removed here either.
+ * `errorDetail` is, so an export carries no form `redactMessage` covers in
+ * either the message or the stack, even where the sinks were given the value as
+ * it was thrown. A form outside those is not removed here either.
  *
  * @param record Record to redact.
  * @returns The record itself where it carries no location to replace, and a
